@@ -3,14 +3,22 @@
 Every comparison is against the Elo expected score of each game, never a raw 50%:
 
 * overall and per time control (each time control has its own rating pool, so each
-  row is judged against its own expectation);
+  row is judged against its own expectation; a time control is only called your
+  best or weakest when it differs significantly from your other time controls);
 * White vs Black, allowing for the edge White normally has;
 * opponent-strength buckets, judged against the rating-noise-attenuated
-  expectation (``stats.attenuated_expected``);
-* the rating history, the recent rating trend and chess.com Game Review accuracies.
+  expectation (``stats.attenuated_expected``); a claim must hold for every
+  attenuation in ``stats.ATTENUATION_RANGE``, i.e. against both the attenuated and
+  the plain Elo expectation;
+* the rating history, the recent rating trend (an observation: a rating random walk
+  is not evidence of a strength) and chess.com Game Review accuracies.
 
-``summarize`` / ``ScoreSummary`` and the small formatting helpers are reused by
-``analysis/openings.py``.
+Claims follow the project-wide rule ``stats.significance``: colour at ``stats.ALPHA``,
+opponent strength and time controls (exploratory scans) at ``stats.STRICT_ALPHA``.
+
+``summarize`` / ``ScoreSummary`` / ``difference_test`` / ``with_p_value`` now live in
+``stats`` and are re-exported here, with the small formatting helpers reused by the
+other analysis modules.
 """
 
 from __future__ import annotations
@@ -24,19 +32,23 @@ from typing import Any, Iterable, Optional, Sequence
 
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Table
-from ..stats import (
+from ..stats import (  # noqa: F401  (ScoreSummary, summarize, difference_test, with_p_value: re-exported)
+    ALPHA,
+    ATTENUATION_RANGE,
+    STRICT_ALPHA,
+    WHITE_EDGE,
     MeanTest,
-    attenuated_expected,
+    ScoreSummary,
     bh_adjust,
     clamp,
-    combined_confidence,
-    mean_test,
-    normal_cdf,
+    difference_test,
     pct,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
-    shrink,
+    significance,
+    summarize,
+    with_p_value,
 )
 
 KEY = "results"
@@ -44,12 +56,8 @@ TITLE = "Results & rating"
 
 MINUS = "−"
 MAX_EXAMPLES = 5
-# At equal ratings White scores roughly 52% and Black 48% in club play, so a White-minus-Black
-# gap of about 0.04 points per game is normal and is not a colour weakness.
-WHITE_EDGE = 0.04
 TREND_DAYS = 90
 TREND_FLAT = 15.0  # rating points over TREND_DAYS below which the rating counts as stable
-STRONG_TREND = 50.0  # rating points over TREND_DAYS that count as strongly improving
 MAX_RATING_KPIS = 3
 
 # (key, label) of the opponent-strength buckets, by opponent rating minus yours.
@@ -64,14 +72,15 @@ OPPONENT_BUCKETS: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class Thresholds:
-    """Minimum sample sizes and effect sizes; override with ``ctx.options["results.<name>"]``."""
+    """Minimum sample sizes, effect sizes and significance levels; override with ``ctx.options["results.<name>"]``."""
 
     min_games: int = 10  # below this the summary says there is not enough data
-    min_confidence: float = 0.4  # combined_confidence needed for a strength / weakness
+    alpha: float = ALPHA  # colour: a primary claim
+    strict_alpha: float = STRICT_ALPHA  # opponent strength, time controls: exploratory scans
     min_effect: float = 0.06  # points per game (about 40 Elo near 50%)
     min_color_games: int = 20  # rated games per colour
     min_bucket_games: int = 20  # rated games in an opponent-strength group
-    min_tc_games: int = 25  # rated games per time control for the best/worst comparison
+    min_tc_games: int = 25  # rated games per time control for the time-control comparison
     min_chart_games: int = 10  # games for a time control to get a rating-history line / delta bar
     min_trend_games: int = 15  # rated games in the last TREND_DAYS for a trend
     min_accuracy_games: int = 20  # games with a chess.com accuracy
@@ -82,84 +91,6 @@ class Thresholds:
 
 
 # --------------------------------------------------------------------------- shared helpers
-@dataclass
-class ScoreSummary:
-    """Results of a group of games, compared with the Elo expectation."""
-
-    n: int
-    wins: int
-    draws: int
-    losses: int
-    score: Optional[float]  # mean score over every game in the group
-    n_rated: int  # games with both ratings: the ones compared with the expectation
-    rated_score: Optional[float]  # mean score over the rated games
-    expected: Optional[float]  # mean expected score over the rated games
-    test: MeanTest  # mean_test(score - expected) over the rated games
-
-    @property
-    def delta(self) -> Optional[float]:
-        """Points per game above (+) or below (-) the expectation; None without rated games."""
-        return self.test.mean if self.n_rated else None
-
-    @property
-    def half_width(self) -> Optional[float]:
-        """Half-width of the 95% interval around ``delta`` (None below two rated games)."""
-        if self.n_rated < 2 or not math.isfinite(self.test.se):
-            return None
-        return 1.96 * self.test.se
-
-    @property
-    def wdl(self) -> str:
-        return f"{self.wins}/{self.draws}/{self.losses}"
-
-    def shrunk(self, prior_n: float = 10.0) -> Optional[float]:
-        """``delta`` pulled toward 0 as if ``prior_n`` extra games had been played at exactly the expectation."""
-        return shrink(self.test.mean, self.n_rated, 0.0, prior_n) if self.n_rated else None
-
-
-def summarize(games: Sequence[Game], *, attenuate: bool = False) -> ScoreSummary:
-    """W/D/L, score and score-vs-expected for ``games``.
-
-    ``attenuate`` judges against ``stats.attenuated_expected`` (opponent-strength buckets).
-    The standard error never drops below its value for a player scoring exactly as expected
-    (per-game variance e(1-e) - draw_rate/4), so a streaky small sample such as 8 wins out
-    of 9, or 8 straight losses (zero sample variance), doesn't look more certain than it is.
-    """
-    n = len(games)
-    wins = sum(1 for g in games if g.outcome == "win")
-    draws = sum(1 for g in games if g.outcome == "draw")
-    pairs: list[tuple[float, float]] = []
-    for g in games:
-        e = g.expected_score
-        if e is not None:
-            pairs.append((g.score, attenuated_expected(e) if attenuate else e))
-    n_rated = len(pairs)
-    draw_rate = sum(1 for s, _ in pairs if s == 0.5) / n_rated if n_rated else 0.0
-    null_var = sum(max(e * (1.0 - e) - draw_rate / 4.0, 0.0) for _, e in pairs)
-    min_se = max(math.sqrt(null_var) / n_rated, 1e-9) if n_rated else 1e-9
-    return ScoreSummary(
-        n=n,
-        wins=wins,
-        draws=draws,
-        losses=n - wins - draws,
-        score=sum(g.score for g in games) / n if n else None,
-        n_rated=n_rated,
-        rated_score=sum(s for s, _ in pairs) / n_rated if n_rated else None,
-        expected=sum(e for _, e in pairs) / n_rated if n_rated else None,
-        test=mean_test((s - e for s, e in pairs), min_se=min_se),
-    )
-
-
-def difference_test(a: MeanTest, b: MeanTest, offset: float = 0.0) -> MeanTest:
-    """Welch-style z-test of ``a.mean - b.mean - offset`` for two independent samples."""
-    diff = a.mean - b.mean - offset
-    if a.n < 2 or b.n < 2 or not (math.isfinite(a.se) and math.isfinite(b.se)):
-        return MeanTest(a.n + b.n, diff, float("inf"), 0.0, 1.0)
-    se = math.sqrt(a.se**2 + b.se**2)
-    z = diff / se
-    return MeanTest(a.n + b.n, diff, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
-
-
 def fmt_points(x: float) -> str:
     """'+0.07' / '−0.12' points per game (real minus sign)."""
     if round(x, 2) == 0:
@@ -183,11 +114,6 @@ def recent_urls(games: Iterable[Game], outcome: Optional[str] = None, limit: int
         (g for g in games if outcome is None or g.outcome == outcome), key=lambda g: g.end_time, reverse=True
     )
     return [g.url for g in picked if g.url][:limit]
-
-
-def with_p_value(test: MeanTest, p_value: float) -> MeanTest:
-    """Copy of ``test`` with a (multiple-testing adjusted) p-value."""
-    return dataclasses.replace(test, p_value=p_value)
 
 
 # --------------------------------------------------------------------------- rating pools
@@ -407,13 +333,13 @@ def _colour_study(colour: str, games: Sequence[Game]) -> list[str]:
 def colour_insight(
     games: Sequence[Game], white: ScoreSummary, black: ScoreSummary, th: Thresholds
 ) -> tuple[Optional[Insight], MeanTest]:
-    """White-vs-Black gap beyond the normal White edge (difference of the two mean tests)."""
+    """White-vs-Black gap beyond the normal White edge (difference of the two mean tests), at ``th.alpha``."""
     test = difference_test(white.test, black.test, offset=WHITE_EDGE)
     if white.n_rated < th.min_color_games or black.n_rated < th.min_color_games:
         return None, test
     excess = test.mean  # > 0: White does better than usual relative to Black
-    confidence = combined_confidence(test, 2 * th.min_color_games)
-    if abs(excess) < th.min_effect or confidence < th.min_confidence:
+    significant, confidence = significance(test, 2 * th.min_color_games, alpha=th.alpha)
+    if abs(excess) < th.min_effect or not significant:
         return None, test
     weaker, stronger = ("black", "white") if excess > 0 else ("white", "black")
     ws, ss = (black, white) if weaker == "black" else (white, black)
@@ -514,20 +440,33 @@ _OPPONENT_TEXT = {
 
 
 def opponent_insights(games: Sequence[Game], th: Thresholds) -> tuple[list[Insight], dict[str, Any]]:
-    """Weaker (rating_diff < -50) vs stronger (> +50) opponents, against the attenuated expectation."""
+    """Weaker (rating_diff < -50) vs stronger (> +50) opponents, robust to the unknown rating-noise attenuation.
+
+    Each group is tested against the expectation at both ends of ``ATTENUATION_RANGE`` (the
+    attenuated one and the plain Elo formula), BH-adjusted over the groups, at the strict
+    level. A claim needs both tests significant in the same direction: then it holds for any
+    attenuation in between. Otherwise the rating noise alone could explain it (with realistic
+    noise the plain Elo formula makes everyone look weak against lower-rated players, and a
+    too-strong correction makes everyone look strong against them).
+    """
     groups = {
         "lower": [g for g in games if g.rating_diff is not None and g.rating_diff < -50],
         "higher": [g for g in games if g.rating_diff is not None and g.rating_diff > 50],
     }
-    summaries = {k: summarize(v, attenuate=True) for k, v in groups.items()}
+    lo, hi = ATTENUATION_RANGE
+    summaries = {k: summarize(v, attenuate=lo) for k, v in groups.items()}
+    plain = {k: summarize(v, attenuate=hi) for k, v in groups.items()}
     tested = [k for k, s in summaries.items() if s.n_rated >= th.min_bucket_games]
     adjusted = dict(zip(tested, bh_adjust([summaries[k].test.p_value for k in tested]), strict=True))
+    adjusted_plain = dict(zip(tested, bh_adjust([plain[k].test.p_value for k in tested]), strict=True))
     out: list[Insight] = []
     for key in tested:
-        s = summaries[key]
-        test = with_p_value(s.test, adjusted[key])
-        confidence = combined_confidence(test, th.min_bucket_games)
-        if abs(s.test.mean) < th.min_effect or confidence < th.min_confidence:
+        s, r = summaries[key], plain[key]
+        sig_att, conf_att = significance(s.test, th.min_bucket_games, adjusted[key], alpha=th.strict_alpha)
+        sig_raw, conf_raw = significance(r.test, th.min_bucket_games, adjusted_plain[key], alpha=th.strict_alpha)
+        same_direction = s.test.mean * r.test.mean > 0
+        effect = min(abs(s.test.mean), abs(r.test.mean))  # the weaker of the two readings
+        if not (sig_att and sig_raw and same_direction) or effect < th.min_effect:
             continue
         kind: InsightKind = "strength" if s.test.mean > 0 else "weakness"
         title, study = _OPPONENT_TEXT[(key, kind)]
@@ -553,98 +492,133 @@ def opponent_insights(games: Sequence[Game], th: Thresholds) -> tuple[list[Insig
                 detail=(
                     f"Against opponents rated more than 50 points {side} you, you score {pct(s.rated_score)} in "
                     f"{s.n_rated} games where about {pct(s.expected)} would be normal for the rating gap "
-                    f"({fmt_points(s.test.mean)} points per game)."
+                    f"({fmt_points(s.test.mean)} points per game; {fmt_points(r.test.mean)} against the plain "
+                    f"Elo formula's {pct(r.expected)})."
                 ),
-                severity=severity_from_points(s.test.mean),
-                confidence=confidence,
-                evidence=_evidence(s, p_adjusted=adjusted[key], expected_kind="attenuated"),
+                severity=severity_from_points(effect),
+                confidence=min(conf_att, conf_raw),
+                evidence=_evidence(
+                    s,
+                    p_adjusted=adjusted[key],
+                    expected_kind="attenuated",
+                    elo_expected=r.expected,
+                    elo_delta=r.test.mean,
+                    elo_p_adjusted=adjusted_plain[key],
+                ),
                 study=[a.format(k=k) for a in study],
                 example_games=examples,
             )
         )
-    return out, {k: _evidence(s, p_adjusted=adjusted.get(k)) for k, s in summaries.items()}
+    stats = {
+        k: _evidence(s, p_adjusted=adjusted.get(k), elo_delta=plain[k].delta, elo_p_adjusted=adjusted_plain.get(k))
+        for k, s in summaries.items()
+    }
+    return out, stats
 
 
 def time_control_insights(
     by_pool: dict[str, list[Game]], summaries: dict[str, ScoreSummary], th: Thresholds
 ) -> tuple[list[Insight], dict[str, Any]]:
-    """Best vs worst time control relative to each one's own rating expectation."""
+    """Each time control vs your other time controls, relative to each one's own rating expectation.
+
+    Every pool is judged against its own rating, so each pool's score-vs-expected is near 0
+    by construction and picking the best and the worst of several noisy numbers would find a
+    "gap" in pure noise. Instead each pool is compared with all the other tested pools
+    together (a difference test), the p-values are BH-adjusted over the pools, and a claim
+    needs the strict level.
+    """
     pools = [p for p, s in summaries.items() if s.n_rated >= th.min_tc_games]
     if len(pools) < 2:
         return [], {}
     ranked = sorted(pools, key=lambda p: summaries[p].shrunk() or 0.0)
-    worst, best = ranked[0], ranked[-1]
-    b, w = summaries[best], summaries[worst]
-    test = difference_test(b.test, w.test)
-    confidence = combined_confidence(test, 2 * th.min_tc_games)
-    stats = {"best": best, "worst": worst, "gap": test.mean, "p_value": test.p_value, "confidence": confidence}
-    if test.mean < th.min_effect or confidence < th.min_confidence:
-        return [], stats
-    gap_elo = abs(score_to_elo_diff(test.mean))
-    detail = (
-        f"Measured against your own rating in each: in {best.lower()} you score {pct(b.rated_score)} where "
-        f"{pct(b.expected)} was expected ({fmt_points(b.test.mean)} points per game, {b.n_rated} games); in "
-        f"{worst.lower()} {pct(w.rated_score)} where {pct(w.expected)} was expected ({fmt_points(w.test.mean)}, "
-        f"{w.n_rated} games). The gap is worth about {gap_elo:.0f} Elo."
-    )
-    evidence = {
-        "best": _evidence(b, pool=best),
-        "worst": _evidence(w, pool=worst),
-        "gap": test.mean,
-        "p_value": test.p_value,
+    rests = {p: summarize([g for q in pools if q != p for g in by_pool[q]]) for p in pools}
+    tests = {p: difference_test(summaries[p].test, rests[p].test) for p in pools}
+    adjusted = dict(zip(pools, bh_adjust([tests[p].p_value for p in pools]), strict=True))
+    stats: dict[str, Any] = {
+        "best": ranked[-1],
+        "worst": ranked[0],
+        "tests": {
+            p: {"gap": tests[p].mean, "p_value": tests[p].p_value, "p_adjusted": adjusted[p]} for p in pools
+        },
     }
     out: list[Insight] = []
-    # each side only counts if it is itself clearly off its own expectation, not merely the better/worse of two
-    if b.test.mean >= th.min_effect / 2:
-        out.append(
-            Insight(
-                id=f"{KEY}.strength.time-control-{slugify(best)}",
-                kind="strength",
-                category="results",
-                title=f"{best} is your best time control",
-                detail=detail,
-                severity=severity_from_points(test.mean),
-                confidence=confidence,
-                evidence=evidence,
-                study=[
-                    f"Play more of your rated games at {best.lower()}: that is where your chess currently shows best.",
-                    f"Compare two {best.lower()} wins with two {worst.lower()} losses: how did you use your clock, "
-                    "and where did the losses turn?",
-                ],
-                example_games=recent_urls(by_pool[best], "win"),
-            )
+    for pool in pools:
+        s, rest, test = summaries[pool], rests[pool], tests[pool]
+        significant, confidence = significance(test, 2 * th.min_tc_games, adjusted[pool], alpha=th.strict_alpha)
+        # the pool must itself be clearly off its own expectation, not merely better/worse than the rest
+        if not significant or abs(test.mean) < th.min_effect or abs(s.test.mean) < th.min_effect / 2:
+            continue
+        if test.mean * s.test.mean <= 0:
+            continue
+        name = pool.lower()
+        gap_elo = abs(score_to_elo_diff(test.mean))
+        detail = (
+            f"Measured against your own rating in each: in {name} you score {pct(s.rated_score)} where "
+            f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game, {s.n_rated} games); in your "
+            f"other time controls {pct(rest.rated_score)} where {pct(rest.expected)} was expected "
+            f"({fmt_points(rest.test.mean)}, {rest.n_rated} games). The gap is worth about {gap_elo:.0f} Elo."
         )
-    if w.test.mean <= -th.min_effect / 2:
-        fast = by_pool[worst][0].time_class in ("bullet", "blitz")
-        study = [
-            f"Replay your last {min(MAX_EXAMPLES, w.losses) or 'few'} {worst.lower()} losses and note whether they "
-            "were lost on the clock, to a blunder, or in the opening.",
-            f"Play fewer {worst.lower()} games for a while, or treat them as practice and review every loss.",
-        ]
-        if fast:
-            study.append("Add increment (for example 3+2 instead of 3+0) so you can finish games without scrambling.")
-        out.append(
-            Insight(
-                id=f"{KEY}.weakness.time-control-{slugify(worst)}",
-                kind="weakness",
-                category="results",
-                title=f"{worst} is your weakest time control",
-                detail=detail,
-                severity=severity_from_points(test.mean),
-                confidence=confidence,
-                evidence=evidence,
-                study=study,
-                example_games=recent_urls(by_pool[worst], "loss"),
+        evidence = {
+            "pool": _evidence(s, pool=pool),
+            "rest": _evidence(rest),
+            "gap": test.mean,
+            "p_value": test.p_value,
+            "p_adjusted": adjusted[pool],
+        }
+        if test.mean > 0:
+            out.append(
+                Insight(
+                    id=f"{KEY}.strength.time-control-{slugify(pool)}",
+                    kind="strength",
+                    category="results",
+                    title=f"{pool} is your best time control",
+                    detail=detail,
+                    severity=severity_from_points(test.mean),
+                    confidence=confidence,
+                    evidence=evidence,
+                    study=[
+                        f"Play more of your rated games at {name}: that is where your chess currently shows best.",
+                        f"Compare two {name} wins with two losses from your other time controls: how did you use "
+                        "your clock, and where did the losses turn?",
+                    ],
+                    example_games=recent_urls(by_pool[pool], "win"),
+                )
             )
-        )
+        else:
+            fast = by_pool[pool][0].time_class in ("bullet", "blitz")
+            study = [
+                f"Replay your last {min(MAX_EXAMPLES, s.losses) or 'few'} {name} losses and note whether they "
+                "were lost on the clock, to a blunder, or in the opening.",
+                f"Play fewer {name} games for a while, or treat them as practice and review every loss.",
+            ]
+            if fast:
+                study.append("Add increment (for example 3+2 instead of 3+0) so you can finish games without scrambling.")
+            out.append(
+                Insight(
+                    id=f"{KEY}.weakness.time-control-{slugify(pool)}",
+                    kind="weakness",
+                    category="results",
+                    title=f"{pool} is your weakest time control",
+                    detail=detail,
+                    severity=severity_from_points(test.mean),
+                    confidence=confidence,
+                    evidence=evidence,
+                    study=study,
+                    example_games=recent_urls(by_pool[pool], "loss"),
+                )
+            )
     return out, stats
 
 
 def trend_insight(trend: Trend, th: Thresholds) -> Insight:
+    """The recent rating trend: always an observation.
+
+    A rating is a random walk around your strength (a 90-day swing of 100+ points happens
+    by chance), so a rising or falling line is not by itself evidence of a strength or a
+    weakness.
+    """
     name = trend.pool.lower()
     change = trend.change
-    confidence = combined_confidence(trend.test, th.min_trend_games)
-    strong = change >= STRONG_TREND and trend.test.mean > 0 and confidence >= th.min_confidence
     detail = (
         f"Over the last {TREND_DAYS} days ({trend.n} rated games) your {name} rating went from {trend.first} to "
         f"{trend.last}; the trend line says {fmt_signed(change)} points. In those games you scored "
@@ -676,15 +650,14 @@ def trend_insight(trend: Trend, th: Thresholds) -> Insight:
             "Spend five minutes on every loss right after the game before starting another.",
         ]
         examples = recent_urls(trend.games, "loss")
-    kind: InsightKind = "strength" if strong else "observation"
     return Insight(
-        id=f"{KEY}.{kind}.trend-{slugify(trend.pool)}",
-        kind=kind,
+        id=f"{KEY}.observation.trend-{slugify(trend.pool)}",
+        kind="observation",
         category="results",
         title=title,
         detail=detail,
-        severity=severity_from_points(trend.test.mean) if strong else clamp(abs(change) / 100.0),
-        confidence=confidence if strong else sample_confidence(trend.n),
+        severity=clamp(abs(change) / 100.0),
+        confidence=sample_confidence(trend.n),
         evidence={
             "pool": trend.pool,
             "n": trend.n,

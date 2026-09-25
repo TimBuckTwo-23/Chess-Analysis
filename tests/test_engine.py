@@ -1,9 +1,9 @@
 """engine.py: Lichess formulas, phases, Stockfish analysis of real short games, caching and workers."""
 
+import concurrent.futures
 import json
-import math
 import os
-from pathlib import Path
+from concurrent.futures.process import BrokenProcessPool
 
 import chess
 import chess.engine
@@ -250,6 +250,32 @@ def test_in_process_run_isolates_failures_restarts_and_always_closes(monkeypatch
     log.clear()
     with pytest.raises(KeyboardInterrupt):
         analyze_games([make_game(moves_san=SICILIAN)], cfg)
+    assert log == ["opened", "closed"]
+
+
+class BrokenPool:
+    """Stands in for ProcessPoolExecutor when worker processes die (or can't start)."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def submit(self, fn, *args):
+        fut = concurrent.futures.Future()
+        fut.set_exception(BrokenProcessPool("worker died"))
+        return fut
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
+
+
+def test_broken_worker_pool_falls_back_to_one_engine_in_process(monkeypatch):
+    log = []
+    monkeypatch.setattr(engine, "ProcessPoolExecutor", BrokenPool)
+    monkeypatch.setattr(engine, "open_engine", lambda cfg: (log.append("opened"), FakeEngine(log))[1])
+    monkeypatch.setattr(engine, "analyze_game", lambda game, eng, cfg: make_game_eval(game.game_id, []))
+    games = [make_game(moves_san=QUEENS_GAMBIT) for _ in range(3)]
+    res = analyze_games(games, EngineConfig(path="/not/used", workers=2))
+    assert list(res) == [g.game_id for g in games]
     assert log == ["opened", "closed"]
 
 

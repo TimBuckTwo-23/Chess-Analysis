@@ -128,7 +128,7 @@ def _is_executable(path: Path) -> bool:
 
 
 def _resolve(candidate: str) -> Optional[str]:
-    """A file path or a command name on PATH -> absolute path, or None."""
+    """A file path or a command name on PATH -> the executable's path, or None."""
     path = Path(candidate).expanduser()
     if _is_executable(path):
         return str(path)
@@ -136,7 +136,7 @@ def _resolve(candidate: str) -> Optional[str]:
 
 
 def windows_candidates(env: Optional[dict[str, str]] = None) -> list[str]:
-    """Stockfish executables in the usual Windows install / download folders (sorted, newest name last)."""
+    """Stockfish executables in the usual Windows install and download folders, in search order."""
     env = dict(os.environ) if env is None else env
     found: list[str] = []
     for var in _WINDOWS_ROOTS:
@@ -542,10 +542,8 @@ def analyze_game(game: Game, engine: chess.engine.SimpleEngine, cfg: EngineConfi
     boards, moves = replay
     limit = cfg.limit()
     session = object()  # a fresh "game" for python-chess: sends ucinewgame, so the hash starts empty
-    evals: list[Optional[_PositionEval]] = [None] * len(boards)
-    for i in reversed(range(len(boards))):  # backwards, like fishnet: later positions warm the hash
-        evals[i] = _evaluate(engine, boards[i], limit, session)
-    pos = [e for e in evals if e is not None]
+    # Backwards, like fishnet: the hash entries of later positions help the earlier searches.
+    pos = [_evaluate(engine, b, limit, session) for b in reversed(boards)][::-1]
     white_wp = [win_percent(e.cp, e.mate) for e in pos]
     phases = _phases_from_boards(boards[:-1])
     spent = _time_spent(game)
@@ -695,16 +693,16 @@ class _Analyzer:
         self.engine: Optional[chess.engine.SimpleEngine] = None
 
     def analyze(self, game: Game) -> Optional[GameEval]:
-        for attempt in (1, 2):
-            if self.engine is None:
-                self.engine = open_engine(self.cfg)
-            try:
-                return analyze_game(game, self.engine, self.cfg)
-            except chess.engine.EngineTerminatedError:
-                self.close()
-                if attempt == 2:
-                    raise
-        return None  # unreachable: the loop returns or raises
+        try:
+            return analyze_game(game, self._engine(), self.cfg)
+        except chess.engine.EngineTerminatedError:
+            self.close()  # the engine process died: start a new one and give this game one more try
+            return analyze_game(game, self._engine(), self.cfg)
+
+    def _engine(self) -> chess.engine.SimpleEngine:
+        if self.engine is None:
+            self.engine = open_engine(self.cfg)
+        return self.engine
 
     def close(self) -> None:
         if self.engine is not None:
@@ -734,42 +732,52 @@ def _worker_analyze(game: Game) -> Optional[GameEval]:
     return _WORKER["analyzer"].analyze(game)
 
 
-def _analyze_uncached(
-    games: list[Game], cfg: EngineConfig, on_result: Callable[[Game, Optional[GameEval]], None]
-) -> None:
-    """Analyse ``games`` (one in-process engine, or a pool of worker processes) and report each result."""
+OnResult = Callable[[Game, Optional[GameEval]], None]
+
+
+def _analyze_in_process(games: list[Game], cfg: EngineConfig, on_result: OnResult) -> None:
+    """One engine in this process; it is closed however the loop ends (error, KeyboardInterrupt)."""
+    analyzer = _Analyzer(cfg)
+    try:
+        for game in games:
+            try:
+                ev = analyzer.analyze(game)
+            except Exception as exc:  # noqa: BLE001 — one bad game must not stop the run
+                log.warning("engine analysis of %s failed: %s", game.game_id, exc)
+                ev = None
+            on_result(game, ev)
+    finally:
+        analyzer.close()
+
+
+def _analyze_uncached(games: list[Game], cfg: EngineConfig, on_result: OnResult) -> None:
+    """Analyse ``games`` (one in-process engine, or a pool of worker processes) and report each result.
+
+    If the worker processes can't start or die (e.g. a script without an ``if __name__ ==
+    "__main__":`` guard, which "spawn" requires), the games they didn't finish are analysed
+    in this process instead.
+    """
     workers = min(cfg.worker_count(), len(games))
     if workers <= 1:
-        analyzer = _Analyzer(cfg)
-        try:
-            for game in games:
-                try:
-                    ev = analyzer.analyze(game)
-                except Exception as exc:  # noqa: BLE001 — one bad game must not stop the run
-                    log.warning("engine analysis of %s failed: %s", game.game_id, exc)
-                    ev = None
-                on_result(game, ev)
-        finally:
-            analyzer.close()
+        _analyze_in_process(games, cfg, on_result)
         return
 
-    # "spawn" (not fork): each worker starts clean, without copies of the parent's threads or engines.
+    # "spawn" (not fork): each worker starts clean, without copies of the parent's threads or engines,
+    # and behaves the same on Linux, macOS and Windows.
     pool = ProcessPoolExecutor(
         max_workers=workers, mp_context=multiprocessing.get_context("spawn"), initializer=_worker_init, initargs=(cfg,)
     )
+    unfinished: list[Game] = []
     finished = False
     try:
         futures = {pool.submit(_worker_analyze, g): g for g in games}
-        broken = False
         for fut in as_completed(futures):
             game = futures[fut]
             try:
                 ev = fut.result()
-            except BrokenProcessPool as exc:
-                if not broken:
-                    log.error("an engine worker process died; the remaining games are skipped: %s", exc)
-                    broken = True
-                ev = None
+            except BrokenProcessPool:
+                unfinished.append(game)
+                continue
             except Exception as exc:  # noqa: BLE001 — one bad game must not stop the run
                 log.warning("engine analysis of %s failed: %s", game.game_id, exc)
                 ev = None
@@ -778,6 +786,11 @@ def _analyze_uncached(
     finally:
         # On an interrupt or error: drop queued games and don't wait; workers close their engines on exit.
         pool.shutdown(wait=finished, cancel_futures=True)
+    if unfinished:
+        log.warning(
+            "engine worker processes failed; analysing the remaining %d games in this process", len(unfinished)
+        )
+        _analyze_in_process(unfinished, cfg, on_result)
 
 
 def _is_candidate(game: Game) -> bool:

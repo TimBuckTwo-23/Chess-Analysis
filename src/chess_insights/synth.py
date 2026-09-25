@@ -40,6 +40,7 @@ import chess
 import chess.engine
 
 from .fetch import GameStore, month_end, parse_month
+from .stats import WHITE_EDGE
 
 # --------------------------------------------------------------------------- opening book
 
@@ -371,7 +372,6 @@ OPPONENT_RATING_SD = 110.0
 DEFAULT_END = datetime(2026, 9, 1, tzinfo=timezone.utc)
 LIVE_ID_BASE = 140_000_000_000
 DAILY_ID_BASE = 900_000_000
-DAILY_SECONDS = 86_400
 
 TIME_CONTROLS: dict[str, tuple[tuple[str, float], ...]] = {
     "bullet": (("60", 0.65), ("120+1", 0.35)),
@@ -667,6 +667,9 @@ def _plan_one(
     offset = int(_clamp(round(rng.gauss(0.0, OPPONENT_RATING_SD)), -400, 400))
     expected = _expected(offset)
 
+    # The first-move advantage (White scores about WHITE_EDGE more than Black at equal ratings) is part
+    # of every game's expectation; the planted shifts come on top, as the analyses measure them.
+    expected = _clamp(expected + (WHITE_EDGE / 2 if color == "white" else -WHITE_EDGE / 2), 0.01, 0.99)
     shift = persona.time_class_shift.get(time_class, 0.0)
     contexts = []
     if color == "black" and opening in CARO_KANN_LINES:
@@ -1090,8 +1093,8 @@ class _Director:
 
     def observe(self, side: chess.Color, score: int, move_no: int) -> None:
         if self.swing_phase == 1:
-            if side == self.leader:
-                self._swing_hits = self._swing_hits + 1 if score >= 350 else 0
+            if side == self.leader:  # a clearly winning position: about 88% winning chances
+                self._swing_hits = self._swing_hits + 1 if score >= 550 else 0
             if self._swing_hits >= 2 or move_no > 45:
                 self.swing_phase = 2
 
@@ -1255,15 +1258,22 @@ class _GamePlayer:
         """
         rng = self.rng
         best_wp = _win_pct(cands[0][1])
+        if self.director.role(board.turn) == "loser" and cands[0][1] >= MATE_CP - 100 and rng.random() < 0.85:
+            # the side that is meant to lose this game misses the mate, the classic way to let a win slip
+            pool = [c for c in cands if c[1] < MATE_CP - 100]
+            if not pool and not self.mover.exhaustive:
+                pool = [c for c in self.mover.full(board) if c[1] < MATE_CP - 100]
+            if pool:
+                return pool[0][0], best_wp - _win_pct(pool[0][1])
         if kind is None:
             ok = [(m, best_wp - _win_pct(s)) for m, s in cands if best_wp - _win_pct(s) < 4.0]
             if self.director.wants_draw and board.fullmove_number >= 15 and rng.random() < 0.6:
                 for m, drop in ok:  # steer towards a repetition
-                    board.push(m)
-                    repeats = board.is_repetition(2)
-                    board.pop()
-                    if repeats:
+                    if self._repeats(board, m):
                         return m, drop
+            elif self.director.is_intended_winner(board.turn) and board.halfmove_clock >= 4 and len(ok) > 1:
+                fresh = [c for c in ok if not self._repeats(board, c[0])]  # the side playing to win avoids repeating
+                ok = fresh or ok
             if len(ok) == 1 or rng.random() < 0.72:
                 return ok[0]
             return rng.choice(ok[1:])
@@ -1286,15 +1296,52 @@ class _GamePlayer:
                 pool = self.mover.full(board)
         return cands[0][0], 0.0
 
+    @staticmethod
+    def _allows_mate_in_one(board: chess.Board, move: chess.Move) -> bool:
+        board.push(move)
+        try:
+            for reply in board.legal_moves:
+                if board.gives_check(reply):
+                    board.push(reply)
+                    mate = board.is_checkmate()
+                    board.pop()
+                    if mate:
+                        return True
+            return False
+        finally:
+            board.pop()
+
+    def _avoid_mate_in_one(
+        self, board: chess.Board, cands: list[Candidate], move: chess.Move, drop: float
+    ) -> tuple[chess.Move, float]:
+        """The one-ply heuristic cannot see a mate coming; a side that must not lose looks once."""
+        if not self._allows_mate_in_one(board, move):
+            return move, drop
+        best_wp = _win_pct(cands[0][1])
+        for m, sc in cands:
+            if m != move and not self._allows_mate_in_one(board, m):
+                return m, best_wp - _win_pct(sc)
+        return move, drop
+
+    @staticmethod
+    def _repeats(board: chess.Board, move: chess.Move) -> bool:
+        board.push(move)
+        try:
+            return board.is_repetition(2)
+        finally:
+            board.pop()
+
     def _resigns(self, side: chess.Color, score: int, prev: Optional[int], move_no: int) -> bool:
         if self.plan.finish == "flag" and self.director.swing_phase == 2:
             return False  # a time scramble: both sides play on, one of them hoping for the flag
+        if self.plan.swing and self.director.is_intended_winner(side):
+            return False  # hangs on in a lost position; the other side is about to let the win slip
         mated_soon = score <= -(MATE_CP - 100)
         lost = mated_soon or (score <= -500 and prev is not None and prev <= -500)
         p = _RESIGN_P[self.plan.time_class]
         if not lost:
-            if move_no > 60 and score <= -300 and prev is not None and prev <= -300:
-                p = 0.15
+            if move_no > 40 and score <= -300 and prev is not None and prev <= -300:
+                p = 0.15  # a long, joyless defence
             else:
                 return False
         if mated_soon:
@@ -1356,6 +1403,8 @@ class _GamePlayer:
                 last_score[side] = score
                 kind = self._error_kind(side, score, move_no, ply, board, clock[side])
                 move, drop = self._choose(board, cands, kind, self.director.error_floor(side))
+                if self.mover.exhaustive and self.director.error_floor(side) is not None:
+                    move, drop = self._avoid_mate_in_one(board, cands, move, drop)
             sans.append(board.san(move))
             moves.append(move)
             board.push(move)

@@ -144,8 +144,8 @@ def test_blunder_rate_weakness_and_equal_rates_make_no_claims():
 
     mr = run([analysed(worse) for _ in range(20)])
     ins = insight(mr, "engine.weakness.blunder-rate")
-    assert ins and ins.category == "blunders" and ins.evidence["per100"] == pytest.approx(7.5)
-    assert ins.evidence["opp_per100"] == pytest.approx(2.5)
+    assert ins and ins.category == "blunders" and ins.evidence["per100"] == pytest.approx(15.0)
+    assert ins.evidence["opp_per100"] == pytest.approx(5.0)
 
     def equal(i, user):
         return {"judgement": "blunder" if i % 10 in (4, 5) else "mistake" if i % 10 in (6, 7) else None}
@@ -192,35 +192,52 @@ def test_phase_strength_and_minimum_moves():
 
 
 # --------------------------------------------------------------------------- time pressure
-def pressure_game(low_blunders: int, ok_blunder: bool):
-    """White (you) spends 25 s a move from a 300 s clock: short of time (< 45 s) from ply 22 on."""
+def pressure_game(low_blunders: int, ok_blunder: bool, opp_low_blunders=None):
+    """You spend 25 s a move from a 300 s clock: short of time (< 45 s) from ply 22 on.
+
+    With ``opp_low_blunders`` set, your opponent burns the clock the same way (short of time from ply 23)
+    and blunders on their first ``opp_low_blunders`` moves when short of time; otherwise they keep 290 s.
+    """
     n = 40
     clocks = []
     for i in range(n):
-        clocks.append(max(5.0, 300.0 - 25.0 * (i // 2 + 1)) if i % 2 == 0 else 290.0)
+        burns = i % 2 == 0 or opp_low_blunders is not None
+        clocks.append(max(5.0, 300.0 - 25.0 * (i // 2 + 1)) if burns else 290.0)
 
     def spec(i, user):
         if user and i >= 22 and (i - 22) // 2 < low_blunders:
             return {"judgement": "blunder"}
         if user and ok_blunder and i == 4:
             return {"judgement": "blunder"}
+        if not user and opp_low_blunders and i >= 23 and (i - 23) // 2 < opp_low_blunders:
+            return {"judgement": "blunder"}
         return {}
 
     return analysed(spec, n=n, clocks=clocks, base_seconds=300, time_control="300", outcome="loss")
 
 
-def test_time_pressure_blunders_per_time_class():
-    pairs = [pressure_game(2, ok_blunder=(k % 4 == 0)) for k in range(20)]
+def test_time_pressure_blunders_vs_your_opponents():
+    pairs = [pressure_game(2, ok_blunder=(k % 4 == 0), opp_low_blunders=int(k % 4 == 0)) for k in range(20)]
     mr = run(pairs)
     ins = insight(mr, "engine.weakness.time-pressure-blunders-blitz")
     assert ins and ins.category == "time"
-    assert ins.evidence["moves_low"] == 9 * 20
+    assert ins.evidence["moves_low"] == 9 * 20 and ins.evidence["opp_moves_low"] == 9 * 20
     assert ins.evidence["per100_low"] == pytest.approx(100 * 40 / 180)
     assert ins.evidence["per100_ok"] == pytest.approx(100 * 5 / 220)
+    assert ins.evidence["opp_per100_low"] == pytest.approx(100 * 5 / 180)
     row = table(mr, "Blunders when short of time").rows[0]
-    assert row[:2] == ["Blitz", 180] and row[4] == 0  # opponents never short of time
+    assert row[:2] == ["Blitz", 180] and row[4] == 180 and row[5] == pytest.approx(100 * 5 / 180)
+
+
+def test_time_pressure_that_hits_everyone_is_only_an_observation():
+    same = run([pressure_game(2, ok_blunder=(k % 4 == 0), opp_low_blunders=2) for k in range(20)])
+    assert insight(same, "engine.weakness.time-pressure-blunders-blitz") is None
+    assert insight(same, "engine.observation.time-pressure-blunders-blitz") is not None
+    alone = run([pressure_game(2, ok_blunder=(k % 4 == 0)) for k in range(20)])  # opponents never short of time
+    assert insight(alone, "engine.weakness.time-pressure-blunders-blitz") is None
+    assert "never that short of time" in insight(alone, "engine.observation.time-pressure-blunders-blitz").detail
     calm = run([pressure_game(0, ok_blunder=True) for _ in range(20)])
-    assert insight(calm, "engine.weakness.time-pressure-blunders-blitz") is None
+    assert not [i for i in calm.insights if i.category == "time"]
 
 
 # --------------------------------------------------------------------------- conversion
@@ -245,6 +262,22 @@ def test_conversion_rates_and_thrown_games():
     rows = table(mr, "Winning and losing positions").rows
     assert rows[0][1:5] == [20, 8, 4, 8] and rows[0][5] == pytest.approx(0.4)
     assert rows[1][1:5] == [20, 0, 1, 19] and rows[1][5] == pytest.approx(0.05)
+
+
+def test_conversion_counts_each_game_once_for_whoever_got_there_first():
+    def swing(i, user):  # you are winning at ply 10, then your opponent is winning at ply 21
+        if user and i == 10:
+            return {"win_before": 90.0}
+        if not user and i == 21:
+            return {"win_before": 92.0}
+        return {}
+
+    pairs = [analysed(swing, outcome="loss") for _ in range(12)]
+    pairs += [analysed(lambda i, u: {"win_before": 95.0} if not u and i == 11 else {}, outcome="loss")
+              for _ in range(12)]
+    stats = run(pairs).stats["conversion"]
+    assert (stats["reached"], stats["converted"]) == (12, 0)  # the swings count as your thrown wins only
+    assert (stats["opp_reached"], stats["opp_converted"]) == (12, 12)
 
 
 def test_conversion_needs_ten_games_each_way():
@@ -285,7 +318,8 @@ def test_blunder_anatomy_by_piece_and_move_number():
     assert [engine_stats.piece_of(s) for s in ("Qd1", "O-O", "O-O-O", "exd5", "e8=Q+", "Nbd2", "Kh1")] == [
         "Q", "K", "K", "P", "P", "N", "K"
     ]
-    assert [engine_stats.move_bucket(p) for p in (0, 19, 20, 79, 80, 200)] == ["1–10", "1–10", "11–20", "31–40", "41+", "41+"]
+    buckets_by_ply = [engine_stats.move_bucket(p) for p in (0, 19, 20, 79, 80, 200)]
+    assert buckets_by_ply == ["1–10", "1–10", "11–20", "31–40", "41+", "41+"]
 
     def spec(i, user):  # your plies use SANS[even]: e4, Qd1, exd5, Bc4, Ne2 in turn
         return {"judgement": "blunder"} if user and i in (2, 12, 22, 32) else {}  # every one a queen move

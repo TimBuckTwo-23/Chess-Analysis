@@ -13,6 +13,11 @@ Skill metrics (loss profile, game length) leave out games with fewer than 4
 plies; game length also leaves out abandoned games, which say nothing about how
 long you can hold a position. Timeouts are only described here: the clock
 module owns the "you lose on time" finding.
+
+Both claims here are secondary under the project-wide rule (``stats.significance`` at
+``stats.STRICT_ALPHA``): the game-length scan tests five buckets, and how losses end
+also depends on resignation habits (a player who never resigns gets mated more), so
+it is weaker evidence about king safety than it looks.
 """
 
 from __future__ import annotations
@@ -25,16 +30,19 @@ from typing import Any, Optional, Sequence
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Table
 from ..stats import (
+    STRICT_ALPHA,
+    ScoreSummary,
     bh_adjust,
     clamp,
-    combined_confidence,
     pct,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
+    significance,
+    summarize,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, ScoreSummary, fmt_points, recent_urls, summarize, with_p_value
+from .results import MAX_EXAMPLES, fmt_points, recent_urls
 
 KEY = "endings"
 TITLE = "How your games end"
@@ -84,8 +92,7 @@ class Thresholds:
     """Minimum sample sizes and effect sizes; override with ``ctx.options["endings.<name>"]``."""
 
     min_games: int = 10  # below this the summary says there is not enough data
-    min_confidence: float = 0.4  # combined_confidence needed for a strength / weakness
-    max_p_value: float = 0.05  # ... and the (multiple-testing adjusted) test must be significant at this level
+    strict_alpha: float = STRICT_ALPHA  # both claims here are secondary (see the module docstring)
     min_losses: int = 20  # losses before comparing how your losses and wins end
     min_wins: int = 10
     min_mate_gap: float = 0.10  # share of losses by mate minus share of wins by mate
@@ -270,8 +277,8 @@ def mate_insight(
     }
     if p.losses < th.min_losses or p.wins < th.min_wins:
         return None, stats
-    confidence = combined_confidence(test, 2 * th.min_losses)
-    if test.mean < th.min_mate_gap or confidence < th.min_confidence or test.p_value > th.max_p_value:
+    significant, confidence = significance(test, 2 * th.min_losses, alpha=th.strict_alpha)
+    if test.mean < th.min_mate_gap or not significant:
         return None, stats
     mated_games = [g for g in played if g.outcome == "loss" and g.termination == "checkmate"]
     k = min(MAX_EXAMPLES, len(mated_games))
@@ -284,7 +291,8 @@ def mate_insight(
             detail=(
                 f"{mated} of your {p.losses} losses ({pct(p.loss_share('checkmate'))}) ended in checkmate, but only "
                 f"{mating} of your {p.wins} wins ({pct(p.win_share('checkmate'))}) ended with you mating your "
-                "opponent. That points at king safety and missed tactics around your own king."
+                "opponent. That often goes with king-safety problems and missed tactics around your own king "
+                "(or with playing on in lost positions)."
             ),
             severity=clamp(test.mean / 0.30),
             confidence=confidence,
@@ -443,8 +451,8 @@ def length_insights(
     out: list[Insight] = []
     for key in tested:
         s = summaries[key]
-        confidence = combined_confidence(with_p_value(s.test, adjusted[key]), th.min_length_games)
-        if abs(s.test.mean) < th.min_length_effect or confidence < th.min_confidence or adjusted[key] > th.max_p_value:
+        significant, confidence = significance(s.test, th.min_length_games, adjusted[key], alpha=th.strict_alpha)
+        if abs(s.test.mean) < th.min_length_effect or not significant:
             continue
         kind: InsightKind = "weakness" if s.test.mean < 0 else "strength"
         title, study = _LENGTH_TEXT[(key, kind)]

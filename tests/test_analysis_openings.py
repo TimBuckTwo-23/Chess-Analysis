@@ -240,17 +240,21 @@ def test_chart_needs_eight_rated_games():
 
 # --------------------------------------------------------------------------- insights
 def test_bad_opening_with_enough_games_is_a_weakness():
-    caro = play("caro", 8, 22)
+    # 6/30 (20%, p ~ 0.002). The old 8/30 (27%) had a BH-adjusted p of 0.06 over the three families
+    # and was only flagged under the old lax rule, which also flagged openings in pure noise.
+    caro = play("caro", 6, 24)
     others = play("qgd", 15, 15) + play("italian", 15, 15)
     mr = run(caro + others)
     ins = insight(mr, "openings.weakness.black.caro-kann-defense")
     assert ins is not None and ins.category == "openings"
     assert ins.title == "The Caro-Kann Defense is costing you points as Black"
-    assert ins.detail.startswith("You score 27% in 30 games where 50% was expected (−0.23 points per game")
+    assert ins.detail.startswith("You score 20% in 30 games where 50% was expected (−0.30 points per game")
     recent_losses = sorted((g for g in caro if g.outcome == "loss"), key=lambda g: g.end_time, reverse=True)
     assert ins.example_games == [g.url for g in recent_losses[:5]]
     assert any("Advance Variation" in s for s in ins.study)
-    assert ins.evidence["shrunk_delta"] == pytest.approx(shrink(8 / 30 - 0.5, 30, 0.0, 10.0))
+    assert ins.evidence["shrunk_delta"] == pytest.approx(shrink(6 / 30 - 0.5, 30, 0.0, 10.0))
+    assert ins.evidence["colour_adjusted_delta"] == pytest.approx(6 / 30 - 0.48)  # Black normally scores 48%
+    assert mr.stats["family_tests"]["black:Caro-Kann Defense"]["p_adjusted"] <= 0.05
     assert "Caro-Kann" in mr.summary
     assert any(k.label == "Most costly opening" and k.value == "Caro-Kann Defense (Black)" for k in mr.kpis)
 
@@ -333,7 +337,10 @@ def test_bh_adjustment_is_recorded_for_every_tested_family():
 
 
 def test_thresholds_can_be_overridden_through_options():
-    mr = run(play("caro", 0, 5) + play("italian", 10, 10), **{"openings.min_family_games": 5})
+    # 7 straight losses (p ~ 0.01); the old 0/5 was not significant after adjusting for the two families.
+    games = play("caro", 0, 7) + play("italian", 10, 10)
+    assert insight(run(games), "openings.weakness.black.caro-kann-defense") is None  # 7 < 8 games
+    mr = run(games, **{"openings.min_family_games": 5})
     assert insight(mr, "openings.weakness.black.caro-kann-defense") is not None
 
 

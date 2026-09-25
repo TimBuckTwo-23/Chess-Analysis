@@ -207,7 +207,7 @@ class PlyEval:
     phase: str  # "opening" | "middlegame" | "endgame"
     clock_after: Optional[float]  # mover's remaining seconds after the move
     time_spent: Optional[float]  # seconds the mover spent on this ply (increment-adjusted), if known
-    tags: list[str] = field(default_factory=list)  # e.g. "missed_mate", "allowed_mate", "hung_material", "missed_win"
+    tags: list[str] = field(default_factory=list)  # missed_mate, allowed_mate, hung_material, missed_tactic, thrown_win
 
 
 @dataclass

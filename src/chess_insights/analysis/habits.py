@@ -8,7 +8,13 @@ both clocks used) and grouped into sessions: the next game starting at most
 Every comparison is score minus the Elo expected score. "After a loss" is judged
 against all your other games (a difference test), so a player whose rating lags
 behind their strength isn't flagged just for scoring above expectation elsewhere.
-Time-of-day buckets are Benjamini-Hochberg adjusted because six are tested at once.
+
+Claims follow the project-wide rule (``stats.significance``). Two hypotheses are
+fixed in advance and tested on their own at ``stats.ALPHA``: playing on straight
+after a loss, and late-night play (games started 23:00-03:00 in the player's time
+zone, the one time-of-day effect with a strong prior). Everything else is an
+exploratory scan at ``stats.STRICT_ALPHA``: the six 4-hour blocks of the day
+(Benjamini-Hochberg adjusted because six are tested at once) and session length.
 Games with fewer than 4 plies stay on the timeline (they still end a session or
 a streak) but are not scored.
 """
@@ -24,8 +30,21 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..context import AnalysisContext
 from ..models import Chart, Game, Insight, Kpi, ModuleResult, Series, Table
-from ..stats import MeanTest, bh_adjust, clamp, combined_confidence, pct, sample_confidence, severity_from_points
-from .results import MAX_EXAMPLES, ScoreSummary, difference_test, fmt_points, recent_urls, summarize, with_p_value
+from ..stats import (
+    ALPHA,
+    STRICT_ALPHA,
+    MeanTest,
+    ScoreSummary,
+    bh_adjust,
+    clamp,
+    difference_test,
+    pct,
+    sample_confidence,
+    severity_from_points,
+    significance,
+    summarize,
+)
+from .results import MAX_EXAMPLES, fmt_points, recent_urls
 from .time_mgmt import time_spent
 
 KEY = "habits"
@@ -55,6 +74,11 @@ DAY_PARTS: tuple[tuple[str, str], ...] = (
     ("16:00–20:00", "evening"),
     ("20:00–24:00", "late-evening"),
 )
+# The pre-specified late-night window (hours in the player's time zone): 23:00-03:00.
+LATE_NIGHT = ("23:00", "03:00")
+LATE_NIGHT_HOURS = frozenset({23, 0, 1, 2})
+# Day parts that overlap the late-night window: a claim on one of them and on the window is one finding.
+LATE_NIGHT_PARTS = frozenset({0, 5})
 SCORE_COLUMNS = ["Games", "W/D/L", "Score", "Expected", "Difference"]
 SCORE_FORMATS = ["int", "text", "pct", "pct", "signed_pct"]
 
@@ -69,8 +93,8 @@ class Thresholds:
     min_split_games: int = 25  # rated games in the after-a-loss / late-in-session group
     min_bucket_games: int = 25  # rated games in a time-of-day block
     min_effect: float = 0.06  # points per game
-    min_confidence: float = 0.4  # combined_confidence needed for a weakness
-    max_p_value: float = 0.05  # ... and the (multiple-testing adjusted) test must be significant at this level
+    alpha: float = ALPHA  # after a loss, late night: pre-specified primary claims
+    strict_alpha: float = STRICT_ALPHA  # time-of-day blocks, session length: exploratory scans
     fatigue_splits: tuple[int, ...] = (4, 7)  # "late in a session" = from this game number on
     min_rematches: int = 5
     min_streak: int = 3  # longest losing streak worth mentioning
@@ -244,8 +268,7 @@ def tilt_insight(
     test = difference_test(a.test, r.test)
     if a.n_rated < th.min_split_games or r.n_rated < th.min_split_games:
         return None, test, a, r
-    confidence = combined_confidence(test, th.min_split_games)
-    significant = confidence >= th.min_confidence and test.p_value <= th.max_p_value
+    significant, confidence = significance(test, th.min_split_games, alpha=th.alpha)
     if test.mean > -th.min_effect or a.test.mean >= 0 or not significant:
         return None, test, a, r
     w = f"{th.tilt_window_min:g}"
@@ -310,8 +333,8 @@ def fatigue_insight(
         }
         if lt.n_rated < th.min_split_games or er.n_rated < th.min_split_games:
             continue
-        confidence = combined_confidence(with_p_value(test, p_adj), th.min_split_games)
-        if test.mean > -th.min_effect or lt.test.mean >= 0 or confidence < th.min_confidence or p_adj > th.max_p_value:
+        significant, confidence = significance(test, th.min_split_games, p_adj, alpha=th.strict_alpha)
+        if test.mean > -th.min_effect or lt.test.mean >= 0 or not significant:
             continue
         losses = [g for g in late if g.outcome == "loss"]
         candidate = Insight(
@@ -347,7 +370,7 @@ def _ordinal(n: int) -> str:
 def time_of_day_insights(
     parts: list[list[Game]], scored: Sequence[Game], tz_name: str, th: Thresholds
 ) -> tuple[list[Insight], list[Optional[float]]]:
-    """Each 4-hour block vs all other games; BH-adjusted over the blocks with enough games."""
+    """Each 4-hour block vs all other games; BH-adjusted over the blocks with enough games, strict level."""
     summaries = [summarize(p) for p in parts]
     tests: dict[int, tuple[MeanTest, ScoreSummary, ScoreSummary]] = {}
     for i, part in enumerate(parts):
@@ -363,8 +386,7 @@ def time_of_day_insights(
     qualifying: list[tuple[int, float, MeanTest, ScoreSummary, ScoreSummary]] = []
     for i in order:
         test, s, rest = tests[i]
-        confidence = combined_confidence(with_p_value(test, adjusted[i]), th.min_bucket_games)
-        significant = confidence >= th.min_confidence and adjusted[i] <= th.max_p_value
+        significant, confidence = significance(test, th.min_bucket_games, adjusted[i], alpha=th.strict_alpha)
         if test.mean <= -th.min_effect and s.test.mean < 0 and significant:
             qualifying.append((i, confidence, test, s, rest))
     worst = min(qualifying, key=lambda q: q[3].test.mean)[0] if qualifying else None
@@ -413,6 +435,78 @@ def time_of_day_insights(
             )
         )
     return out, [adjusted.get(i) for i in range(len(parts))]
+
+
+def is_late_night(moment: datetime, tz: tzinfo) -> bool:
+    """Started 23:00-03:00 in time zone ``tz``."""
+    return _utc(moment).astimezone(tz).hour in LATE_NIGHT_HOURS
+
+
+def late_night_insight(
+    late: list[Game], scored: Sequence[Game], tz_name: str, th: Thresholds
+) -> tuple[Optional[Insight], dict[str, Any]]:
+    """Games started 23:00-03:00 vs all other games: a pre-specified hypothesis tested alone at ``th.alpha``."""
+    s = summarize(late)
+    ids = {id(g) for g in late}
+    rest = summarize([g for g in scored if id(g) not in ids])
+    test = difference_test(s.test, rest.test)
+    stats = {"n": s.n_rated, "delta": s.delta, "rest_delta": rest.delta, "gap": test.mean, "p_value": test.p_value}
+    if s.n_rated < th.min_bucket_games or rest.n_rated < th.min_bucket_games:
+        return None, stats
+    significant, confidence = significance(test, th.min_bucket_games, alpha=th.alpha)
+    if test.mean > -th.min_effect or s.test.mean >= 0 or not significant:
+        return None, stats
+    start, end = LATE_NIGHT
+    losses = [g for g in late if g.outcome == "loss"]
+    return (
+        Insight(
+            id=f"{KEY}.weakness.late-night",
+            kind="weakness",
+            category="habits",
+            title=f"You score below your rating in late-night games ({start}–{end})",
+            detail=(
+                f"In {s.n_rated} games started between {start} and {end} ({tz_name}) you scored {pct(s.rated_score)} "
+                f"where {pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game); in all your other "
+                f"games {fmt_points(rest.test.mean)} per game. The gap is {fmt_points(test.mean)} points per game."
+            ),
+            severity=severity_from_points(test.mean),
+            confidence=confidence,
+            evidence={
+                "window": f"{start}–{end}",
+                "time_zone": tz_name,
+                "n": s.n_rated,
+                "score": s.rated_score,
+                "expected": s.expected,
+                "delta": s.delta,
+                "rest_delta": rest.delta,
+                "gap": test.mean,
+                "p_value": test.p_value,
+            },
+            study=[
+                f"Stop starting rated games after {start}; play puzzles or unrated games instead.",
+                f"Replay your last {min(MAX_EXAMPLES, len(losses)) or 'few'} late-night losses and check whether "
+                "they came from careless blunders or the clock, both signs of tiredness.",
+                "If you do play late, choose a slower time control and stop after the first loss.",
+            ],
+            example_games=recent_urls(losses),
+        ),
+        stats,
+    )
+
+
+def merge_late_night(late: Optional[Insight], blocks: list[Insight]) -> list[Insight]:
+    """One finding when the late-night window and an overlapping 4-hour block are both flagged.
+
+    The one with the stronger evidence (smaller unadjusted p-value) is kept; on a tie (the same
+    games, e.g. every late game started after midnight) the 4-hour block.
+    """
+    if late is None:
+        return blocks
+    labels = {DAY_PARTS[i][0] for i in LATE_NIGHT_PARTS}
+    overlapping = [b for b in blocks if b.evidence.get("block") in labels]
+    if overlapping and min(b.evidence["p_value"] for b in overlapping) <= late.evidence["p_value"]:
+        return blocks
+    return [late, *(b for b in blocks if b not in overlapping)]
 
 
 def rematch_insight(
@@ -563,11 +657,16 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     # time of day / weekday (in the player's time zone), by start time as chess.com reports it
     parts: list[list[Game]] = [[] for _ in DAY_PARTS]
     weekdays: list[list[Game]] = [[] for _ in range(7)]
+    late: list[Game] = []
     for g in scored:
         moment = g.start_time if g.start_time is not None else g.end_time
         parts[day_part(moment, tz)].append(g)
         weekdays[_utc(moment).astimezone(tz).weekday()].append(g)
+        if is_late_night(moment, tz):
+            late.append(g)
     tod_insights, tod_p = time_of_day_insights(parts, scored, tz_name, th)
+    late_insight, late_stats = late_night_insight(late, scored, tz_name, th)
+    tod_insights = merge_late_night(late_insight, tod_insights)
     part_rows = [(label, summarize(p)) for (label, _), p in zip(DAY_PARTS, parts, strict=True)]
     weekday_rows = [(calendar.day_name[i], summarize(weekdays[i])) for i in range(7)]
 
@@ -645,6 +744,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             "time_of_day": {
                 label: {**_stats(s), "p_adjusted": p} for (label, s), p in zip(part_rows, tod_p, strict=True)
             },
+            "late_night": late_stats,
             "weekday": {label: _stats(s) for label, s in weekday_rows},
         },
     )

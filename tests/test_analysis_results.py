@@ -287,7 +287,9 @@ def test_single_time_control_or_small_samples_make_no_comparison():
     assert not [i for i in run(small).insights if "time-control" in i.id]
 
 
-def test_rating_trend_rising_is_a_strength():
+def test_rating_trend_rising_is_an_observation():
+    # A rating is a random walk: a rising line is reported, but it is not evidence of a strength
+    # (the old expectation, kind == "strength", fired on null data with no real effect).
     games = []
     for i in range(30):  # 30 games over the last 60 days, rating climbing 3 points a game, mostly wins
         rating = 1500 + 3 * i
@@ -296,7 +298,7 @@ def test_rating_trend_rising_is_a_strength():
         )
     mr = run(games)
     trend = next(i for i in mr.insights if "trend-blitz" in i.id)
-    assert trend.kind == "strength" and trend.id == "results.strength.trend-blitz"
+    assert trend.kind == "observation" and trend.id == "results.observation.trend-blitz"
     assert "up about 135 points" in trend.title  # slope 1.5/day x 90 days
     assert mr.stats["trends"]["Blitz"]["change"] == pytest.approx(135.0)
 

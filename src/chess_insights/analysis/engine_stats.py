@@ -65,6 +65,7 @@ class Thresholds:
     pressure_fraction: float = 0.15  # "short of time": clock before the move below this share of the start
     min_pressure_moves: int = 30  # your moves while short of time, per time class
     pressure_ratio: float = 2.0  # blunder rate short of time vs otherwise
+    pressure_peer_ratio: float = 1.3  # ... and your short-of-time blunder rate vs your opponents'
     win_threshold: float = 85.0  # win % that counts as a winning position (your point of view)
     loss_threshold: float = 15.0  # win % that counts as a lost position
     min_conversion_games: int = 10  # games that reached a winning (or lost) position, for each side
@@ -546,58 +547,102 @@ def pressure_section(
     if len(records) < th.min_games:
         return table, [], stats
     judged = [tc for tc in order if groups[tc]["me_low"].moves >= th.min_pressure_moves and groups[tc]["me_ok"].moves]
-    tests = {
-        tc: rate_test(groups[tc]["me_low"].blunders, groups[tc]["me_low"].moves,
-                      groups[tc]["me_ok"].blunders, groups[tc]["me_ok"].moves)
-        for tc in judged
-    }
-    adjusted = dict(zip(judged, bh_adjust([tests[tc].p_value for tc in judged])))
+    # Everyone blunders more when short of time, so the claim needs two things: your own rate jumps (short of
+    # time vs otherwise), and it jumps further than your opponents' does (your short-of-time rate vs theirs).
+    own = {tc: rate_test(groups[tc]["me_low"].blunders, groups[tc]["me_low"].moves,
+                         groups[tc]["me_ok"].blunders, groups[tc]["me_ok"].moves) for tc in judged}
+    benched = [tc for tc in judged if groups[tc]["opp_low"].moves >= th.min_pressure_moves]
+    bench = {tc: rate_test(groups[tc]["me_low"].blunders, groups[tc]["me_low"].moves,
+                           groups[tc]["opp_low"].blunders, groups[tc]["opp_low"].moves) for tc in benched}
+    own_adj = dict(zip(judged, bh_adjust([own[tc].p_value for tc in judged])))
+    bench_adj = dict(zip(benched, bh_adjust([bench[tc].p_value for tc in benched])))
     insights = []
     for tc in judged:
         t = groups[tc]
         low, ok = t["me_low"].per100(t["me_low"].blunders), t["me_ok"].per100(t["me_ok"].blunders)
-        confidence = combined_confidence(with_p_value(tests[tc], adjusted[tc]), th.min_pressure_moves)
-        stats[tc].update(p_value=tests[tc].p_value, p_adjusted=adjusted[tc])
-        if adjusted[tc] > th.max_p_value or confidence < th.min_confidence:
+        opp_low, opp_ok = t["opp_low"].per100(t["opp_low"].blunders), t["opp_ok"].per100(t["opp_ok"].blunders)
+        confidence = combined_confidence(with_p_value(own[tc], own_adj[tc]), th.min_pressure_moves)
+        stats[tc].update(p_value=own[tc].p_value, p_adjusted=own_adj[tc])
+        if own_adj[tc] > th.max_p_value or confidence < th.min_confidence:
             continue
         if not _clearly_higher(low, ok, th.pressure_ratio):
             continue
-        opp_low, opp_ok = t["opp_low"].per100(t["opp_low"].blunders), t["opp_ok"].per100(t["opp_ok"].blunders)
+        worse_than_peers = False
+        if tc in bench:
+            bench_conf = combined_confidence(with_p_value(bench[tc], bench_adj[tc]), th.min_pressure_moves)
+            stats[tc].update(benchmark_p_value=bench[tc].p_value, benchmark_p_adjusted=bench_adj[tc])
+            worse_than_peers = (
+                bench_adj[tc] <= th.max_p_value
+                and bench_conf >= th.min_confidence
+                and _clearly_higher(low, opp_low, th.pressure_peer_ratio)
+            )
+            confidence = min(confidence, bench_conf)
         detail = (
             f"In {tc}, with less than {share} of your starting clock left you blundered {_f1(low)} times per 100 "
             f"moves ({t['me_low'].blunders} in {t['me_low'].moves} moves), against {_f1(ok)} per 100 moves with "
-            f"more time. Your opponents in the same games: {_f1(opp_low)} vs {_f1(opp_ok)}."
+            "more time."
         )
-        insights.append(
-            Insight(
-                id=f"{KEY}.weakness.time-pressure-blunders-{tc}",
-                kind="weakness",
-                category="time",
-                title=f"You blunder much more when short of time in {tc}",
-                detail=detail,
-                severity=clamp((low / ok - 1.0) / 3.0 if ok else 1.0),
-                confidence=confidence,
-                evidence={
-                    "time_class": tc, "moves_low": t["me_low"].moves, "blunders_low": t["me_low"].blunders,
-                    "per100_low": low, "per100_ok": ok, "opp_per100_low": opp_low, "opp_per100_ok": opp_ok,
-                    "p_adjusted": adjusted[tc],
-                },
-                study=[
-                    f"Budget your clock in {tc}: reach move 30 with at least a third of your starting time.",
-                    "When short of time, play safe moves: keep pieces protected and your king covered; don't "
-                    "start complications.",
-                    "Practise with increment (e.g. 3+2 or 10+5) so the last phase of the game stops being a scramble.",
-                ],
-                example_games=_urls(low_games[tc], lambda r: (r.game.outcome != "loss", _recent(r))),
+        if t["opp_low"].moves:
+            detail += (
+                f" Your opponents in the same games: {_f1(opp_low)} per 100 moves when short of time "
+                f"({t['opp_low'].moves} moves), {_f1(opp_ok)} otherwise."
             )
-        )
+        else:
+            detail += " Your opponents were never that short of time in these games."
+        evidence = {
+            "time_class": tc, "moves_low": t["me_low"].moves, "blunders_low": t["me_low"].blunders,
+            "per100_low": low, "per100_ok": ok, "opp_moves_low": t["opp_low"].moves, "opp_per100_low": opp_low,
+            "opp_per100_ok": opp_ok, "p_adjusted": own_adj[tc],
+        }
+        examples = _urls(low_games[tc], lambda r: (r.game.outcome != "loss", _recent(r)))
+        if worse_than_peers:
+            insights.append(
+                Insight(
+                    id=f"{KEY}.weakness.time-pressure-blunders-{tc}",
+                    kind="weakness",
+                    category="time",
+                    title=f"You blunder much more than your opponents when short of time in {tc}",
+                    detail=detail,
+                    severity=clamp((low / opp_low - 1.0) if opp_low else 1.0),
+                    confidence=confidence,
+                    evidence=evidence | {"benchmark_p_adjusted": bench_adj[tc]},
+                    study=[
+                        f"Budget your clock in {tc}: reach move 30 with at least a third of your starting time.",
+                        "When short of time, play safe moves: keep pieces protected and your king covered; don't "
+                        "start complications.",
+                        "Practise with increment (e.g. 3+2 or 10+5) so the last phase of the game stops being a "
+                        "scramble.",
+                    ],
+                    example_games=examples,
+                )
+            )
+        else:
+            insights.append(
+                Insight(
+                    id=f"{KEY}.observation.time-pressure-blunders-{tc}",
+                    kind="observation",
+                    category="time",
+                    title=f"You blunder much more when short of time in {tc}",
+                    detail=detail + " Most players do; the fix is to reach the end of the game with time left.",
+                    severity=clamp((low / ok - 1.0) / 3.0 if ok else 1.0),
+                    confidence=confidence,
+                    evidence=evidence,
+                    study=[
+                        f"Budget your clock in {tc}: reach move 30 with at least a third of your starting time.",
+                        "When short of time, play safe moves: keep pieces protected and your king covered.",
+                    ],
+                    example_games=examples,
+                )
+            )
     return table, insights, stats
 
 
 # --------------------------------------------------------------------------- conversion
 @dataclass
 class Conversion:
-    reached: list[Analysed] = field(default_factory=list)  # you reached a winning position
+    """Games split by who reached a winning position FIRST (each game counts once, so the groups are independent)."""
+
+    reached: list[Analysed] = field(default_factory=list)  # you got a winning position first
     opp_reached: list[Analysed] = field(default_factory=list)  # your opponent did
 
     @property
@@ -628,18 +673,17 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     for r in records:
         wins = r.pov_win()
         peak[r.game.game_id] = max(wins)
-        if max(wins) >= th.win_threshold:
-            conv.reached.append(r)
-        if min(wins) <= th.loss_threshold:
-            conv.opp_reached.append(r)
+        first = next((w for w in wins if w >= th.win_threshold or w <= th.loss_threshold), None)
+        if first is not None:
+            (conv.reached if first >= th.win_threshold else conv.opp_reached).append(r)
 
     def wdl(rs: list[Analysed]) -> list[int]:
         c = Counter(r.game.outcome for r in rs)
         return [len(rs), c["win"], c["draw"], c["loss"]]
 
     rows = [
-        [f"You reached a winning position (≥ {th.win_threshold:.0f}%)", *wdl(conv.reached), conv.rate],
-        [f"Your opponent reached a winning position (you ≤ {th.loss_threshold:.0f}%)", *wdl(conv.opp_reached),
+        [f"You got a winning position first (≥ {th.win_threshold:.0f}%)", *wdl(conv.reached), conv.rate],
+        [f"Your opponent got one first (you ≤ {th.loss_threshold:.0f}%)", *wdl(conv.opp_reached),
          conv.saved / len(conv.opp_reached) if conv.opp_reached else None],
     ]
     table = Table(
@@ -647,8 +691,9 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         columns=["Situation", "Games", "Won", "Drawn", "Lost", "Converted / saved"],
         rows=rows,
         formats=["text", "int", "int", "int", "int", "pct"],
-        note="Winning position: Stockfish gave that side at least an 85% chance to win at some point. Converted = "
-        "you won those games; saved = you drew or won after being lost.",
+        note=f"Winning position: Stockfish gave that side at least a {th.win_threshold:.0f}% chance to win. Each "
+        "game counts once, for the side that got there first. Converted = you won those games; saved = you drew "
+        "or won anyway.",
     )
     stats = {
         "reached": len(conv.reached), "converted": conv.converted, "rate": conv.rate,
@@ -669,10 +714,9 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     stats.update(p_value=test.p_value)
     rate, opp_rate = conv.rate or 0.0, conv.opp_rate or 0.0
     base = (
-        f"You reached a winning position (Stockfish: at least {th.win_threshold:.0f}% winning chances) in "
-        f"{len(conv.reached)} games and won {conv.converted} of them ({pct(rate)}). Your opponents converted "
-        f"{conv.opp_converted} of the {len(conv.opp_reached)} winning positions they reached against you "
-        f"({pct(opp_rate)})."
+        f"You were first to reach a winning position (Stockfish: at least {th.win_threshold:.0f}% winning "
+        f"chances) in {len(conv.reached)} games and won {conv.converted} of them ({pct(rate)}). When your "
+        f"opponents got there first, they won {conv.opp_converted} of {len(conv.opp_reached)} ({pct(opp_rate)})."
     )
     evidence = {k: stats[k] for k in ("reached", "converted", "rate", "opp_reached", "opp_converted", "opp_rate")}
     significant = test.p_value <= th.max_p_value and confidence >= th.min_confidence
@@ -721,6 +765,15 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         )
     saved = [r for r in conv.opp_reached if r.game.outcome != "loss"]
     save_rate = conv.saved / len(conv.opp_reached)
+    if saved:
+        review = "Replay the linked comebacks to see which defensive ideas worked for you."
+        examples = _urls(saved, lambda r: (r.game.outcome != "win", _recent(r)))
+    else:
+        review = (
+            "Replay the linked losses from the moment you were lost and look for moves that would have set "
+            "your opponent harder problems."
+        )
+        examples = _urls(conv.opp_reached, _recent)
     insights.append(
         Insight(
             id=f"{KEY}.observation.resilience",
@@ -728,10 +781,10 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
             category="conversion",
             title=f"You saved {conv.saved} of {len(conv.opp_reached)} lost positions ({pct(save_rate)})",
             detail=(
-                f"In {len(conv.opp_reached)} games Stockfish gave you at most {th.loss_threshold:.0f}% winning "
-                f"chances at some point; you still drew or won {conv.saved} of them. Your opponents saved "
-                f"{len(conv.reached) - conv.converted} of their {len(conv.reached)} lost positions "
-                f"({pct(1.0 - rate)})."
+                f"In {len(conv.opp_reached)} games your opponent got a winning position first (you had at most "
+                f"{th.loss_threshold:.0f}% winning chances); you still drew or won {conv.saved} of them. Your "
+                f"opponents saved {len(conv.reached) - conv.converted} of the {len(conv.reached)} games where you "
+                f"got there first ({pct(1.0 - rate)})."
             ),
             severity=clamp(abs(save_rate - (1.0 - rate)) / 0.30),
             confidence=sample_confidence(len(conv.opp_reached)),
@@ -739,9 +792,9 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
             study=[
                 "In a lost position, set practical problems: keep pieces on, create threats and make every "
                 "move matter for your opponent.",
-                "Replay the linked comebacks to see which defensive ideas worked for you.",
+                review,
             ],
-            example_games=_urls(saved, lambda r: (r.game.outcome != "win", _recent(r))),
+            example_games=examples,
         )
     )
     return table, insights, stats

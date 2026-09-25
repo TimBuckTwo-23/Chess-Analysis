@@ -12,6 +12,10 @@ same games* (rating-matched players on the same clock):
 * clock balance: who is ahead on the clock at moves 20 and 30;
 * think time: average seconds per move by move number.
 
+Each claim is one test per time class, BH-adjusted over the time classes, under the
+project-wide rule ``stats.significance``: time trouble and flagging at ``stats.ALPHA``
+(primary claims), a slow opening and good clock handling at ``stats.STRICT_ALPHA``.
+
 ``time_spent`` is the shared definition of the seconds spent on one ply
 (``engine.py`` computes the same thing independently).
 """
@@ -27,16 +31,20 @@ from typing import Any, Optional, Sequence
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Color, Game, Insight, Kpi, ModuleResult, Series, Table
 from ..stats import (
+    ALPHA,
+    STRICT_ALPHA,
     MeanTest,
+    ScoreSummary,
     bh_adjust,
     clamp,
-    combined_confidence,
     mean_test,
     normal_cdf,
     pct,
     severity_from_points,
+    significance,
+    summarize,
 )
-from .results import MAX_EXAMPLES, ScoreSummary, fmt_points, summarize, with_p_value
+from .results import MAX_EXAMPLES, fmt_points
 
 KEY = "time"
 TITLE = "Clock & time management"
@@ -63,8 +71,8 @@ class Thresholds:
     """Minimum sample sizes and effect sizes; override with ``ctx.options["time.<name>"]``."""
 
     min_games: int = 15  # live games with clocks in a time class before it is reported
-    min_confidence: float = 0.4  # combined_confidence needed for a strength / weakness
-    max_p_value: float = 0.05  # ... and the (multiple-testing adjusted) test must be significant at this level
+    alpha: float = ALPHA  # time trouble, flagging: primary claims
+    strict_alpha: float = STRICT_ALPHA  # slow opening, good clock handling
     min_trouble_gap: float = 0.10  # your time-trouble rate minus your opponents' in the same games
     min_losses: int = 20  # losses in a time class before judging how many were on time
     min_timeouts: int = 10  # games decided on time (either way) before comparing who flags whom
@@ -348,10 +356,9 @@ def _slowest_first(clocks: Sequence[GameClock]) -> list[str]:
 
 
 def trouble_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
-    test = with_p_value(cs.trouble_test, p_adj)
-    confidence = combined_confidence(test, th.min_games)
+    significant, confidence = significance(cs.trouble_test, th.min_games, p_adj, alpha=th.alpha)
     gap = cs.trouble_rate - cs.opp_trouble_rate
-    if cs.n < th.min_games or gap < th.min_trouble_gap or confidence < th.min_confidence or p_adj > th.max_p_value:
+    if cs.n < th.min_games or gap < th.min_trouble_gap or not significant:
         return None
     tc = cs.time_class
     trouble_games = [c.game for c in cs.clocks if c.my_trouble]
@@ -399,15 +406,9 @@ def trouble_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
 def flag_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
     if cs.losses < th.min_losses:
         return None
-    test = with_p_value(cs.flag_test, p_adj)
-    confidence = combined_confidence(test, th.min_timeouts)
+    significant, confidence = significance(cs.flag_test, th.min_timeouts, p_adj, alpha=th.alpha)
     share = cs.flag_loss_share or 0.0
-    if (
-        test.mean < th.min_flag_balance
-        or share < th.min_flag_share
-        or confidence < th.min_confidence
-        or p_adj > th.max_p_value
-    ):
+    if cs.flag_test.mean < th.min_flag_balance or share < th.min_flag_share or not significant:
         return None
     tc = cs.time_class
     net = cs.lost_on_time - cs.won_on_time
@@ -451,15 +452,9 @@ def opening_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
     ratio = cs.opening_ratio
     if cs.opening_n < th.min_games or ratio is None or cs.my_opening is None or cs.opp_opening is None:
         return None
-    test = with_p_value(cs.opening_test, p_adj)
-    confidence = combined_confidence(test, th.min_games)
+    significant, confidence = significance(cs.opening_test, th.min_games, p_adj, alpha=th.strict_alpha)
     gap = cs.my_opening - cs.opp_opening
-    if (
-        ratio < th.slow_opening_ratio
-        or gap < th.min_opening_gap
-        or confidence < th.min_confidence
-        or p_adj > th.max_p_value
-    ):
+    if ratio < th.slow_opening_ratio or gap < th.min_opening_gap or not significant:
         return None
     tc = cs.time_class
     slow = [c for c in cs.clocks if c.my_opening is not None and c.opp_opening is not None]
@@ -513,16 +508,10 @@ def clock_strength_insight(cs: ClassStats, p_flags: float, p_balance: float, th:
     cp = cs.checkpoints.get(CHECKPOINTS[0])
     if cp is None or cp.n < th.min_games or (cp.ahead_rate or 0.0) < th.min_ahead_share:
         return None
-    balance_conf = combined_confidence(with_p_value(cp.test, p_balance), th.min_games)
-    flag_test = with_p_value(cs.flag_test, p_flags)
-    flag_conf = combined_confidence(flag_test, th.min_timeouts)
+    balance_sig, balance_conf = significance(cp.test, th.min_games, p_balance, alpha=th.strict_alpha)
+    flag_sig, flag_conf = significance(cs.flag_test, th.min_timeouts, p_flags, alpha=th.strict_alpha)
     confidence = min(balance_conf, flag_conf)
-    if (
-        cp.test.mean <= 0
-        or flag_test.mean > -th.min_flag_balance
-        or confidence < th.min_confidence
-        or max(p_flags, p_balance) > th.max_p_value
-    ):
+    if cp.test.mean <= 0 or cs.flag_test.mean > -th.min_flag_balance or not (balance_sig and flag_sig):
         return None
     tc = cs.time_class
     wins_on_time = [g for g in cs.games if g.outcome == "win" and g.termination == "timeout"]
