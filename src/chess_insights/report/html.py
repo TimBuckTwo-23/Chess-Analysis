@@ -22,7 +22,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 from urllib.parse import urlsplit
 
 from ..insights import STUDY_LIBRARY
-from ..models import VALUE_FORMATS, Chart, Insight, Kpi, ModuleResult, Report, StudyItem, Table
+from ..models import VALUE_FORMATS, Chart, Diagram, Insight, Kpi, ModuleResult, Report, StudyItem, Table
 
 # =========================================================================== value formatting
 MISSING = "—"  # em dash for None / NaN
@@ -447,7 +447,7 @@ def nice_ticks(lo: float, hi: float, fmt: Optional[str] = None, target: int = 5)
         lo, hi = hi, lo
     if hi - lo < 1e-12:
         if lo == 0:
-            lo, hi = 0.0, (1.0 if fmt in _PCT_FORMATS or fmt not in ("int", "rating", "signed_int") else 4.0)
+            lo, hi = 0.0, (4.0 if fmt in ("int", "rating", "signed_int") else 1.0)
         else:
             pad = abs(lo) * 0.1
             lo, hi = lo - pad, hi + pad
@@ -562,7 +562,7 @@ def _vline(cls: str, x: float, y1: float, y2: float) -> str:
     return f'<line class="{cls}" x1="{_n(x)}" x2="{_n(x)}" y1="{_n(y1)}" y2="{_n(y2)}"/>'
 
 
-def _ref_text(ref: float, fmt: Optional[str]) -> str:
+def reference_text(ref: float, fmt: Optional[str]) -> str:
     return f"Reference {format_value(ref, fmt)}"
 
 
@@ -586,11 +586,14 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
     left = max(_tw(t, TICK_PX) for t in tick_txt) + 10
     right = 6.0
     band = (VB_W - left - right) / n
-    rotate = max(_tw(label) for label in labels) > band - 4
+    widest = max(_tw(label) for label in labels)
     shown = labels
     thin = 1
+    rotate = widest > band - 4
+    if rotate and n >= 10 and widest <= 8 * LABEL_PX * EM:  # e.g. hours 00-23: every k-th label, upright
+        thin, rotate = math.ceil((widest + 8) / band), False
     if rotate:
-        shown = [_ellipsize(label, 14 * LABEL_PX * EM) for label in labels]
+        shown = [_ellipsize(label, 18 * LABEL_PX * EM) for label in labels]
         max_w = max(_tw(t) for t in shown)
         left = max(left, max_w * math.cos(_ROT) - band / 2 + 4)
         band = (VB_W - left - right) / n
@@ -661,7 +664,6 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
     out.append(_hline(_zero_class(fmt, extent), left, x_right, base_y))
     if ref is not None:
         out.append(_hline("ref", left, x_right, y(ref)))
-        out.append(f'<text class="t-ref" x="{_n(x_right)}" y="{_n(y(ref) - 5)}" text-anchor="end">{_esc(_ref_text(ref, fmt))}</text>')
 
     label_y = top + PLOT_H + neg_room + (12 if rotate else 18)
     for i, text in enumerate(shown):
@@ -716,7 +718,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     group = s * bh + (s - 1) * GAP
     line_h = LABEL_PX * 1.2
     pitch = max(group + 12, max(len(w) for w in wrapped) * line_h + 8)
-    top = 8.0 + (18.0 if ref is not None else 0.0)
+    top = 8.0
     rows_bottom = top + n * pitch
     height = rows_bottom + (26.0 if not single else 6.0)
 
@@ -749,7 +751,10 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         if single:
             v = series[0][1][i]
             if v is not None and v < 0:
-                out.append(f'<text class="t-val" x="{_n(x(v) - 6)}" y="{_n(cy)}" dy=".32em" text-anchor="end">{_esc(val_txt[i])}</text>')
+                out.append(
+                    f'<text class="t-val" x="{_n(x(v) - 6)}" y="{_n(cy)}" dy=".32em" text-anchor="end">'
+                    f"{_esc(val_txt[i])}</text>"
+                )
             else:
                 tx = x(v if v is not None else 0.0) + 6
                 cls = "t-val" if v is not None else "t-tick"
@@ -757,12 +762,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
 
     out.append(_vline(_zero_class(fmt, values), x(0.0), top - 2, rows_bottom))
     if ref is not None:
-        rx = x(ref)
-        txt = _ref_text(ref, fmt)
-        half = _tw(txt, TICK_PX) / 2
-        tx = min(max(rx, half + 2), VB_W - half - 2)
-        out.append(_vline("ref", rx, top - 4, rows_bottom))
-        out.append(f'<text class="t-ref" x="{_n(tx)}" y="{_n(top - 9)}" text-anchor="middle">{_esc(txt)}</text>')
+        out.append(_vline("ref", x(ref), top - 4, rows_bottom))
     out.append("</svg>")
     return "".join(out)
 
@@ -788,7 +788,7 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     thin = max(1, math.ceil((max_w + 10) / spacing))
     shown = set(range(n - 1, -1, -thin))  # always label the most recent point
 
-    top = 14.0 + (6.0 if ref is not None else 0.0)
+    top = 14.0
     height = top + PLOT_H + 28
     y = _linear(ticks[0], ticks[-1], top + PLOT_H, top)
 
@@ -804,7 +804,6 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         out.append(_hline(_zero_class(fmt, values), left, VB_W - 4, y(0.0)))
     if ref is not None:
         out.append(_hline("ref", left, VB_W - 4, y(ref)))
-        out.append(f'<text class="t-ref" x="{_n(VB_W - 4)}" y="{_n(y(ref) - 5)}" text-anchor="end">{_esc(_ref_text(ref, fmt))}</text>')
 
     for j, (_, vals) in enumerate(series):
         cls = j % MAX_SERIES + 1
@@ -886,8 +885,9 @@ def _cell_html(value: Any, fmt: Optional[str]) -> tuple[str, str]:
             return _link(url, url_link_text(url)), ""
         return _esc(value), ""
     text = format_value(value, fmt)
-    mono = "mono" if isinstance(value, str) and (_ECO_RE.match(text) or _MOVES_RE.match(text)) else ""
-    return _esc(text), mono
+    if isinstance(value, str) and (_ECO_RE.match(text) or _MOVES_RE.match(text)):
+        return _esc(text), "mono"
+    return _esc(text), "wide" if len(text) > 24 else ""
 
 
 def _table_html(table: Table, *, show_title: bool = True) -> str:
@@ -926,13 +926,16 @@ def _table_html(table: Table, *, show_title: bool = True) -> str:
     return "".join(parts)
 
 
-def _legend(series: list[tuple[str, list[Optional[float]]]], kind: str) -> str:
+def _legend(series: list[tuple[str, list[Optional[float]]]], kind: str, reference: str) -> str:
+    """Series keys (only when there are 2+ series) plus the dashed reference-line key."""
     key = "key key--line" if kind == "line" else "key"
-    items = "".join(
+    items = [
         f'<li><span class="{key} sw{j % MAX_SERIES + 1}" aria-hidden="true"></span>{_esc(name)}</li>'
         for j, (name, _) in enumerate(series)
-    )
-    return f'<ul class="legend" aria-label="Legend">{items}</ul>'
+    ] if len(series) >= 2 else []
+    if reference:
+        items.append(f'<li><span class="key key--ref" aria-hidden="true"></span>{_esc(reference)}</li>')
+    return f'<ul class="legend" aria-label="Legend">{"".join(items)}</ul>'
 
 
 def _chart_html(chart: Chart) -> str:
@@ -962,8 +965,9 @@ def _chart_html(chart: Chart) -> str:
     if kind == "table":
         parts.append(_table_html(chart_table(chart), show_title=False))
     else:
-        if len(series) >= 2:
-            parts.append(_legend(series, kind))
+        ref_label = reference_text(data.reference, data.fmt) if data.reference is not None else ""
+        if len(series) >= 2 or ref_label:
+            parts.append(_legend(series, kind, ref_label))
         if kind == "hbar":
             parts.append(_svg_hbar(data, series, title))
         elif kind == "line":
@@ -1087,12 +1091,44 @@ def _sw_html(report: Report) -> str:
         '<p class="glyph-key">Marks follow chess annotation: <b>??</b> serious, <b>?</b> clear, <b>?!</b> minor weakness; '
         "<b>!!</b> major, <b>!</b> solid strength; <b>=</b> observation.</p>"
     )
+    more = "More games make patterns reliable enough to report."
     return (
         '<div class="section sw">'
-        + column("strengths", "Strengths", "!", report.strengths or [], "No clear strengths yet. More games make patterns reliable enough to report.")
-        + column("weaknesses", "Weaknesses", "?", report.weaknesses or [], "No clear weaknesses yet. More games make patterns reliable enough to report.")
+        + column("strengths", "Strengths", "!", report.strengths or [], f"No clear strengths yet. {more}")
+        + column("weaknesses", "Weaknesses", "?", report.weaknesses or [], f"No clear weaknesses yet. {more}")
         + key
         + "</div>"
+    )
+
+
+def lichess_analysis_url(fen: str) -> Optional[str]:
+    """Link that opens the position on the Lichess analysis board."""
+    fen = (fen or "").strip()
+    if not fen or not re.fullmatch(r"[1-8KQRBNPkqrbnp/]+ [wb] [KQkqA-Ha-h-]+ [a-h1-8-]+( \d+ \d+)?", fen):
+        return None
+    return "https://lichess.org/analysis/" + fen.replace(" ", "_")
+
+
+def _diagram_html(d: Diagram) -> str:
+    # The SVG is produced by chess.svg in our own code from a FEN (never user text);
+    # still refuse anything that isn't a bare <svg> element.
+    svg = d.svg.strip() if isinstance(d.svg, str) else ""
+    if not svg.startswith("<svg") or "<script" in svg.lower() or "javascript:" in svg.lower():
+        svg = ""
+    links = []
+    game = safe_url(d.link)
+    if game:
+        links.append(_link(game, "Open the game"))
+    analysis = lichess_analysis_url(d.fen)
+    if analysis:
+        links.append(_link(analysis, "Analyse on Lichess"))
+    return (
+        '<figure class="board-fig">'
+        f'<div class="board-svg" role="img" aria-label="{_esc(d.title)}">{svg}</div>'
+        f'<figcaption><span class="block-title">{_esc(d.title)}</span>'
+        + (f'<span class="board-cap">{_esc(d.caption)}</span>' if text_or_empty(d.caption) else "")
+        + (f'<span class="board-links">{" ".join(links)}</span>' if links else "")
+        + "</figcaption></figure>"
     )
 
 
@@ -1107,6 +1143,8 @@ def _module_html(module: ModuleResult, anchor: str) -> str:
         parts.append('<dl class="kpis">' + "".join(_kpi_html(k) for k in module.kpis) + "</dl>")
     if module.charts:
         parts.append('<div class="charts">' + "".join(_chart_html(c) for c in module.charts) + "</div>")
+    if getattr(module, "diagrams", None):
+        parts.append('<div class="boards">' + "".join(_diagram_html(d) for d in module.diagrams) + "</div>")
     for table in module.tables or []:
         parts.append(_table_html(table))
     if module.insights:
@@ -1279,9 +1317,9 @@ _BASE_CSS = """
 html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
 body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-sans);font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
 .ci{max-width:1080px;margin-inline:auto;padding-left:max(clamp(16px,4vw,40px),env(safe-area-inset-left,0px));padding-right:max(clamp(16px,4vw,40px),env(safe-area-inset-right,0px));padding-block:28px 56px}
-.ci h1,.ci h2,.ci h3{margin:0;text-wrap:balance}
-.ci p,.ci dl,.ci dd,.ci figure{margin:0}
-.ci ul,.ci ol{margin:0;padding:0}
+:where(.ci) :where(h1,h2,h3,h4){margin:0;text-wrap:balance}
+:where(.ci) :where(p,dl,dd,figure){margin:0}
+:where(.ci) :where(ul,ol){margin:0;padding:0}
 .ci a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:2px}
 .ci a:hover{text-decoration-thickness:2px}
 .ci :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
@@ -1359,18 +1397,25 @@ details.study[open] summary{margin-bottom:8px}
 .kpi-value--text{font:600 15px/1.35 var(--font-sans)}
 .kpi-hint{font-size:13px;line-height:1.35;color:var(--muted)}
 .charts{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr));gap:20px}
+.boards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:20px}
+.board-fig{display:flex;flex-direction:column;gap:10px;min-width:0;margin:0}
+.board-svg svg{display:block;width:100%;max-width:320px;height:auto;border-radius:6px}
+.board-fig figcaption{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--ink-2)}
+.board-cap{line-height:1.45}
+.board-links{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px}
 .ci-chart{display:flex;flex-direction:column;gap:10px;min-width:0;padding:14px 14px 12px;background:var(--surface);border-radius:8px}
 .block-title{font:600 15px/1.3 var(--font-cond);color:var(--ink)}
 .legend{list-style:none;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;color:var(--ink-2)}
 .legend li{display:inline-flex;align-items:center;gap:6px}
 .key{display:inline-block;width:10px;height:10px;border-radius:2px}
 .key--line{width:16px;height:2px;border-radius:1px}
+.key--ref{width:18px;height:0;border-radius:0;border-top:2px dashed var(--ink-2)}
 .ci-chart svg{display:block;width:100%;height:auto;overflow:visible}
 .ci-chart svg text{font-family:var(--font-sans);font-size:13px;fill:var(--ink-2)}
 .ci-chart svg line,.ci-chart svg text{pointer-events:none}
 .ci-chart .t-tick{font-size:12px;fill:var(--muted);font-variant-numeric:tabular-nums}
 .ci-chart .t-val{font-size:12px;fill:var(--ink);font-variant-numeric:tabular-nums}
-.ci-chart .t-ref{font-size:12px;fill:var(--ink-2);paint-order:stroke;stroke:var(--surface);stroke-width:4px;stroke-linejoin:round}
+.ci-chart .t-val{paint-order:stroke;stroke:var(--surface);stroke-width:4px;stroke-linejoin:round}
 .ci-chart .grid{stroke:var(--hairline);stroke-width:1px;vector-effect:non-scaling-stroke}
 .ci-chart .base{stroke:var(--axis);stroke-width:1px;vector-effect:non-scaling-stroke}
 .ci-chart .zero{stroke:var(--ink-2);stroke-width:1.5px;vector-effect:non-scaling-stroke}
@@ -1391,10 +1436,12 @@ details.study[open] summary{margin-bottom:8px}
 .ci th:first-child,.ci td:first-child{padding-left:0}
 .ci th:last-child,.ci td:last-child{padding-right:0}
 .ci td{min-width:6ch}
+.ci td.wide{min-width:18ch}
 .ci .num{text-align:right;white-space:nowrap}
 .ci td.mono{font-family:var(--font-mono);font-size:13px}
 .ci tbody tr:hover{background:var(--accent-wash)}
-.foot{display:grid;gap:10px;max-width:80ch;margin-top:48px;padding-top:24px;border-top:1px solid var(--hairline);font-size:13px;color:var(--ink-2)}
+.foot{display:grid;gap:10px;margin-top:48px;padding-top:24px;border-top:1px solid var(--hairline);font-size:13px;color:var(--ink-2)}
+.foot>*{max-width:80ch}
 .foot h2{font:600 15px/1.3 var(--font-cond);color:var(--ink)}
 .foot ul{padding-left:1.1em;display:grid;gap:6px}
 .ci-tip{position:fixed;z-index:20;pointer-events:none;max-width:260px;padding:8px 10px;border-radius:6px;background:var(--tip-bg);color:var(--tip-ink);font:13px/1.4 var(--font-sans);box-shadow:0 6px 20px rgba(0,0,0,.2)}

@@ -1,0 +1,796 @@
+"""Report renderers: HTML (standalone + Artifact fragment), Markdown, JSON and write_report."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from datetime import date, datetime, timedelta, timezone
+from html.parser import HTMLParser
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from chess_insights.models import Chart, Insight, Kpi, ModuleResult, Report, Series, StudyItem, Table
+from chess_insights.report import render_html, render_markdown, to_dict, to_json, write_report
+from chess_insights.report.html import (
+    MINUS,
+    MISSING,
+    chart_table,
+    format_value,
+    glyph_for,
+    infer_format,
+    module_anchors,
+    nice_ticks,
+    safe_url,
+)
+
+XSS = "<script>alert(1)</script>"
+JS_URL = "javascript:alert(1)"
+GAME = "https://www.chess.com/game/live/{}"
+
+
+# --------------------------------------------------------------------------- sample report
+def _ins(kind, category, title, detail, severity, confidence, *, games=(), study=(), key=None) -> Insight:
+    return Insight(
+        id=key or f"{category}.{kind}.{re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')}",
+        kind=kind,
+        category=category,
+        title=title,
+        detail=detail,
+        severity=severity,
+        confidence=confidence,
+        evidence={"n": 24, "score": 0.41, "expected": 0.52},
+        study=list(study),
+        example_games=list(games),
+    )
+
+
+def build_sample_report(hostile: bool = False) -> Report:
+    """A realistic multi-module report exercising every format, chart kind and edge case."""
+    bad = f" {XSS} & \"quotes\" 'single'" if hostile else ""
+    months = [f"2024-{m:02d}" for m in range(1, 13)]
+
+    caro = _ins(
+        "weakness",
+        "openings",
+        "The Caro-Kann is costing you points as Black" + bad,
+        "24 games as Black: you scored 38% where your ratings predicted 52% (−14 points per 100 games).",
+        0.7,
+        0.82,
+        games=[GAME.format(105000000002), GAME.format(105000000017), JS_URL if hostile else GAME.format(105000000021)],
+        study=[
+            "Replay your 9 Caro-Kann losses and mark the move where you left known theory.",
+            "Learn one main line against the Advance Variation (3.e5 Bf5).",
+        ],
+    )
+    time_trouble = _ins(
+        "weakness",
+        "time",
+        "You lose too many blitz games on time",
+        "31% of your blitz losses were on time, against 18% for players at your level; you reach move 30 with 41s left on average.",
+        0.45,
+        0.74,
+        games=[GAME.format(105000000031), GAME.format(105000000044)],
+        study=["Aim to reach move 15 with at least 70% of your clock."],
+    )
+    tilt = _ins(
+        "weakness",
+        "habits",
+        "Your results drop after two losses in a row",
+        "After two straight losses you score 39% against an expected 50% (58 games).",
+        0.35,
+        0.45,
+        games=[GAME.format(105000000051)],
+    )
+    italian = _ins(
+        "strength",
+        "openings",
+        "The Italian Game is working well for you as White",
+        "41 games: 63% scored where 51% was expected.",
+        0.6,
+        0.88,
+        games=[GAME.format(105000000001)],
+        study=["Keep it: add one sideline (the Evans Gambit) to stay unpredictable."],
+    )
+    endgames = _ins(
+        "strength",
+        "conversion",
+        "You convert winning positions reliably",
+        "You won 87% of games where you were +3 or better at move 30.",
+        0.3,
+        0.6,
+    )
+    observation = _ins(
+        "observation",
+        "results",
+        "Most of your games are blitz",
+        "78% of your games are blitz; rapid results are based on only 12 games.",
+        0.1,
+        0.9,
+    )
+
+    results = ModuleResult(
+        key="results",
+        title="Results & rating",
+        summary="You scored 53% against opponents who were on average slightly weaker, 4 points below what your rating predicts.",
+        kpis=[
+            Kpi("Games", 1234, "int"),
+            Kpi("Score", 0.534, "pct", hint="wins + half the draws"),
+            Kpi("Score vs expected", -0.043, "signed_pct", hint="per game, Elo expected score"),
+            Kpi("Current rating", 1512, "rating"),
+            Kpi("Rating change", 87, "signed_int", hint="since January"),
+            Kpi("Draw rate", 0.053, "pct"),
+            Kpi("Average game length", 38.46, "float1", hint="moves"),
+            Kpi("Performance vs expected", 1.0432, "float2"),
+            Kpi("Best win", GAME.format(105000000009), "url"),
+            Kpi("Most played opponent", "knightrider77" + bad, "text"),
+            Kpi("Peak rating date", None, "text"),
+        ],
+        charts=[
+            Chart(
+                kind="line",
+                title="Rating by month" + bad,
+                labels=months,
+                series=[
+                    Series("Blitz", [1421, 1438, 1450, None, 1472, 1466, 1490, 1484, 1501, 1498, 1507, 1512]),
+                    Series("Rapid", [1502, None, 1515, 1522, 1519, None, None, 1540, 1548, 1551, 1549, 1560]),
+                ],
+                value_format="rating",
+            ),
+            Chart(
+                kind="stacked_bar",
+                title="Result mix by time control",
+                labels=["Bullet", "Blitz", "Rapid", "Daily"],
+                series=[
+                    Series("Wins", [0.44, 0.49, 0.55, 0.61]),
+                    Series("Draws", [0.03, 0.05, 0.09, 0.14]),
+                    Series("Losses", [0.53, 0.46, 0.36, 0.25]),
+                ],
+                value_format="pct",
+            ),
+            Chart(
+                kind="bar",
+                title="Score vs expected by opponent strength",
+                labels=["≤ −200", "−200 to −100", "−100 to 0", "0 to +100", "+100 to +200", "≥ +200"],
+                series=[Series("Score − expected", [0.021, 0.034, -0.012, -0.061, -0.094, None])],
+                value_format="signed_pct",
+                note="Opponent rating minus yours. The last bucket has no games yet.",
+            ),
+            Chart(
+                kind="bar",
+                title="Score by colour",
+                labels=["White", "Black"],
+                series=[Series("Score", [0.57, 0.49]), Series("Expected", [0.52, 0.51])],
+                value_format="pct",
+                reference=0.5,
+            ),
+        ],
+        tables=[
+            Table(
+                title="By time class",
+                columns=["Time class", "Games", "Score", "Expected", "Difference", "Avg opponent", "Avg clock left"],
+                rows=[
+                    ["Bullet", 88, 0.47, 0.5, -0.03, 1455.2, 12.4],
+                    ["Blitz", 962, 0.531, 0.52, 0.011, 1498.0, 41.0],
+                    ["Rapid", 172, 0.58, 0.55, 0.03, 1520.7, 312.0],
+                    ["Daily", 12, 0.625, 0.5, 0.125, None, None],
+                ],
+                formats=["text", "int", "pct", "pct", "signed_pct", "rating", "seconds"],
+                note="Daily games have no clock, so clock columns are empty.",
+            )
+        ],
+        insights=[observation],
+    )
+
+    openings = ModuleResult(
+        key="openings",
+        title="Openings",
+        summary="Your White repertoire is in good shape; as Black the Caro-Kann and Sicilian Najdorf lines lose points.",
+        kpis=[Kpi("Openings played", 37, "int"), Kpi("Most played", "Italian Game", "text")],
+        charts=[
+            Chart(
+                kind="hbar",
+                title="Score vs expected by opening (Black)",
+                labels=[
+                    "Caro-Kann Defense: Advance Variation, Short Variation" + bad,
+                    "Sicilian Defense: Najdorf Variation, English Attack",
+                    "French Defense",
+                    "Scandinavian Defense: Mieses-Kotroc Variation",
+                    "King's Indian Defense",
+                    "Queen's Gambit Declined",
+                ],
+                series=[Series("Score − expected", [-0.14, -0.08, 0.02, 0.05, None, 0.0])],
+                value_format="signed_pct",
+            ),
+            Chart(
+                kind="hbar",
+                title="Score and expected score (White)",
+                labels=["Italian Game", "Ruy Lopez", "Scotch Game", "Vienna Game"],
+                series=[Series("Score", [0.63, 0.51, 0.55, 0.42]), Series("Expected", [0.51, 0.52, 0.5, 0.5])],
+                value_format="pct",
+                reference=0.5,
+            ),
+        ],
+        tables=[
+            Table(
+                title="Opening lines | with pipes" + bad,
+                columns=["ECO", "Opening", "Colour", "Games", "Score", "Difference", "Example"],
+                rows=[
+                    ["B12", "Caro-Kann Defense: Advance Variation" + bad, "Black", 24, 0.38, -0.14, GAME.format(105000000002)],
+                    ["C50", "Italian Game: Giuoco Pianissimo", "White", 41, 0.63, 0.12, GAME.format(105000000001)],
+                    ["B90", "Sicilian | Najdorf", "Black", 15, 0.43, -0.08, JS_URL if hostile else None],
+                ],
+                formats=["text", "text", "text", "int", "pct", "signed_pct", "url"],
+            )
+        ],
+        insights=[caro, italian],
+    )
+
+    long_labels = ["After a win", "After a draw", "After a loss", "After two losses in a row", "First game of the day", "Late-night games (after 23:00)"]
+    minutes = [datetime(2024, 3, 1) + timedelta(days=d) for d in range(40)]
+    time_mgmt = ModuleResult(
+        key="time_mgmt",
+        title="Clock & time management",
+        summary="You spend the most time in the middlegame and often reach the endgame short of time in blitz.",
+        kpis=[
+            Kpi("Average time left at move 30", 95, "seconds"),
+            Kpi("Longest think", 4000, "seconds", hint="daily games excluded"),
+            Kpi("Median move time", 7.25, "seconds"),
+            Kpi("Games lost on time", 0.31, "pct"),
+        ],
+        charts=[
+            Chart(
+                kind="bar",
+                title="Average time per move by phase",
+                labels=["Opening", "Middlegame", "Endgame"],
+                series=[Series("Seconds", [3.2, 11.8, 6.4])],
+                value_format="seconds",
+            ),
+            Chart(
+                kind="line",
+                title="Clock left at move 30, last 40 days",
+                labels=[f"{d:%d %b}" for d in minutes],
+                series=[Series("Clock", [60 + 50 * math.sin(i / 4) + i for i in range(40)])],
+                value_format="seconds",
+            ),
+            Chart(
+                kind="bar",
+                title="Score in different situations",
+                labels=long_labels,
+                series=[Series("Score", [0.55, 0.52, 0.47, 0.39, 0.5, 0.41])],
+                value_format="pct",
+                reference=0.5,
+            ),
+        ],
+        tables=[
+            Table(
+                title="Slowest moves",
+                columns=["Game", "Move", "Time spent", "Clock after", "Played"],
+                rows=[
+                    [GAME.format(105000000061), "14... Nxe4", 95.0, 4000, date(2024, 5, 2)],
+                    [GAME.format(105000000062), "23. Rxd7+", 7.25, 62.5, date(2024, 5, 9)],
+                    [GAME.format(105000000063), "9. O-O", float("nan"), None, None],
+                ],
+                formats=None,
+            )
+        ],
+        insights=[time_trouble],
+    )
+
+    habits = ModuleResult(
+        key="habits",
+        title="Habits & tilt",
+        summary="Long sessions and back-to-back losses are where your results slip.",
+        charts=[
+            Chart(
+                kind="bar",
+                title="Games by hour of day",
+                labels=[f"{h:02d}" for h in range(24)],
+                series=[Series("Games", [4, 2, 1, 0, 0, 0, 1, 3, 6, 9, 12, 15, 22, 25, 18, 20, 31, 44, 58, 71, 66, 49, 30, 12])],
+                value_format="int",
+            ),
+            Chart(
+                kind="stacked_bar",
+                title="Results by session length",
+                labels=["1 game", "2–3 games", "4–6 games", "7+ games"],
+                series=[Series("Wins", [51, 120, 88, 41]), Series("Draws", [4, 9, 7, 2]), Series("Losses", [40, 101, 92, 60])],
+                value_format="int",
+            ),
+        ],
+        insights=[tilt],
+    )
+
+    endings = ModuleResult(
+        key="endings",
+        title="How your games end",
+        summary="Not enough data: fewer than 20 decisive games in this filter.",
+        charts=[Chart(kind="bar", title="Endings", labels=["Checkmate", "Resignation"], series=[Series("Games", [None, None])])],
+        tables=[Table(title="Terminations", columns=["How", "Games"], rows=[])],
+    )
+    engine = ModuleResult(
+        key="engine_stats",
+        title="Engine review",
+        summary="This section could not be computed (RuntimeError: Stockfish crashed).",
+        stats={"error": "RuntimeError: Stockfish crashed", "nan": float("nan"), "inf": float("inf")},
+    )
+
+    plan = [
+        StudyItem(
+            title=caro.title,
+            why=caro.detail,
+            actions=caro.study + ["Study 3-5 annotated master games in the Advance Variation."],
+            games=caro.example_games,
+            category="Opening repertoire",
+            priority=caro.priority,
+        ),
+        StudyItem(
+            title=time_trouble.title,
+            why=time_trouble.detail,
+            actions=time_trouble.study + ["Play some 3+2 games to practise finishing with increment."],
+            games=time_trouble.example_games,
+            category="Clock management",
+            priority=time_trouble.priority,
+        ),
+        StudyItem(
+            title=tilt.title,
+            why=tilt.detail,
+            actions=["After two losses in a row, take at least a 15-minute break."],
+            games=[],
+            category="Playing habits",
+            priority=tilt.priority,
+        ),
+    ]
+    return Report(
+        username=("TesterBob" + bad) if hostile else "TesterBob",
+        generated_at=datetime(2026, 9, 25, 14, 3, tzinfo=timezone.utc),
+        filters="rated + casual, blitz+rapid, standard chess, since 2024-01-01",
+        n_games=1234,
+        date_from=datetime(2024, 1, 3, 18, 2, tzinfo=timezone.utc),
+        date_to=datetime(2024, 12, 30, 21, 40, tzinfo=timezone.utc),
+        modules=[results, openings, time_mgmt, habits, endings, engine],
+        strengths=[italian, endgames],
+        weaknesses=[caro, time_trouble, tilt],
+        study_plan=plan,
+        engine_note="Stockfish 16 at depth 12 on the 150 most recent games.",
+        headline="Biggest opportunity: The Caro-Kann is costing you points as Black. Biggest strength: The Italian Game is working well for you as White.",
+    )
+
+
+def empty_report() -> Report:
+    return Report(
+        username="",
+        generated_at=datetime(2026, 9, 25, 14, 3),
+        filters="",
+        n_games=0,
+        date_from=None,
+        date_to=None,
+        modules=[ModuleResult(key="results", title="Results & rating", summary="Not enough games to analyse.")],
+        strengths=[],
+        weaknesses=[],
+        study_plan=[],
+    )
+
+
+# --------------------------------------------------------------------------- HTML checker
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr", "param"}
+
+
+class TagChecker(HTMLParser):
+    """Records balance errors plus every href/src/id so tests can inspect them."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.errors: list[str] = []
+        self.hrefs: list[tuple[str, str]] = []  # (tag, href)
+        self.srcs: list[str] = []
+        self.ids: list[str] = []
+        self.tags: list[str] = []
+
+    def _attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.tags.append(tag)
+        for name, value in attrs:
+            if name == "href":
+                self.hrefs.append((tag, value or ""))
+            elif name == "src":
+                self.srcs.append(value or "")
+            elif name == "id":
+                self.ids.append(value or "")
+
+    def handle_starttag(self, tag, attrs):
+        self._attrs(tag, attrs)
+        if tag not in VOID:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self._attrs(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag in VOID:
+            return
+        if not self.stack or self.stack[-1] != tag:
+            self.errors.append(f"unexpected </{tag}> with open {self.stack[-4:]}")
+        else:
+            self.stack.pop()
+
+
+def check_html(text: str) -> TagChecker:
+    checker = TagChecker()
+    checker.feed(text)
+    checker.close()
+    assert not checker.errors, checker.errors[:5]
+    assert not checker.stack, f"unclosed tags: {checker.stack}"
+    return checker
+
+
+@pytest.fixture(scope="module")
+def report() -> Report:
+    return build_sample_report()
+
+
+@pytest.fixture(scope="module")
+def hostile() -> Report:
+    return build_sample_report(hostile=True)
+
+
+# --------------------------------------------------------------------------- value formatting
+@pytest.mark.parametrize(
+    ("value", "fmt", "expected"),
+    [
+        (1234, "int", "1,234"),
+        (1234.5, "int", "1,235"),
+        (-7, "int", f"{MINUS}7"),
+        (0.534, "pct", "53%"),
+        (0.535, "pct", "54%"),
+        (0.053, "pct", "5.3%"),
+        (0.0, "pct", "0%"),
+        (1.5, "pct", "150%"),
+        (-0.25, "pct", f"{MINUS}25%"),
+        (0.04, "signed_pct", "+4%"),
+        (-0.07, "signed_pct", f"{MINUS}7%"),
+        (0.004, "signed_pct", "+0.4%"),
+        (0.0, "signed_pct", "0%"),
+        (12, "signed_int", "+12"),
+        (-1234, "signed_int", f"{MINUS}1,234"),
+        (0, "signed_int", "0"),
+        (1512, "rating", "1512"),
+        (1498.6, "rating", "1499"),
+        (38.46, "float1", "38.5"),
+        (1234.5, "float1", "1,234.5"),
+        (1.005, "float2", "1.01"),
+        (-0.5, "float2", f"{MINUS}0.50"),
+        (95, "seconds", "1:35"),
+        (4000, "seconds", "1:06:40"),
+        (7.25, "seconds", "7.3s"),
+        (59.96, "seconds", "1:00"),
+        (0, "seconds", "0.0s"),
+        (-5, "seconds", f"{MINUS}5.0s"),
+        ("Caro-Kann", "text", "Caro-Kann"),
+        (True, "text", "yes"),
+        (datetime(2024, 5, 2), "text", "2024-05-02"),
+        (datetime(2024, 5, 2, 18, 30), "text", "2024-05-02 18:30"),
+        ("https://www.chess.com/game/live/1", "url", "https://www.chess.com/game/live/1"),
+        (None, "pct", MISSING),
+        (float("nan"), "int", MISSING),
+        (float("inf"), "float1", MISSING),
+        (pd.NA, "int", MISSING),
+        (pd.NaT, "text", MISSING),
+        ("", "text", MISSING),
+        ("n/a", "int", "n/a"),  # text in a numeric column is shown as is
+        ("1,500", "rating", "1500"),
+        (1234, None, "1,234"),
+        (0.5, None, "0.50"),
+        (7.0, "bogus", "7"),
+    ],
+)
+def test_format_value(value, fmt, expected):
+    assert format_value(value, fmt) == expected
+
+
+def test_infer_format():
+    assert infer_format(3) == "int"
+    assert infer_format(3.0) == "int"
+    assert infer_format(3.25) == "float2"
+    assert infer_format(True) == "text"
+    assert infer_format("https://x.org/a") == "url"
+    assert infer_format("hello") == "text"
+
+
+def test_safe_url():
+    assert safe_url("https://www.chess.com/game/live/1") == "https://www.chess.com/game/live/1"
+    assert safe_url(" http://example.org/a?b=1&c=2 ") == "http://example.org/a?b=1&c=2"
+    for bad in (JS_URL, "JavaScript:alert(1)", " javascript:alert(1)", "data:text/html,x", "//evil.org", "https://a b", None, 5, "ftp://x"):
+        assert safe_url(bad) is None, bad
+
+
+def test_nice_ticks_are_round():
+    assert nice_ticks(0, 0.63, "pct") == [0, 0.2, 0.4, 0.6, 0.8]
+    assert nice_ticks(0, 1, "pct") == [0, 0.25, 0.5, 0.75, 1.0]
+    assert nice_ticks(-0.094, 0.034, "signed_pct") == [-0.1, -0.05, 0, 0.05]
+    assert nice_ticks(1421, 1560, "rating") == [1400, 1450, 1500, 1550, 1600]
+    assert nice_ticks(0, 3, "int") == [0, 1, 2, 3]
+    assert nice_ticks(0, 400, "seconds") == [0, 120, 240, 360, 480]
+    assert nice_ticks(0, 0, "int") == [0, 1, 2, 3, 4]
+    assert nice_ticks(5, 5) == [4.5, 4.75, 5.0, 5.25, 5.5]
+
+
+def test_glyphs_follow_priority():
+    weak = lambda p: Insight("x", "weakness", "results", "t", "d", severity=p, confidence=1.0)  # noqa: E731
+    strong = lambda p: Insight("x", "strength", "results", "t", "d", severity=p, confidence=1.0)  # noqa: E731
+    assert [glyph_for(weak(p)) for p in (0.9, 0.3, 0.1)] == ["??", "?", "?!"]
+    assert [glyph_for(strong(p)) for p in (0.6, 0.2)] == ["!!", "!"]
+    assert glyph_for(Insight("x", "observation", "results", "t", "d", 1.0, 1.0)) == "="
+
+
+# --------------------------------------------------------------------------- HTML
+def test_html_standalone_document(report):
+    html = render_html(report)
+    assert html.startswith("<!doctype html>")
+    assert '<html lang="en">' in html
+    assert '<meta charset="utf-8">' in html
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in html
+    assert "<title>TesterBob · Chess Insights</title>" in html
+    checker = check_html(html)
+    assert {"head", "body", "style", "main", "svg"} <= set(checker.tags)
+
+
+def test_html_fragment_for_artifacts(report):
+    frag = render_html(report, standalone=False)
+    assert frag.startswith("<title>")
+    assert re.match(r"<title>[^<]*</title>\s*<style>", frag)
+    lowered = frag.lower()
+    for tag in ("!doctype", "html", "head", "body"):
+        assert not re.search(rf"</?{tag}[\s>]", lowered), tag
+    check_html(frag)
+    # same content as the standalone page
+    assert frag.count("<svg") == render_html(report).count("<svg")
+
+
+def test_html_theme_tokens_and_layout(report):
+    html = render_html(report)
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    assert style.startswith(":root{--paper:#F6F6F3;")
+    assert '@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){' in style
+    assert ':root[data-theme="dark"]{' in style
+    assert style.count(";color-scheme:dark") == 2  # both dark blocks
+    assert "body{margin:0;background:var(--paper)" in style
+    assert "padding-block:" in style and "padding-left:max(clamp(16px" in style
+    assert "overflow-x:auto" in style and "font-variant-numeric:tabular-nums" in style
+    assert "url(" not in style  # no external assets from CSS
+    for i in range(1, 9):
+        assert f"--s{i}:" in style
+
+
+def test_html_escapes_hostile_data(hostile):
+    for html in (render_html(hostile), render_html(hostile, standalone=False)):
+        assert "<script>alert" not in html
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+        checker = check_html(html)
+        for tag, href in checker.hrefs:
+            assert "javascript:" not in href.lower()
+            if tag == "link":
+                assert href.startswith("https://fonts.googleapis.com/")
+            else:
+                assert href.startswith(("https://", "http://", "#")), href
+        assert not checker.srcs  # no external scripts or images
+        external = {href for tag, href in checker.hrefs if tag == "a" and href.startswith("http")}
+        assert external and all("chess.com" in h for h in external)
+        # the unsafe URL is still visible as text, just not a link
+        assert "javascript:alert(1)" in html
+
+
+def test_html_sections_nav_and_cards(report):
+    html = render_html(report)
+    checker = check_html(html)
+    anchors = [h[1:] for t, h in checker.hrefs if t == "a" and h.startswith("#")]
+    assert anchors[:3] == ["study", "strengths", "weaknesses"]
+    assert {"results", "openings", "time_mgmt", "habits", "endings", "engine_stats"} <= set(anchors)
+    assert set(anchors) <= set(checker.ids)
+    assert len(checker.ids) == len(set(checker.ids))  # ids are unique
+    # study plan: ordered list, action checklist, review links
+    assert '<ol class="plan">' in html and html.count('class="plan-item"') == 3
+    assert "Review these games" in html and ">Game 1<" in html
+    # glyph badges + confidence pills
+    assert 'aria-label="Serious weakness"' in html and ">??</span>" in html
+    assert ">!!</span>" in html and ">=</span>" in html
+    assert "High confidence" in html and "Medium confidence" in html
+    # KPI formats
+    for text in ("1,234", "53%", f"{MINUS}4%", "1512", "+87", "5.3%", "38.5", "1.04", "1:35", "1:06:40", "7.3s", MISSING):
+        assert f">{text}<" in html, text
+    # generated time + method notes
+    assert "25 Sep 2026, 14:03 UTC" in html and "Elo expected score" in html
+    assert "3 Jan 2024 – 30 Dec 2024" in html
+
+
+def test_html_charts(report):
+    html = render_html(report)
+    svgs = re.findall(r"<svg .*?</svg>", html, re.S)
+    charted = sum(1 for m in report.modules for c in m.charts if any(v is not None for s in c.series for v in s.values))
+    assert len(svgs) == charted
+    for svg in svgs:
+        assert re.search(r'viewBox="0 0 400 [\d.]+"', svg)
+        assert "<title>" in svg  # every chart carries hover tooltips
+    assert html.count('<ul class="legend"') == 6  # multi-series charts + the single-series chart with a reference
+    assert "Reference 50%" in html
+    assert 'class="zero"' in html  # signed charts emphasise the zero line
+    assert 'class="ln k1"' in html and 'class="ln k2"' in html
+    rating_line = next(s for s in svgs if "Rating by month" in s)
+    assert re.search(r'class="ln k1" d="M[^"]* M', rating_line)  # None splits the line
+    assert "rotate(-40" in next(s for s in svgs if "Score in different situations" in s)
+    black = next(s for s in svgs if "(Black)" in s)
+    assert black.count("<tspan") > 6  # long opening names wrap onto a second line
+    assert "Caro-Kann Defense: Advance Variation, Short Variation\n" in black  # full name in tooltip
+    assert "No data to chart yet." in html  # all-None chart
+    assert html.count('class="chart-data"') == charted  # every chart has its data table twin
+    assert "No rows yet." in html
+
+
+def test_chart_table_matches_series():
+    chart = Chart(kind="line", title="t", labels=["a", "b", "c"], series=[Series("x", [1, None]), Series("", [3, 4, 5, 6])])
+    table = chart_table(chart)
+    assert table.columns == ["", "x", "Series 2"]
+    assert table.rows == [["a", 1.0, 3.0], ["b", None, 4.0], ["c", None, 5.0]]
+
+
+@pytest.mark.parametrize(
+    "chart",
+    [
+        Chart(kind="bar", title="empty", labels=[], series=[]),
+        Chart(kind="bar", title="no labels", labels=[], series=[Series("x", [1, 2, 3])]),
+        Chart(kind="hbar", title="zeros", labels=["a", "b"], series=[Series("x", [0, 0])]),
+        Chart(kind="bar", title="negative only", labels=["a", "b"], series=[Series("x", [-3, -1])], value_format="signed_int"),
+        Chart(kind="line", title="single point", labels=["only"], series=[Series("x", [0.5])], value_format="pct", reference=0.5),
+        Chart(kind="line", title="isolated", labels=list("abcde"), series=[Series("x", [None, 2, None, 4, None])]),
+        Chart(kind="stacked_bar", title="mixed signs", labels=["a", "b"], series=[Series("up", [2, 3]), Series("down", [-1, None])]),
+        Chart(kind="stacked_bar", title="ten", labels=["a", "b"], series=[Series(f"s{i}", [i, i + 1]) for i in range(10)]),
+        Chart(kind="line", title="ten lines", labels=["a", "b"], series=[Series(f"s{i}", [i, i + 1]) for i in range(10)]),
+        Chart(kind="bar", title="hidden only", labels=["a"], series=[Series(f"s{i}", [None]) for i in range(8)] + [Series("s9", [1])]),
+        Chart(kind="pie", title="unknown kind", labels=["a"], series=[Series("x", [1])]),  # type: ignore[arg-type]
+        Chart(kind="bar", title="text values", labels=["a", "b"], series=[Series("x", ["3", "oops"])], value_format="text"),  # type: ignore[list-item]
+        Chart(kind="hbar", title="big", labels=["x" * 200], series=[Series("x", [1e12])], value_format="int"),
+        Chart(kind="bar", title="many", labels=[f"Category number {i}" for i in range(60)], series=[Series("x", list(range(60)))]),
+        Chart(kind="line", title="nan", labels=["a", "b"], series=[Series("x", [float("nan"), float("inf")])]),
+    ],
+    ids=lambda c: c.title,
+)
+def test_chart_edge_cases_render(chart):
+    rep = empty_report()
+    rep.modules[0].charts = [chart]
+    html = render_html(rep)
+    check_html(html)
+    assert "NaN" not in html and "Infinity" not in html and ">inf<" not in html
+    render_markdown(rep)
+
+
+def test_folded_and_truncated_series():
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind="stacked_bar", title="ten", labels=["a"], series=[Series(f"s{i}", [1]) for i in range(10)]),
+        Chart(kind="line", title="ten lines", labels=["a", "b"], series=[Series(f"s{i}", [i, i]) for i in range(10)]),
+    ]
+    html = render_html(rep)
+    assert ">Other</li>" in html
+    assert "Showing the first 8 of 10 series" in html
+    assert "f9" not in re.sub(r"#[0-9a-fA-F]{6}", "", html.split("</style>", 1)[1])  # never a 9th colour
+
+
+def test_empty_report_renders_everywhere(tmp_path):
+    rep = empty_report()
+    html = render_html(rep)
+    check_html(html)
+    assert "<title>Chess Insights</title>" in html
+    assert "0 games" in html and "Nothing to study yet" in html and "No clear strengths yet" in html
+    md = render_markdown(rep)
+    assert md.startswith("# Chess Insights\n")
+    data = json.loads(to_json(rep))
+    assert data["date_from"] is None and data["generated_at"] == "2026-09-25T14:03:00"
+    assert len(write_report(rep, tmp_path / "empty")) == 3
+
+
+def test_module_anchors_are_unique_and_safe():
+    mods = [ModuleResult(key=k, title=k, summary="") for k in ("results", "results", "study", "9 lives", "", "a/b<c>")]
+    assert module_anchors(mods) == ["results", "results-2", "study-section", "m-9-lives", "module-5", "a-b-c"]
+
+
+# --------------------------------------------------------------------------- Markdown
+def test_markdown_structure(report):
+    md = render_markdown(report)
+    assert md.startswith("# TesterBob · Chess Insights\n")
+    assert "**1,234 games** · 3 Jan 2024 – 30 Dec 2024 · rated + casual" in md
+    for heading in ("## Study plan", "## Strengths", "## Weaknesses", "## Results & rating", "## Openings", "### Findings"):
+        assert f"\n{heading}\n" in md, heading
+    assert "\n1. **The Caro-Kann is costing you points as Black** — _Opening repertoire_\n" in md
+    assert "\n   - [ ] Replay your 9 Caro-Kann losses" in md
+    assert "Review these games: [Game 1](https://www.chess.com/game/live/105000000002)" in md
+    assert "- `??` **The Caro-Kann is costing you points as Black**" in md
+    assert "- `=` **Observation · Overall results: Most of your games are blitz**" in md
+    assert "| Time class | Games | Score | Expected | Difference | Avg opponent | Avg clock left |" in md
+    assert "|---|---:|---:|---:|---:|---:|---:|" in md
+    assert "| Daily | 12 | 63% | 50% | +13% | — | — |" in md
+    assert "Sicilian \\| Najdorf" in md  # pipes inside cells are escaped
+    assert "[game ↗](https://www.chess.com/game/live/105000000001)" in md
+    assert "#### Rating by month" in md and "| 2024-04 | — | 1522 |" in md
+    assert "_Reference line: 50%._" in md
+    assert "- Average time left at move 30: **1:35**" in md
+    assert "_Generated 25 Sep 2026, 14:03 UTC by chess-insights._" in md
+
+
+def test_markdown_escapes_hostile_data(hostile):
+    md = render_markdown(hostile)
+    assert "<script>" not in md and "\\<script\\>alert(1)\\</script\\>" in md
+    assert "](javascript:" not in md.lower()
+    assert "javascript:alert(1)" in md  # shown as text, not linked
+    table = md.split("| ECO |", 1)[1].split("\n\n", 1)[0].splitlines()
+    unescaped_pipes = {len(re.findall(r"(?<!\\)\|", line)) for line in table[1:]}
+    assert unescaped_pipes == {8}  # 7 columns in every row: hostile text cannot add cells
+
+
+# --------------------------------------------------------------------------- JSON
+def test_json_round_trip(report):
+    def no_constants(name):
+        raise AssertionError(f"non-standard JSON constant {name}")
+
+    text = to_json(report)
+    data = json.loads(text, parse_constant=no_constants)
+    assert datetime.fromisoformat(data["generated_at"]) == report.generated_at
+    assert data["date_from"] == "2024-01-03T18:02:00+00:00"
+    assert data["username"] == "TesterBob" and data["n_games"] == 1234
+    weakness = data["weaknesses"][0]
+    assert weakness["priority"] == pytest.approx(0.7 * 0.82)
+    assert weakness["example_games"][0].startswith("https://")
+    engine = next(m for m in data["modules"] if m["key"] == "engine_stats")
+    assert engine["stats"] == {"error": "RuntimeError: Stockfish crashed", "nan": None, "inf": None}
+    time_table = next(m for m in data["modules"] if m["key"] == "time_mgmt")["tables"][0]
+    assert time_table["rows"][0][4] == "2024-05-02" and time_table["rows"][2][2] is None
+    assert data["study_plan"][0]["actions"][0].startswith("Replay")
+    assert to_dict(report) == data
+
+
+def test_json_handles_numpy_and_pandas_values():
+    import numpy as np  # pandas dependency; only used to build test inputs
+
+    rep = empty_report()
+    rep.modules[0].stats = {
+        "np_int": np.int64(3),
+        "np_float": np.float64(0.25),
+        "np_nan": np.float64("nan"),
+        "array": np.array([1.0, np.nan]),
+        "ts": pd.Timestamp("2024-06-01T18:00:00Z"),
+        "nat": pd.NaT,
+        "na": pd.NA,
+        "series": pd.Series([1, 2], index=["a", "b"]),
+        "frame": pd.DataFrame({"x": [1.5, None]}),
+        (1, "tuple"): {3, 1, 2},
+        date(2024, 1, 1): timedelta(minutes=2),
+        "path": Path("/tmp/x"),
+    }
+    stats = json.loads(to_json(rep))["modules"][0]["stats"]
+    assert stats["np_int"] == 3 and stats["np_float"] == 0.25 and stats["np_nan"] is None
+    assert stats["array"] == [1.0, None]
+    assert stats["ts"] == "2024-06-01T18:00:00+00:00" and stats["nat"] is None and stats["na"] is None
+    assert stats["series"] == {"a": 1, "b": 2}
+    assert stats["frame"] == [{"x": 1.5}, {"x": None}]
+    assert stats["1|tuple"] == [1, 2, 3] and stats["2024-01-01"] == 120.0 and stats["path"] == "/tmp/x"
+
+
+# --------------------------------------------------------------------------- write_report
+def test_write_report_writes_all_formats(report, tmp_path):
+    paths = write_report(report, tmp_path / "nested" / "dir" / "testerbob")
+    assert [p.name for p in paths] == ["testerbob.html", "testerbob.md", "testerbob.json"]
+    assert all(p.exists() and p.stat().st_size > 0 for p in paths)
+    assert paths[0].read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert paths[1].read_text(encoding="utf-8").startswith("# TesterBob")
+    assert json.loads(paths[2].read_text(encoding="utf-8"))["username"] == "TesterBob"
+
+
+def test_write_report_strips_suffix_and_filters_formats(report, tmp_path):
+    paths = write_report(report, str(tmp_path / "report.html"), formats=["JSON", "markdown", "json"])
+    assert [p.name for p in paths] == ["report.json", "report.md"]
+    assert not (tmp_path / "report.html").exists()
+    dotted = write_report(report, tmp_path / "john.doe", formats=("html",))
+    assert dotted == [tmp_path / "john.doe.html"]
+    with pytest.raises(ValueError, match="unknown report format"):
+        write_report(report, tmp_path / "x", formats=("pdf",))
+    assert not (tmp_path / "x.html").exists()

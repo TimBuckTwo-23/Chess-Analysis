@@ -102,3 +102,25 @@ def test_puzzles_pgn_round_trips():
     [move] = list(game.mainline_moves())
     assert game.board().san(move) == "Nf6"
     assert "3...Nd4" in game.comment
+
+
+def test_diagrams_render_in_html_and_markdown():
+    from datetime import datetime, timezone
+
+    from chess_insights.models import Diagram, ModuleResult, Report
+    from chess_insights.report import render_html, render_markdown
+    from chess_insights.report.html import lichess_analysis_url
+
+    res = mistakes.analyze(_ctx([_game_with_error(1), _game_with_error(2)]))
+    evil = Diagram(title="<b>x</b>", fen="not a fen", svg='<svg><script>alert(1)</script></svg>', caption="c")
+    res.diagrams.append(evil)
+    report = Report(username="tester", generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc), filters="", n_games=2,
+                    date_from=None, date_to=None, modules=[res], strengths=[], weaknesses=[], study_plan=[])
+    html = render_html(report)
+    assert html.count('<figure class="board-fig">') == 2
+    assert "<svg" in html and "alert(1)" not in html and "&lt;b&gt;x&lt;/b&gt;" in html
+    fen = res.diagrams[0].fen
+    assert lichess_analysis_url(fen) == "https://lichess.org/analysis/" + fen.replace(" ", "_")
+    assert lichess_analysis_url("not a fen") is None
+    md = render_markdown(report)
+    assert "analyse on Lichess" in md and fen.split()[0] in md

@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from ..models import VALUE_FORMATS, Chart, Insight, Kpi, ModuleResult, Report, StudyItem, Table
 from .html import (
+    lichess_analysis_url,
     GLYPH_MEANINGS,
     KIND_LABELS,
     METHOD_NOTES,
@@ -100,8 +101,8 @@ def md_table(table: Table) -> list[str]:
 
 def _insight_line(ins: Insight, *, show_study: bool, with_kind: bool) -> list[str]:
     glyph = glyph_for(ins)
-    label = f"{KIND_LABELS[insight_kind(ins)]} · {category_label(ins.category)}: " if with_kind else ""
-    head = f"- `{glyph}` **{md_text(label)}{md_text(ins.title)}**"
+    label = f"{md_text(f'{KIND_LABELS[insight_kind(ins)]} · {category_label(ins.category)}')}: " if with_kind else ""
+    head = f"- `{glyph}` **{label}{md_text(ins.title)}**"
     if text_or_empty(ins.detail):
         head += f" — {md_text(ins.detail)}"
     head += f" _({confidence_label(ins.confidence)})_"
@@ -172,6 +173,9 @@ def _module(module: ModuleResult) -> list[str]:
         lines += [_kpi_line(k) for k in module.kpis] + [""]
     for chart in module.charts or []:
         lines += _chart(chart)
+    for d in getattr(module, "diagrams", None) or []:
+        links = [md_link(u, t) for u, t in ((d.link, "game"), (lichess_analysis_url(d.fen), "analyse on Lichess")) if u]
+        lines += [f"- **{md_text(d.title)}**: {md_text(d.caption)} `{md_text(d.fen)}` " + " · ".join(links), ""]
     for table in module.tables or []:
         if text_or_empty(table.title):
             lines += [f"#### {md_text(table.title)}", ""]
