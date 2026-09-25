@@ -104,7 +104,8 @@ def test_empty_input():
 def test_tiny_and_daily_only_input_has_tables_but_no_claims():
     mr = run([g("win", "resignation", time_class="daily", time_control="1/86400", base_seconds=86400)])
     assert "not enough data" in mr.summary.lower() and "only game was a win" in mr.summary
-    assert mr.insights == [] and table(mr, "Result mix by time control").rows[0][:2] == ["Daily", 1]
+    mix = table(mr, "Result mix by time control")
+    assert mr.insights == [] and mix.columns == ["Result", "Daily (1 game)"] and mix.rows == [["Won by resignation", 1.0]]
 
 
 def test_zero_move_games_and_missing_ratings_do_not_break_anything():
@@ -127,15 +128,19 @@ def test_result_mix_table_and_stacked_chart():
     ]
     mr = run(blitz + rapid)
     t = table(mr, "Result mix by time control")
+    assert t.columns == ["Result", "Blitz (5 games)", "Rapid (3 games)", "All (8 games)"]
+    assert len(t.formats) == len(t.columns) and all(len(r) == len(t.columns) for r in t.rows)
     rows = rows_by_first(t)
-    assert list(rows) == ["Blitz", "Rapid", "All"]
-    assert rows["Blitz"]["Won by checkmate"] == pytest.approx(0.4) and rows["Blitz"]["Drawn"] == pytest.approx(0.2)
-    assert rows["Rapid"]["Lost: abandoned / other"] == pytest.approx(1 / 3)
-    for r in t.rows:
-        assert sum(r[2:]) == pytest.approx(1.0)
+    assert rows["Won by checkmate"]["Blitz (5 games)"] == pytest.approx(0.4)
+    assert rows["Drawn"]["Blitz (5 games)"] == pytest.approx(0.2)
+    assert rows["Lost: abandoned / other"]["Rapid (3 games)"] == pytest.approx(1 / 3)
+    assert "Won: abandoned / other" not in rows  # no game ended that way
+    for col in range(1, len(t.columns)):
+        assert sum(r[col] for r in t.rows) == pytest.approx(1.0)
     chart = next(c for c in mr.charts if c.kind == "stacked_bar")
     assert chart.labels == ["Blitz", "Rapid"] and len(chart.series) == len(endings.MIX)
-    assert [s.values[0] for s in chart.series] == pytest.approx(t.rows[0][2:])
+    blitz_by_label = {s.name: s.values[0] for s in chart.series}
+    assert all(blitz_by_label[label] == pytest.approx(row["Blitz (5 games)"]) for label, row in rows.items())
 
 
 def test_loss_profile_counts_and_shares():

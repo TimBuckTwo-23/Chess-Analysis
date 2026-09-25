@@ -223,3 +223,18 @@ def test_numpy_scores_are_kept_as_plain_floats(monkeypatch):
     report = pipeline.run_analysis([make_game()], "tester", modules=modules)
     kept = report.weaknesses[0]
     assert type(kept.severity) is float and type(kept.confidence) is float and kept.detail == ""
+
+
+def test_same_opening_found_by_two_modules_is_merged_in_the_headline():
+    a = ins("openings.weakness.black.caro-kann-defense", severity=0.6, study=["Replay your Caro-Kann losses"],
+            example_games=["https://x/1"])
+    b = ins("engine.weakness.openings-black-caro-kann-defense", severity=0.8, study=["Learn the Advance line"],
+            example_games=["https://x/2"])
+    other_colour = ins("openings.weakness.white.caro-kann-defense", severity=0.5)
+    _, weaknesses = insights.rank_insights([mod("openings", a, other_colour), mod("engine", b)])
+    merged = next(i for i in weaknesses if "black" in i.id)
+    assert [i.id for i in weaknesses].count(merged.id) == 1 and len(weaknesses) == 2
+    assert merged.id == b.id and merged.study == ["Learn the Advance line", "Replay your Caro-Kann losses"]
+    assert merged.example_games == ["https://x/2", "https://x/1"]
+    assert merged.evidence["also_found_by"] == [a.id]
+    assert b.study == ["Learn the Advance line"] and "also_found_by" not in b.evidence  # module findings untouched

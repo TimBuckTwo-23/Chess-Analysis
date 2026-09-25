@@ -285,7 +285,7 @@ def rating_chart(by_pool: dict[str, list[Game]], min_games: int) -> Optional[Cha
             Series(pool, [float(m[label]) if label in m else None for label in labels]) for pool, m in per_pool.items()
         ],
         value_format="rating",
-        note="Your rating after the last game of each month. Gaps are months without games in that time control.",
+        note="Your rating after the last game of each month. Longer breaks without games in a time control show as a dashed line.",
     )
 
 

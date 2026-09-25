@@ -7,6 +7,8 @@ this module only ranks, dedupes and diversifies what passed.
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from typing import Iterable
 
 from .models import Insight, ModuleResult, StudyItem
@@ -101,12 +103,43 @@ def all_insights(modules: Iterable[ModuleResult]) -> list[Insight]:
     return [ins for m in modules for ins in m.insights]
 
 
+# Findings from different modules about the same thing, e.g. openings.py ("you score less
+# with the Caro-Kann") and engine_stats.py ("you leave the Caro-Kann worse off"). They share a
+# topic and are merged in the headline lists; each module section still shows its own.
+_TOPIC_PATTERNS = (
+    re.compile(r"^openings\.(strength|weakness)\.(white|black)\.(.+)$"),
+    re.compile(r"^engine\.(strength|weakness)\.openings-(white|black)-(.+)$"),
+)
+
+
+def topic_key(ins: Insight) -> str:
+    for rx in _TOPIC_PATTERNS:
+        m = rx.match(ins.id)
+        if m:
+            return f"opening:{m.group(1)}:{m.group(2)}:{m.group(3)}"
+    return ins.id
+
+
+def _merge(keep: Insight, other: Insight) -> Insight:
+    """``keep`` with the other finding's actions and games added (neither input is modified)."""
+    study = list(keep.study) + [a for a in other.study if a not in keep.study]
+    games = list(dict.fromkeys(list(keep.example_games) + list(other.example_games)))
+    evidence = dict(keep.evidence)
+    evidence["also_found_by"] = list(evidence.get("also_found_by") or []) + [other.id]
+    return replace(keep, study=study[:5], example_games=games[:5], evidence=evidence)
+
+
 def _dedupe(insights: Iterable[Insight]) -> list[Insight]:
     best: dict[str, Insight] = {}
     for ins in insights:
-        cur = best.get(ins.id)
-        if cur is None or ins.priority > cur.priority:
-            best[ins.id] = ins
+        key = topic_key(ins)
+        cur = best.get(key)
+        if cur is None:
+            best[key] = ins
+        elif cur.id == ins.id:
+            best[key] = ins if ins.priority > cur.priority else cur
+        else:
+            best[key] = _merge(ins, cur) if ins.priority > cur.priority else _merge(cur, ins)
     return list(best.values())
 
 

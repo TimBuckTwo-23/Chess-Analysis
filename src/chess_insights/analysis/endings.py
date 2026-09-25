@@ -157,14 +157,21 @@ def mix_shares(games: Sequence[Game]) -> list[Optional[float]]:
 
 
 def mix_table(by_class: dict[str, list[Game]], games: Sequence[Game]) -> Table:
-    rows = [[tc.capitalize(), len(gs), *mix_shares(gs)] for tc, gs in by_class.items()]
+    """One row per way a game can end, one column per time control (narrow enough for a phone)."""
+    groups = [(tc.capitalize(), gs) for tc, gs in by_class.items()]
     if len(by_class) > 1:
-        rows.append(["All", len(games), *mix_shares(games)])
+        groups.append(("All", list(games)))
+    shares = [mix_shares(gs) for _, gs in groups]
+    rows = [
+        [label, *(col[i] for col in shares)]
+        for i, (_, label) in enumerate(MIX)
+        if any(col[i] for col in shares)  # leave out ways no game ended
+    ]
     return Table(
         title="Result mix by time control",
-        columns=["Time control", "Games", *(label for _, label in MIX)],
+        columns=["Result", *(f"{name} ({len(gs)} game{'s' if len(gs) != 1 else ''})" for name, gs in groups)],
         rows=rows,
-        formats=["text", "int", *(["pct"] * len(MIX))],
+        formats=["text", *(["pct"] * len(groups))],
         note="Share of all games in each time control, including aborted and abandoned ones.",
     )
 
