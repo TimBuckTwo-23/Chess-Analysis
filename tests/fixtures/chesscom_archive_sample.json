@@ -1,0 +1,294 @@
+{
+ "games": [
+  {
+   "url": "https://www.chess.com/game/live/105000000001",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.02\"]\n[Round \"-\"]\n[White \"TesterBob\"]\n[Black \"knightrider77\"]\n[Result \"1-0\"]\n[CurrentPosition \"r2q2k1/bpp2pp1/p6p/3nr3/8/2PP2NP/PP3PP1/R1BQ2K1 w - - 0 17\"]\n[Timezone \"UTC\"]\n[ECO \"C50\"]\n[ECOUrl \"https://www.chess.com/openings/Italian-Game-Giuoco-Pianissimo-Italian-Four-Knights-Variation\"]\n[UTCDate \"2024.03.02\"]\n[UTCTime \"18:02:00\"]\n[WhiteElo \"1512\"]\n[BlackElo \"1498\"]\n[TimeControl \"300\"]\n[Termination \"TesterBob won by resignation\"]\n[StartTime \"18:02:00\"]\n[EndDate \"2024.03.02\"]\n[EndTime \"18:10:40\"]\n[Link \"https://www.chess.com/game/live/105000000001\"]\n\n1. e4 {[%clk 0:04:56.9]} 1... e5 {[%clk 0:04:55.8]} 2. Nf3 {[%clk 0:04:50.9]} 2... Nc6 {[%clk 0:04:53.3]} 3. Bc4 {[%clk 0:04:42.6]} 3... Bc5 {[%clk 0:04:50.2]} 4. c3 {[%clk 0:04:38.4]} 4... Nf6 {[%clk 0:04:44.2]} 5. d3 {[%clk 0:04:35.9]} 5... d6 {[%clk 0:04:35.9]} 6. O-O {[%clk 0:04:32.8]} 6... O-O {[%clk 0:04:31.7]} 7. Re1 {[%clk 0:04:26.8]} 7... a6 {[%clk 0:04:29.2]} 8. Bb3 {[%clk 0:04:18.5]} 8... Ba7 {[%clk 0:04:26.1]} 9. h3 {[%clk 0:04:14.3]} 9... h6 {[%clk 0:04:20.1]} 10. Nbd2 {[%clk 0:04:11.8]} 10... Re8 {[%clk 0:04:11.8]} 11. Nf1 {[%clk 0:04:08.7]} 11... Be6 {[%clk 0:04:07.6]} 12. Bxe6 {[%clk 0:04:02.7]} 12... Rxe6 {[%clk 0:04:05.1]} 13. Ng3 {[%clk 0:03:54.4]} 13... d5 {[%clk 0:04:02]} 14. exd5 {[%clk 0:03:50.2]} 14... Nxd5 {[%clk 0:03:56]} 15. Nxe5 {[%clk 0:03:47.7]} 15... Nxe5 {[%clk 0:03:47.7]} 16. Rxe5 {[%clk 0:03:44.6]} 16... Rxe5 {[%clk 0:03:43.5]} 1-0\n",
+   "time_control": "300",
+   "end_time": 1709403040,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0001-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r2q2k1/bpp2pp1/p6p/3nr3/8/2PP2NP/PP3PP1/R1BQ2K1 w - - 0 17",
+   "time_class": "blitz",
+   "rules": "chess",
+   "white": {
+    "rating": 1512,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1498,
+    "result": "resigned",
+    "@id": "https://api.chess.com/pub/player/knightrider77",
+    "username": "knightrider77",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Italian-Game-Giuoco-Pianissimo-Italian-Four-Knights-Variation",
+   "accuracies": {
+    "white": 88.4,
+    "black": 71.9
+   }
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000002",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.03\"]\n[Round \"-\"]\n[White \"Pawnstorm_22\"]\n[Black \"testerbob\"]\n[Result \"1-0\"]\n[CurrentPosition \"r1bq1rk1/pp3ppp/2n1p3/2npP3/8/2PB1N2/PP3PPP/RN1Q1RK1 w - - 1 11\"]\n[Timezone \"UTC\"]\n[ECO \"B12\"]\n[ECOUrl \"https://www.chess.com/openings/Caro-Kann-Defense-Advance-Variation-3...c5\"]\n[UTCDate \"2024.03.03\"]\n[UTCTime \"21:15:00\"]\n[WhiteElo \"1530\"]\n[BlackElo \"1507\"]\n[TimeControl \"180+2\"]\n[Termination \"Pawnstorm_22 won on time\"]\n[StartTime \"21:15:00\"]\n[EndDate \"2024.03.03\"]\n[EndTime \"21:21:40\"]\n[Link \"https://www.chess.com/game/live/105000000002\"]\n\n1. e4 {[%clk 0:03:00]} 1... c6 {[%clk 0:02:52.5]} 2. d4 {[%clk 0:02:59]} 2... d5 {[%clk 0:02:40.5]} 3. e5 {[%clk 0:02:58.5]} 3... c5 {[%clk 0:02:23.5]} 4. dxc5 {[%clk 0:02:58.5]} 4... e6 {[%clk 0:02:16]} 5. Be3 {[%clk 0:02:57.5]} 5... Nd7 {[%clk 0:02:04]} 6. Nf3 {[%clk 0:02:57]} 6... Bxc5 {[%clk 0:01:47]} 7. Bxc5 {[%clk 0:02:57]} 7... Nxc5 {[%clk 0:01:39.5]} 8. Bd3 {[%clk 0:02:56]} 8... Ne7 {[%clk 0:01:27.5]} 9. O-O {[%clk 0:02:55.5]} 9... Nc6 {[%clk 0:01:10.5]} 10. c3 {[%clk 0:02:55.5]} 10... O-O {[%clk 0:01:03]} 1-0\n",
+   "time_control": "180+2",
+   "end_time": 1709500900,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0002-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r1bq1rk1/pp3ppp/2n1p3/2npP3/8/2PB1N2/PP3PPP/RN1Q1RK1 w - - 1 11",
+   "time_class": "blitz",
+   "rules": "chess",
+   "white": {
+    "rating": 1530,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/pawnstorm_22",
+    "username": "Pawnstorm_22",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1507,
+    "result": "timeout",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "testerbob",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Caro-Kann-Defense-Advance-Variation-3...c5"
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000003",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.05\"]\n[Round \"-\"]\n[White \"d4_enjoyer\"]\n[Black \"TesterBob\"]\n[Result \"1/2-1/2\"]\n[CurrentPosition \"r1b2rk1/pp2bppp/2n1pn2/q1pp4/2PP1B2/1NN1P3/PPQ2PPP/3RKB1R w K - 12 13\"]\n[Timezone \"UTC\"]\n[ECO \"D37\"]\n[ECOUrl \"https://www.chess.com/openings/Queens-Gambit-Declined-Queens-Knight-Variation-4.Nf3-Be7-5.Bf4\"]\n[UTCDate \"2024.03.05\"]\n[UTCTime \"12:00:00\"]\n[WhiteElo \"1490\"]\n[BlackElo \"1520\"]\n[TimeControl \"600\"]\n[Termination \"Game drawn by repetition\"]\n[StartTime \"12:00:00\"]\n[EndDate \"2024.03.05\"]\n[EndTime \"12:18:20\"]\n[Link \"https://www.chess.com/game/live/105000000003\"]\n\n1. d4 {[%clk 0:09:48]} 1... d5 {[%clk 0:09:52]} 2. c4 {[%clk 0:09:28]} 2... e6 {[%clk 0:09:37]} 3. Nc3 {[%clk 0:09:16]} 3... Nf6 {[%clk 0:09:29]} 4. Nf3 {[%clk 0:08:56]} 4... Be7 {[%clk 0:09:14]} 5. Bf4 {[%clk 0:08:44]} 5... O-O {[%clk 0:09:06]} 6. e3 {[%clk 0:08:24]} 6... c5 {[%clk 0:08:51]} 7. Qc2 {[%clk 0:08:12]} 7... Nc6 {[%clk 0:08:43]} 8. Rd1 {[%clk 0:07:52]} 8... Qa5 {[%clk 0:08:28]} 9. Nd2 {[%clk 0:07:40]} 9... Qb4 {[%clk 0:08:20]} 10. Nb3 {[%clk 0:07:20]} 10... Qa5 {[%clk 0:08:05]} 11. Nd2 {[%clk 0:07:08]} 11... Qb4 {[%clk 0:07:57]} 12. Nb3 {[%clk 0:06:48]} 12... Qa5 {[%clk 0:07:42]} 1/2-1/2\n",
+   "time_control": "600",
+   "end_time": 1709641100,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0003-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r1b2rk1/pp2bppp/2n1pn2/q1pp4/2PP1B2/1NN1P3/PPQ2PPP/3RKB1R w K - 12 13",
+   "time_class": "rapid",
+   "rules": "chess",
+   "white": {
+    "rating": 1490,
+    "result": "repetition",
+    "@id": "https://api.chess.com/pub/player/d4_enjoyer",
+    "username": "d4_enjoyer",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1520,
+    "result": "repetition",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Queens-Gambit-Declined-Queens-Knight-Variation-4.Nf3-Be7-5.Bf4"
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000004",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.06\"]\n[Round \"-\"]\n[White \"testerBOB\"]\n[Black \"bulletbandit\"]\n[Result \"0-1\"]\n[CurrentPosition \"rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3\"]\n[Timezone \"UTC\"]\n[ECO \"A00\"]\n[ECOUrl \"https://www.chess.com/openings/Barnes-Opening\"]\n[UTCDate \"2024.03.06\"]\n[UTCTime \"23:40:00\"]\n[WhiteElo \"1402\"]\n[BlackElo \"1395\"]\n[TimeControl \"60\"]\n[Termination \"bulletbandit won by checkmate\"]\n[StartTime \"23:40:00\"]\n[EndDate \"2024.03.06\"]\n[EndTime \"23:40:20\"]\n[Link \"https://www.chess.com/game/live/105000000004\"]\n\n1. f3 {[%clk 0:00:59.6]} 1... e5 {[%clk 0:00:59.4]} 2. g4 {[%clk 0:00:59.1]} 2... Qh4# {[%clk 0:00:59]} 0-1\n",
+   "time_control": "60",
+   "end_time": 1709768420,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0004-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+   "time_class": "bullet",
+   "rules": "chess",
+   "white": {
+    "rating": 1402,
+    "result": "checkmated",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "testerBOB",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1395,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/bulletbandit",
+    "username": "bulletbandit",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Barnes-Opening"
+  },
+  {
+   "url": "https://www.chess.com/game/daily/605000000005",
+   "pgn": "[Event \"Let's Play!\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.07\"]\n[Round \"-\"]\n[White \"TesterBob\"]\n[Black \"slowmover\"]\n[Result \"1-0\"]\n[CurrentPosition \"r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4\"]\n[Timezone \"UTC\"]\n[ECO \"C23\"]\n[ECOUrl \"https://www.chess.com/openings/Bishops-Opening\"]\n[UTCDate \"2024.03.07\"]\n[UTCTime \"09:00:00\"]\n[WhiteElo \"1210\"]\n[BlackElo \"1180\"]\n[TimeControl \"1/86400\"]\n[Termination \"TesterBob won by checkmate\"]\n[StartTime \"09:00:00\"]\n[EndDate \"2024.03.10\"]\n[EndTime \"09:00:00\"]\n[Link \"https://www.chess.com/game/daily/605000000005\"]\n\n1. e4 {[%clk 23:00:00]} 1... e5 {[%clk 18:26:40]} 2. Bc4 {[%clk 22:51:40]} 2... Nc6 {[%clk 17:26:40]} 3. Qh5 {[%clk 17:18:20]} 3... Nf6 {[%clk 17:18:20]} 4. Qxf7# {[%clk 16:18:20]} 1-0\n",
+   "time_control": "1/86400",
+   "end_time": 1710061200,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0005-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4",
+   "time_class": "daily",
+   "rules": "chess",
+   "white": {
+    "rating": 1210,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1180,
+    "result": "checkmated",
+    "@id": "https://api.chess.com/pub/player/slowmover",
+    "username": "slowmover",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Bishops-Opening",
+   "accuracies": {
+    "white": 96.0,
+    "black": 20.1
+   },
+   "start_time": 1709802000
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000006",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.08\"]\n[Round \"-\"]\n[White \"random960\"]\n[Black \"TesterBob\"]\n[Result \"1-0\"]\n[SetUp \"1\"]\n[FEN \"bqnbrknr/pppppppp/8/8/8/8/PPPPPPPP/BQNBRKNR w HEhe - 0 1\"]\n[Variant \"Chess960\"]\n[CurrentPosition \"bq1brk1r/ppp2ppp/3npn2/3p4/3P4/3NPN2/PPP2PPP/BQ1BRK1R w KQkq - 0 5\"]\n[Timezone \"UTC\"]\n[UTCDate \"2024.03.08\"]\n[UTCTime \"15:00:00\"]\n[WhiteElo \"1450\"]\n[BlackElo \"1440\"]\n[TimeControl \"600\"]\n[Termination \"random960 won by resignation\"]\n[StartTime \"15:00:00\"]\n[EndDate \"2024.03.08\"]\n[EndTime \"15:15:00\"]\n[Link \"https://www.chess.com/game/live/105000000006\"]\n\n1. d4 {[%clk 0:09:50]} 1... d5 {[%clk 0:09:48]} 2. Nd3 {[%clk 0:09:40]} 2... Nd6 {[%clk 0:09:36]} 3. Nf3 {[%clk 0:09:30]} 3... Nf6 {[%clk 0:09:24]} 4. e3 {[%clk 0:09:20]} 4... e6 {[%clk 0:09:12]} 1-0\n",
+   "time_control": "600",
+   "end_time": 1709910900,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0006-11ef-9a01-6cfe544c0428",
+   "initial_setup": "bqnbrknr/pppppppp/8/8/8/8/PPPPPPPP/BQNBRKNR w HEhe - 0 1",
+   "fen": "bq1brk1r/ppp2ppp/3npn2/3p4/3P4/3NPN2/PPP2PPP/BQ1BRK1R w KQkq - 0 5",
+   "time_class": "rapid",
+   "rules": "chess960",
+   "white": {
+    "rating": 1450,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/random960",
+    "username": "random960",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1440,
+    "result": "resigned",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "b-0a1b2c3d"
+   }
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000007",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.09\"]\n[Round \"-\"]\n[White \"ghost_user\"]\n[Black \"TesterBob\"]\n[Result \"1-0\"]\n[CurrentPosition \"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\"]\n[Timezone \"UTC\"]\n[UTCDate \"2024.03.09\"]\n[UTCTime \"10:00:00\"]\n[WhiteElo \"1500\"]\n[BlackElo \"1510\"]\n[TimeControl \"300\"]\n[Termination \"ghost_user won - game abandoned\"]\n[StartTime \"10:00:00\"]\n[EndDate \"2024.03.09\"]\n[EndTime \"10:01:00\"]\n[Link \"https://www.chess.com/game/live/105000000007\"]\n\n1-0\n",
+   "time_control": "300",
+   "end_time": 1709978460,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0007-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "time_class": "blitz",
+   "rules": "chess",
+   "white": {
+    "rating": 1500,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/ghost_user",
+    "username": "ghost_user",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1510,
+    "result": "abandoned",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "b-0a1b2c3d"
+   }
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000008",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.10\"]\n[Round \"-\"]\n[White \"someone\"]\n[Black \"someone_else\"]\n[Result \"1-0\"]\n[CurrentPosition \"rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2\"]\n[Timezone \"UTC\"]\n[UTCDate \"2024.03.10\"]\n[UTCTime \"10:00:00\"]\n[WhiteElo \"1600\"]\n[BlackElo \"1600\"]\n[TimeControl \"300\"]\n[Termination \"someone won by resignation\"]\n[StartTime \"10:00:00\"]\n[EndDate \"2024.03.10\"]\n[EndTime \"10:05:00\"]\n[Link \"https://www.chess.com/game/live/105000000008\"]\n\n1. e4 {[%clk 0:04:59]} 1... e5 {[%clk 0:04:59]} 1-0\n",
+   "time_control": "300",
+   "end_time": 1710065100,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0008-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+   "time_class": "blitz",
+   "rules": "chess",
+   "white": {
+    "rating": 1600,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/someone",
+    "username": "someone",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1600,
+    "result": "resigned",
+    "@id": "https://api.chess.com/pub/player/someone_else",
+    "username": "someone_else",
+    "uuid": "b-0a1b2c3d"
+   }
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000009",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.11\"]\n[Round \"-\"]\n[White \"TesterBob\"]\n[Black \"calm_player\"]\n[Result \"1/2-1/2\"]\n[CurrentPosition \"r1bqk2r/pppp1ppp/2n2n2/8/1b1NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 1 6\"]\n[Timezone \"UTC\"]\n[ECO \"C42\"]\n[ECOUrl \"https://www.chess.com/openings/Petrovs-Defense-Three-Knights-Game\"]\n[UTCDate \"2024.03.11\"]\n[UTCTime \"19:00:00\"]\n[WhiteElo \"1525\"]\n[BlackElo \"1560\"]\n[TimeControl \"900+10\"]\n[Termination \"Game drawn by agreement\"]\n[StartTime \"19:00:00\"]\n[EndDate \"2024.03.11\"]\n[EndTime \"19:25:00\"]\n[Link \"https://www.chess.com/game/live/105000000009\"]\n\n1. e4 {[%clk 0:15:05]} 1... e5 {[%clk 0:14:40]} 2. Nf3 {[%clk 0:14:30]} 2... Nf6 {[%clk 0:14:45]} 3. Nc3 {[%clk 0:14:10]} 3... Nc6 {[%clk 0:14:10]} 4. d4 {[%clk 0:14:15]} 4... exd4 {[%clk 0:13:50]} 5. Nxd4 {[%clk 0:13:40]} 5... Bb4 {[%clk 0:13:55]} 1/2-1/2\n",
+   "time_control": "900+10",
+   "end_time": 1710185100,
+   "rated": false,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0009-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r1bqk2r/pppp1ppp/2n2n2/8/1b1NP3/2N5/PPP2PPP/R1BQKB1R w KQkq - 1 6",
+   "time_class": "rapid",
+   "rules": "chess",
+   "white": {
+    "rating": 1525,
+    "result": "agreed",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1560,
+    "result": "agreed",
+    "@id": "https://api.chess.com/pub/player/calm_player",
+    "username": "calm_player",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Petrovs-Defense-Three-Knights-Game"
+  },
+  {
+   "url": "https://www.chess.com/game/live/105000000001",
+   "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.02\"]\n[Round \"-\"]\n[White \"TesterBob\"]\n[Black \"knightrider77\"]\n[Result \"1-0\"]\n[CurrentPosition \"r2q2k1/bpp2pp1/p6p/3nr3/8/2PP2NP/PP3PP1/R1BQ2K1 w - - 0 17\"]\n[Timezone \"UTC\"]\n[ECO \"C50\"]\n[ECOUrl \"https://www.chess.com/openings/Italian-Game-Giuoco-Pianissimo-Italian-Four-Knights-Variation\"]\n[UTCDate \"2024.03.02\"]\n[UTCTime \"18:02:00\"]\n[WhiteElo \"1512\"]\n[BlackElo \"1498\"]\n[TimeControl \"300\"]\n[Termination \"TesterBob won by resignation\"]\n[StartTime \"18:02:00\"]\n[EndDate \"2024.03.02\"]\n[EndTime \"18:10:40\"]\n[Link \"https://www.chess.com/game/live/105000000001\"]\n\n1. e4 {[%clk 0:04:56.9]} 1... e5 {[%clk 0:04:55.8]} 2. Nf3 {[%clk 0:04:50.9]} 2... Nc6 {[%clk 0:04:53.3]} 3. Bc4 {[%clk 0:04:42.6]} 3... Bc5 {[%clk 0:04:50.2]} 4. c3 {[%clk 0:04:38.4]} 4... Nf6 {[%clk 0:04:44.2]} 5. d3 {[%clk 0:04:35.9]} 5... d6 {[%clk 0:04:35.9]} 6. O-O {[%clk 0:04:32.8]} 6... O-O {[%clk 0:04:31.7]} 7. Re1 {[%clk 0:04:26.8]} 7... a6 {[%clk 0:04:29.2]} 8. Bb3 {[%clk 0:04:18.5]} 8... Ba7 {[%clk 0:04:26.1]} 9. h3 {[%clk 0:04:14.3]} 9... h6 {[%clk 0:04:20.1]} 10. Nbd2 {[%clk 0:04:11.8]} 10... Re8 {[%clk 0:04:11.8]} 11. Nf1 {[%clk 0:04:08.7]} 11... Be6 {[%clk 0:04:07.6]} 12. Bxe6 {[%clk 0:04:02.7]} 12... Rxe6 {[%clk 0:04:05.1]} 13. Ng3 {[%clk 0:03:54.4]} 13... d5 {[%clk 0:04:02]} 14. exd5 {[%clk 0:03:50.2]} 14... Nxd5 {[%clk 0:03:56]} 15. Nxe5 {[%clk 0:03:47.7]} 15... Nxe5 {[%clk 0:03:47.7]} 16. Rxe5 {[%clk 0:03:44.6]} 16... Rxe5 {[%clk 0:03:43.5]} 1-0\n",
+   "time_control": "300",
+   "end_time": 1709403040,
+   "rated": true,
+   "tcn": "mC0Kgv5Q",
+   "uuid": "0a1b2c3d-0001-11ef-9a01-6cfe544c0428",
+   "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+   "fen": "r2q2k1/bpp2pp1/p6p/3nr3/8/2PP2NP/PP3PP1/R1BQ2K1 w - - 0 17",
+   "time_class": "blitz",
+   "rules": "chess",
+   "white": {
+    "rating": 1512,
+    "result": "win",
+    "@id": "https://api.chess.com/pub/player/testerbob",
+    "username": "TesterBob",
+    "uuid": "w-0a1b2c3d"
+   },
+   "black": {
+    "rating": 1498,
+    "result": "resigned",
+    "@id": "https://api.chess.com/pub/player/knightrider77",
+    "username": "knightrider77",
+    "uuid": "b-0a1b2c3d"
+   },
+   "eco": "https://www.chess.com/openings/Italian-Game-Giuoco-Pianissimo-Italian-Four-Knights-Variation",
+   "accuracies": {
+    "white": 88.4,
+    "black": 71.9
+   }
+  }
+ ]
+}

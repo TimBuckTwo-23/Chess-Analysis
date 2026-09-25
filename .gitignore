@@ -1,0 +1,14 @@
+# The parent repository ignores *.json / *.csv / data/ globally; this project
+# needs its JSON test fixtures tracked, so re-include them here.
+!*.json
+!tests/fixtures/**
+
+# Local game cache, engine-eval cache and generated reports
+.chess-insights-cache/
+cache/
+reports/
+*.html
+!src/**/*.html
+.venv/
+__pycache__/
+*.egg-info/
