@@ -9,7 +9,7 @@ import pytest
 from chess_insights.analysis import habits
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
-from factories import make_game
+from factories import make_game, all_tables
 
 T0 = datetime(2024, 3, 4, 18, 0, tzinfo=timezone.utc)  # a Monday
 
@@ -61,7 +61,7 @@ def claims(mr):
 
 
 def table(mr, title):
-    return next(t for t in mr.tables if t.title.startswith(title))
+    return next(t for t in all_tables(mr) if t.title.startswith(title))
 
 
 def rows_by_first(t):
@@ -243,6 +243,41 @@ def test_losing_streak_observation():
     assert len(ins.example_games) == 4
     # after 2+ losses in a row (same session): the 3rd and 4th loss, the draw, and the win after "loss, loss"
     assert mr.stats["after_two_losses"]["n"] == 4 and mr.stats["after_two_losses"]["score"] == pytest.approx(0.375)
+    # below expectation after two losses: the stop rule is backed by the player's own games
+    assert ins.study[0].startswith("Stop after two losses in a row")
+
+
+def test_streak_advice_follows_the_players_own_results():
+    from chess_insights.stats import summarize
+
+    fine = summarize([make_game(outcome=o) for o in ("win", "win", "draw", "loss", "win")])  # above expectation
+    assert "Stop after two losses" not in habits._streak_advice(fine)
+    assert "about as well as your rating predicts" in habits._streak_advice(fine)
+    poor = summarize([make_game(outcome=o) for o in ("loss", "loss", "draw", "loss")])
+    assert habits._streak_advice(poor).startswith("Stop after two losses in a row")
+
+
+def test_late_night_finding_answers_the_blunder_question_from_engine_data():
+    from factories import make_game_eval, make_ply_eval
+    from chess_insights.models import Insight
+
+    late = [make_game(game_id=f"l{i}") for i in range(12)]
+    other = [make_game(game_id=f"o{i}") for i in range(12)]
+
+    def ev(g, blunders):
+        plies = [make_ply_eval(ply=2 * k, judgement="blunder" if k < blunders else None) for k in range(10)]
+        return make_game_eval(g.game_id, plies)
+
+    evals = {g.game_id: ev(g, 2) for g in late} | {g.game_id: ev(g, 1) for g in other}
+    ins = Insight("habits.weakness.late-night", "weakness", "habits", "t", "Detail.", 0.5, 0.9,
+                  study=["Avoid.", "Replay your last 5 late-night losses and check whether they came from careless "
+                         "blunders or the clock, both signs of tiredness.", "Slower."])
+    habits.add_blunder_rates(ins, late, late + other, evals)
+    assert "you blundered 20.0 times per 100 moves in them, 10.0 in 12 analysed games at other times" in ins.detail
+    assert "you blunder more then (20.0 vs 10.0 per 100 moves)" in ins.study[1]
+    unchanged = Insight("x", "weakness", "habits", "t", "Detail.", 0.5, 0.9, study=["a", "b"])
+    habits.add_blunder_rates(unchanged, late[:3], late + other, evals)  # too few analysed games: no numbers
+    assert unchanged.detail == "Detail."
 
 
 def test_late_night_block_is_found_in_the_players_time_zone():
@@ -258,7 +293,7 @@ def test_late_night_block_is_found_in_the_players_time_zone():
     assert ins and ins.title == "You score below your rating in games started 04:00–08:00 UTC"
     ny = run(games, tz="America/New_York")  # 05:30 UTC = 00:30 / 01:30 in New York
     ins = insight(ny, "habits.weakness.time-of-day-00-04")
-    assert ins and ins.title == "Your late-night games (00:00–04:00) are your worst"
+    assert ins and ins.title == "You score below your rating in late-night games (00:00–04:00)"
     assert "(America/New_York)" in ins.detail and len(claims(ny)) == 1
 
 
@@ -307,7 +342,7 @@ def test_late_night_window_spanning_two_blocks_is_one_finding():
     mr = run(games, tz="Etc/UTC")  # the player lives in UTC
     ins = insight(mr, "habits.weakness.late-night")
     assert ins and ins.title == "You score below your rating in late-night games (23:00–03:00)"
-    assert "In 120 games started between 23:00 and 03:00 (Etc/UTC)" in ins.detail
+    assert "In 120 games started between 23:00 and 03:00 (UTC)" in ins.detail  # Etc/UTC reads as UTC
     assert claims(mr) == ["habits.weakness.late-night"]
     assert mr.stats["late_night"]["n"] == 120 and mr.stats["late_night"]["local_time"]
     # without a time zone (the command line's default "UTC") 23:00-03:00 UTC is just another window

@@ -65,12 +65,14 @@ def test_repeated_mistake_detected_with_reach_count_and_insight():
     assert res.key == "mistakes"
     [ins] = res.insights
     # two games are not enough to call it a habit: shown, but as an observation that never ranks
-    assert ins.kind == "observation" and ins.category == "openings" and ins.confidence < MIN_CONFIDENCE
-    assert ins.title == "You played 3...Nd4 here in 2 of 4 games; 3...Nf6 is better"
+    assert ins.kind == "observation" and ins.category == "positions" and ins.confidence < MIN_CONFIDENCE
+    assert ins.title.endswith(": you played 3...Nd4 in 2 of 4 games; 3...Nf6 is better")
     assert "in 2 of the 4 games" in ins.detail and "Too few games" in ins.detail
     assert set(ins.example_games) == {"https://www.chess.com/game/live/1", "https://www.chess.com/game/live/2"}
     assert 0 < ins.severity <= 1
-    [table] = res.tables
+    table, puzzles = res.tables
+    assert puzzles.title == "Your costliest mistakes (puzzles)" and len(puzzles.rows) == 2
+    assert all(row[4].startswith("https://lichess.org/analysis/") for row in puzzles.rows)
     assert len(table.rows[0]) == len(table.columns) == len(table.formats)
     assert table.rows[0][0] == "1.e4 e5 2.Nf3 Nc6 3.Bc4"
     assert table.rows[0][2:6] == [4, 2, "3...Nd4", "3...Nf6"]
@@ -256,7 +258,8 @@ def test_different_one_off_errors_in_one_position_are_not_a_repeated_mistake():
     ctx = _ctx(specs)
     assert mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals) == []
     res = mistakes.analyze(ctx)
-    assert res.insights == [] and res.tables == [] and res.stats["repeated_positions"] == 0
+    assert res.insights == [] and res.stats["repeated_positions"] == 0
+    assert [t.title for t in res.tables] == ["Your costliest mistakes (puzzles)"]  # the two errors, as puzzles
     strengths, weaknesses = rank_insights([res])
     assert weaknesses == [] and headline(strengths, weaknesses).startswith("No clear patterns")
 
@@ -288,7 +291,7 @@ def test_a_wrong_move_you_keep_playing_is_a_weakness():
     res = mistakes.analyze(ctx)
     [ins] = res.insights
     assert ins.kind == "weakness" and ins.confidence >= MIN_CONFIDENCE
-    assert ins.title == "You played 3...Nd4 here in 4 of 5 games; 3...Nf6 is better"
+    assert ins.title.endswith(": you played 3...Nd4 in 4 of 5 games; 3...Nf6 is better")
     assert "habit" in ins.detail and ins.evidence["p_adjusted"] <= 0.01
     assert ins.id.startswith("mistakes.weakness.")
     _, weaknesses = rank_insights([res])
@@ -312,7 +315,7 @@ def test_unanalysed_games_with_the_same_move_count_as_repeats():
     assert (rep.errors, rep.reached, rep.analysed) == (10, 11, 2)
     [ins] = mistakes.analyze(ctx).insights
     assert ins.kind == "weakness"
-    assert ins.title == "You played 3...Nd4 here in 10 of 11 games; 3...Nf6 is better"
+    assert ins.title.endswith(": you played 3...Nd4 in 10 of 11 games; 3...Nf6 is better")
     assert "Stockfish analysed 2 of them" in ins.detail
     assert ins.example_games[:2] == [games[1].url, games[0].url]  # analysed games first, most recent first
 
@@ -351,3 +354,22 @@ def test_puzzle_kpi_counts_what_is_exported(monkeypatch):
     kpi = next(k for k in mistakes.analyze(ctx).kpis if k.label == "Puzzles from your games")
     assert kpi.value == 4 and "a Lichess study holds 3" in kpi.hint
     assert len(mistakes.build_puzzles(ctx.games, ctx.evals)) == 4
+
+
+def test_a_follow_up_mistake_in_the_same_games_is_folded_into_the_first():
+    from types import SimpleNamespace as NS
+
+    games = [NS(game_id=g) for g in ("a", "b", "c")]
+
+    def rep(ply, weight, played, significant=True):
+        return NS(first=NS(ply=ply), played_in=played, weight=weight, significant=significant)
+
+    first = rep(16, 30.0, games)  # 9.Nxg5 in games a, b, c
+    follow = rep(20, 40.0, games)  # then 11.Kh1 in the same games
+    elsewhere = rep(12, 50.0, [NS(game_id="d"), NS(game_id="e")])
+    kept, folded = mistakes.fold_follow_ups([elsewhere, follow, first])
+    assert kept == [elsewhere, first] and folded[id(first)] == [follow]
+    # never folds a claim into an observation (that would drop or promote a claim)
+    weak_root = rep(16, 30.0, games, significant=False)
+    kept, folded = mistakes.fold_follow_ups([follow, weak_root])
+    assert kept == [follow, weak_root] and not folded

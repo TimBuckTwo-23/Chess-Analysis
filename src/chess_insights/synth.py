@@ -345,6 +345,7 @@ PLANTED_TRAITS: list[dict[str, Any]] = [
     },
     {
         "id": "T6-endgame-errors",
+        "needs_engine": True,  # found from Stockfish's analysis only (--engine)
         "category": "phases",
         "expect": "weakness",
         "description": "Makes far more mistakes and blunders in endgames than in the middlegame",
@@ -352,6 +353,7 @@ PLANTED_TRAITS: list[dict[str, Any]] = [
     },
     {
         "id": "T7-conversion",
+        "needs_engine": True,  # found from Stockfish's analysis only (--engine)
         "category": "conversion",
         "expect": "weakness",
         "description": "Often fails to win clearly winning positions (+3 or better)",

@@ -9,7 +9,7 @@ import pytest
 from chess_insights.analysis import time_mgmt
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
-from factories import make_game
+from factories import make_game, all_tables
 
 MOVES = ["Nf3", "Nf6", "Ng1", "Ng8"]
 BLACK_FIRST_FEN = "4k3/8/8/8/8/8/4P3/4K3 b - - 0 1"
@@ -77,7 +77,7 @@ def claims(mr):
 
 
 def table(mr, title):
-    return next(t for t in mr.tables if t.title.startswith(title))
+    return next(t for t in all_tables(mr) if t.title.startswith(title))
 
 
 def row(mr, title, first):
@@ -210,7 +210,7 @@ def test_time_trouble_weakness_against_opponents_in_same_games():
     r = row(mr, "Time trouble", "Blitz")
     assert r["Games"] == 40 and r["You in time trouble"] == pytest.approx(0.5)
     assert r["Opponents in time trouble"] == pytest.approx(0.1)
-    assert r["Score in time trouble"] == 0.0 and r["Difference in time trouble"] == pytest.approx(-0.5)
+    assert r["Score in time trouble"] == 0.0 and r["vs rating in time trouble"] == pytest.approx(-0.5)
     ins = insight(mr, "time.weakness.time-trouble-blitz")
     assert ins and ins.category == "time" and ins.kind == "weakness"
     assert "50%" in ins.detail and "10%" in ins.detail

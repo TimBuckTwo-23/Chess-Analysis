@@ -9,7 +9,7 @@ import pytest
 from chess_insights.analysis import engine_stats
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
-from factories import make_game, make_game_eval, make_ply_eval
+from factories import make_game, make_game_eval, make_ply_eval, all_tables
 
 SANS = ["e4", "Nf6", "Qd1", "O-O", "exd5", "Rb8", "Bc4", "Kh8", "Ne2", "a6"]
 
@@ -71,7 +71,7 @@ def insight(mr: ModuleResult, id_: str):
 
 
 def table(mr: ModuleResult, title: str):
-    return next(t for t in mr.tables if t.title == title)
+    return next(t for t in all_tables(mr) if t.title == title)
 
 
 def claims(mr: ModuleResult) -> list[str]:
@@ -131,8 +131,9 @@ def test_per_100_rates_acpl_and_time_class_table():
     assert kpi["Inaccuracies /100 moves"] == pytest.approx(0.0)
     assert mr.stats["opponents"]["blunders_per100"] == pytest.approx(5.0)
     assert mr.stats["opponents"]["inaccuracies_per100"] == pytest.approx(15.0)
-    assert kpi["Average centipawn loss"] == round((2 * 300 + 150 + 17 * 10) / 20)
-    assert kpi["Your accuracy"] == pytest.approx(70.8)
+    assert kpi["Pawns given away per move"] == pytest.approx((2 * 300 + 150 + 17 * 10) / 20 / 100)  # acpl in pawns
+    assert kpi["Your engine accuracy"] == pytest.approx(70.8)
+    assert "Opponents' accuracy" not in kpi  # the hint under your accuracy already gives it
     rows = {r[0]: r for r in table(mr, "By time control").rows}
     assert list(rows) == ["Blitz", "Rapid"]
     assert rows["Blitz"][1:4] == [8, 70.0, 76.0] and rows["Rapid"][1:4] == [2, 74.0, 80.0]
@@ -188,6 +189,10 @@ def test_phase_strength_and_minimum_moves():
     pairs = [phase_game({"middlegame": 1, "endgame": 1}, {"middlegame": 4, "endgame": 1}) for _ in range(20)]
     mr = run(pairs)
     assert [i.id for i in mr.insights if i.category == "phases"] == ["engine.strength.phase-middlegame"]
+    strength = insight(mr, "engine.strength.phase-middlegame")
+    # "fewer mistakes", with the numbers: "better in the opening" read as the opposite of a slow opening
+    assert strength.title.startswith("You make fewer mistakes than your opponents in the middlegame (")
+    assert "Steer games toward" not in " ".join(strength.study)
     few = run(pairs[:12])  # 120 of your moves per phase: below the 150 minimum
     assert [i.id for i in few.insights if i.category == "phases"] == []
 
@@ -261,8 +266,10 @@ def test_conversion_rates_and_thrown_games():
     assert ins and ins.category == "conversion"
     thrown_losses = {g.url for g, _ in pairs[12:20]}
     assert ins.example_games and set(ins.example_games) <= thrown_losses  # losses come first
-    res = insight(mr, "engine.observation.resilience")
-    assert res and res.evidence["saved"] == 1 and res.evidence["lost_positions"] == 20
+    # the saved-positions numbers are folded into the conversion finding instead of a second card
+    assert insight(mr, "engine.observation.resilience") is None
+    assert ins.evidence["saved"] == 1 and "you saved 1 of the 20 games" in ins.detail
+    assert ins.evidence["thrown"] == 12 and "Of the 12 you did not win, 0 were lost on time" in ins.detail
     rows = table(mr, "Winning and losing positions").rows
     assert rows[0][1:5] == [20, 8, 4, 8] and rows[0][5] == pytest.approx(0.4)
     assert rows[1][1:5] == [20, 0, 1, 19] and rows[1][5] == pytest.approx(0.05)
@@ -358,8 +365,8 @@ def test_opening_outcome_eval_after_move_ten():
     mr = run(caro + italian + extra)
     rows = {(r[0], r[1]): r for r in table(mr, "Where your openings leave you (engine eval after move 10)").rows}
     caro_row = rows[("Caro-Kann Defense", "Black")]
-    assert caro_row[2] == 12 and caro_row[3] == pytest.approx((11 * -120 - 500) / 12) and caro_row[4] == 12
-    assert rows[("Italian Game", "White")][2:4] == [6, pytest.approx(20.0)]
+    assert caro_row[2] == 12 and caro_row[3] == pytest.approx((11 * -120 - 500) / 12 / 100) and caro_row[4] == 12  # pawns
+    assert rows[("Italian Game", "White")][2:4] == [6, pytest.approx(0.2)]
     ins = insight(mr, "engine.weakness.openings-black-caro-kann-defense")
     assert ins and ins.category == "openings" and "Caro-Kann" in ins.title
     assert not any(i.id.startswith("engine.") and "italian" in i.id for i in mr.insights)  # 6 games: table only
@@ -487,8 +494,8 @@ def test_opening_evals_are_measured_from_the_start_position():
     blacks = [analysed(spec, color="black", opening_family="Sicilian Defense") for _ in range(40)]
     mr = run(whites + blacks)
     rows = {(r[0], r[1]): r for r in table(mr, "Where your openings leave you (engine eval after move 10)").rows}
-    assert rows[("Italian Game", "White")][3] == pytest.approx(35.0)
-    assert rows[("Sicilian Defense", "Black")][3] == pytest.approx(-35.0)
+    assert rows[("Italian Game", "White")][3] == pytest.approx(0.35)
+    assert rows[("Sicilian Defense", "Black")][3] == pytest.approx(-0.35)
     assert [i.id for i in mr.insights if i.category == "openings"] == []
 
 

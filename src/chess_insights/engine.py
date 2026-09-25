@@ -99,7 +99,12 @@ _WINDOWS_PATTERNS = (
     "Programs/Stockfish*/stockfish*.exe",
     "Programs/Stockfish*/*/stockfish*.exe",
 )
-_WINDOWS_USER_PATTERNS = ("Downloads/stockfish*/stockfish*.exe", "Downloads/stockfish*/*/stockfish*.exe")
+_WINDOWS_USER_PATTERNS = (
+    "Downloads/stockfish*/stockfish*.exe",
+    "Downloads/stockfish*/*/stockfish*.exe",
+    "Desktop/stockfish*/stockfish*.exe",  # where many people unzip a download
+    "Desktop/stockfish*/*/stockfish*.exe",
+)
 # File names Windows reserves for devices, with or without an extension.
 _WINDOWS_RESERVED = frozenset(
     {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{p}{i}" for p in ("COM", "LPT") for i in range(10)}

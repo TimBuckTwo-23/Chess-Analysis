@@ -72,6 +72,7 @@ CATEGORIES = (
     "phases",  # opening / middlegame / endgame quality
     "conversion",  # winning won positions, saving lost ones
     "tactics",  # missed tactical shots / missed mates
+    "positions",  # the same wrong move in the same position, game after game
 )
 
 
@@ -248,7 +249,9 @@ class Insight:
 
 
 # Value formats understood by the renderers (Table.formats / Chart.value_format / Kpi.format)
-VALUE_FORMATS = ("text", "int", "float1", "float2", "pct", "signed_pct", "signed_int", "rating", "url", "seconds")
+VALUE_FORMATS = (
+    "text", "int", "float1", "float2", "pct", "signed_pct", "signed_int", "signed_float2", "rating", "url", "seconds",
+)
 
 
 @dataclass
@@ -258,6 +261,7 @@ class Table:
     rows: list[list[Any]]
     formats: Optional[list[str]] = None  # one of VALUE_FORMATS per column; None = auto
     note: str = ""
+    key_columns: Optional[list[int]] = None  # columns a phone shows by default in a wide table; None = a guess
 
 
 @dataclass
@@ -275,6 +279,9 @@ class Chart:
     value_format: str = "int"  # one of VALUE_FORMATS
     note: str = ""
     reference: Optional[float] = None  # optional horizontal reference line (e.g. 0.5 score)
+    # the full numbers behind the chart (more columns than the series): shown under "Show the numbers"
+    # instead of the bare series, so the section need not list the same numbers again as a table
+    table: Optional[Table] = None
 
 
 @dataclass
@@ -317,6 +324,10 @@ class StudyItem:
     games: list[str] = field(default_factory=list)  # URLs to review
     category: str = ""
     priority: float = 0.0
+    insight_ids: list[str] = field(default_factory=list)  # the findings this item works on, lead finding first
+    findings: list[str] = field(default_factory=list)  # their titles, in the same order
+    target: str = ""  # what to aim for by the next report, with today's number
+    baseline: dict[str, Any] = field(default_factory=dict)  # {"metric", "value", "insight"}: today's number, for the next report
 
 
 @dataclass
@@ -333,3 +344,6 @@ class Report:
     study_plan: list[StudyItem]
     engine_note: str = ""  # e.g. "Stockfish 16 depth 12 on 150 most recent games" or why engine analysis was skipped
     headline: str = ""  # one or two sentences summarising the report
+    summary_lines: list[str] = field(default_factory=list)  # the headline as short lines: ratings, first steps, a strength
+    game_labels: dict[str, str] = field(default_factory=dict)  # game URL -> "Loss · 5+0 · vs 1512 · 12 Aug"
+    demo: bool = False  # a synthetic demo player: games, opponents and links are made up (links are not shown)

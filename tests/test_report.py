@@ -521,7 +521,7 @@ def test_glyphs_follow_priority():
     strong = lambda p: Insight("x", "strength", "results", "t", "d", severity=p, confidence=1.0)  # noqa: E731
     assert [glyph_for(weak(p)) for p in (0.9, 0.3, 0.1)] == ["??", "?", "?!"]
     assert [glyph_for(strong(p)) for p in (0.6, 0.2)] == ["!!", "!"]
-    assert glyph_for(Insight("x", "observation", "results", "t", "d", 1.0, 1.0)) == "="
+    assert glyph_for(Insight("x", "observation", "results", "t", "d", 1.0, 1.0)) == "i"  # "=" reads as "equal position"
 
 
 # --------------------------------------------------------------------------- HTML
@@ -585,16 +585,16 @@ def test_html_sections_nav_and_cards(report):
     html = render_html(report)
     checker = check_html(html)
     anchors = [h[1:] for t, h in checker.hrefs if t == "a" and h.startswith("#")]
-    assert anchors[:3] == ["study", "strengths", "weaknesses"]
+    assert anchors[:3] == ["weaknesses", "strengths", "study"]
     assert {"results", "openings", "time_mgmt", "habits", "endings", "engine_stats"} <= set(anchors)
     assert set(anchors) <= set(checker.ids)
     assert len(checker.ids) == len(set(checker.ids))  # ids are unique
     # study plan: ordered list, action checklist, review links
     assert '<ol class="plan">' in html and html.count('class="plan-item"') == 3
-    assert "Review these games" in html and ">Game 1<" in html
+    assert "Review" in html and ">Game 1<" in html  # games the report has no label for keep "Game N"
     # glyph badges + confidence pills
     assert 'aria-label="Serious weakness"' in html and ">??</span>" in html
-    assert ">!!</span>" in html and ">=</span>" in html
+    assert ">!!</span>" in html and ">i</span>" in html
     assert "High confidence" in html and "Medium confidence" in html
     # KPI formats
     for text in ("1,234", "53%", f"{MINUS}4%", "1512", "+87", "5.3%", "38.5", "1.04", "1:35", "1:06:40", "7.3s", MISSING):
@@ -702,13 +702,14 @@ def test_markdown_structure(report):
     md = render_markdown(report)
     assert md.startswith("# TesterBob · Chess Insights\n")
     assert "**1,234 games** · 3 Jan 2024 – 30 Dec 2024 · rated + casual" in md
-    for heading in ("## Study plan", "## Strengths", "## Weaknesses", "## Results & rating", "## Openings", "### Findings"):
+    for heading in ("## At a glance", "## Study plan", "## Results & rating", "## Openings", "### Findings"):
         assert f"\n{heading}\n" in md, heading
     assert "\n1. **The Caro-Kann is costing you points as Black** — _Opening repertoire_\n" in md
     assert "\n   - [ ] Replay your 9 Caro-Kann losses" in md
-    assert "Review these games: [Game 1](https://www.chess.com/game/live/105000000002)" in md
-    assert "- `??` **The Caro-Kann is costing you points as Black**" in md
-    assert "- `=` **Observation · Overall results: Most of your games are blitz**" in md
+    assert "Review: [Game 1](https://www.chess.com/game/live/105000000002)" in md
+    assert "- `??` The Caro-Kann is costing you points as Black — _Openings_" in md  # the at-a-glance line
+    assert md.index("**Weaknesses** (3)") < md.index("**Strengths** (2)") < md.index("## Study plan")
+    assert "- `i` **Observation · Overall results: Most of your games are blitz**" in md
     assert "| Time class | Games | Score | Expected | Difference | Avg opponent | Avg clock left |" in md
     assert "|---|---:|---:|---:|---:|---:|---:|" in md
     assert "| Daily | 12 | 63% | 50% | +13% | — | — |" in md
@@ -1604,3 +1605,108 @@ def test_stacked_result_colours_check_the_segments_that_really_touch(themes):
         for w, lo in itertools.product(itertools.combinations(range(1, 5), len(wins)), itertools.combinations(range(1, 5), len(losses))):
             slot = {"Drawn": "d", **{k: f"w{s}" for k, s in zip(wins, w)}, **{k: f"l{s}" for k, s in zip(losses, reversed(lo))}}
             assert clashes(slot, stacks), (values, legend, slot)
+
+
+# --------------------------------------------------------------------------- cross-links, phone layout, demo
+def _linked_report(demo: bool = False) -> Report:
+    from chess_insights.insights import build_study_plan
+
+    game = GAME.format(105000000077)
+    late = Insight(
+        "habits.weakness.late-night", "weakness", "habits", "You score below your rating late at night",
+        "In 100 games ...", 0.8, 0.9, evidence={"window": "23:00–03:00", "n": 100},
+        study=["Avoid rated games after 23:00.", "Stop after the first loss.", "Play slower games late."],
+        example_games=[game],
+    )
+    tilt = Insight(
+        "habits.weakness.after-a-loss", "weakness", "habits", "You play worse right after a loss", "In 80 games ...",
+        0.7, 0.9, study=["Stop rule: wait 15 minutes after a loss."], example_games=[game],
+    )
+    other = Insight("results.observation.x", "observation", "results", "Most of your games are blitz", "d", 0.1, 0.5)
+    wide = Table(
+        title="Wide", columns=["Opening", "Games", "Share", "W/D/L", "Score", "Rating predicts", "vs rating", "More"],
+        rows=[["Italian Game", 10, 0.5, "5/0/5", 0.5, 0.5, 0.0, 1]],
+        formats=["text", "int", "pct", "text", "pct", "pct", "signed_pct", "int"],
+    )
+    numbers = Table(title="Full numbers", columns=["Group", "Games", "vs rating"], rows=[["a", 40, 0.05], ["b", 3, -0.2]],
+                    formats=["text", "int", "signed_pct"])
+    chart = Chart(kind="bar", title="Score vs rating", labels=["a", "b"], series=[Series("Score vs rating", [0.05, -0.2])],
+                  value_format="signed_pct", reference=0.0, table=numbers)
+    habits = ModuleResult(key="habits", title="Habits & tilt", summary="s", insights=[late, tilt, other],
+                          charts=[chart], tables=[wide])
+    weaknesses = [late, tilt]
+    return Report(
+        username="Tester", generated_at=datetime(2026, 9, 25, 14, 3, tzinfo=timezone.utc), filters="", n_games=200,
+        date_from=None, date_to=None, modules=[habits], strengths=[], weaknesses=weaknesses,
+        study_plan=build_study_plan(weaknesses), summary_lines=["Your ratings: blitz 1500.", "Start with: 1. x."],
+        game_labels={game: "Loss · 5+0 · vs 1512 · 12 Aug"}, demo=demo,
+    )
+
+
+def test_findings_in_the_plan_link_to_it_instead_of_repeating_its_actions():
+    rep = _linked_report()
+    html = render_html(rep)
+    checker = check_html(html)
+    assert len(checker.ids) == len(set(checker.ids))
+    assert html.count('class="plan-item"') == 1  # two findings, one cause
+    assert 'id="plan-1"' in html and "Also covers" in html and 'href="#f-habits-weakness-after-a-loss"' in html
+    # each finding's card points at the plan item and shows no action list of its own
+    card = html[html.index('id="f-habits-weakness-late-night"'):]
+    card = card[: card.index("</article>")]
+    assert 'href="#plan-1"' in card and "Avoid rated games" not in card
+    # the glance list: every weakness, one line each, linked to its card, naming its section and plan item
+    assert re.search(r'<a href="#f-habits-weakness-late-night">You score below your rating late at night</a>'
+                     r'<span class="glance-where">Habits &amp; tilt · plan item 1</span>', html)
+    # real checkboxes that the page remembers, a target line, labelled game links
+    assert html.count('<input type="checkbox" data-k=') == 3 and "localStorage" in html
+    assert "Target for your next report:" in html and "No rated games started 23:00–03:00" in html
+    assert ">Loss · 5+0 · vs 1512 · 12 Aug<" in html
+    assert '<ul class="lede lede--lines"><li>Your ratings: blitz 1500.</li>' in html
+    md = render_markdown(rep)
+    assert "Also covers: You play worse right after a loss" in md
+    assert "what to do: study plan item 1" in md and "_Target for your next report:_" in md
+    assert "[Loss · 5+0 · vs 1512 · 12 Aug](https://www.chess.com/game/live/105000000077)" in md
+    assert "> Your ratings: blitz 1500.\n>\n> Start with: 1. x.\n" in md
+
+
+def test_charts_and_tables_fold_away_and_charts_carry_their_full_numbers():
+    html = render_html(_linked_report())
+    more = html[html.index('<details class="more">'):]
+    assert more.startswith('<details class="more"><summary>Show 1 chart and 1 table</summary>')
+    data = more[more.index('class="chart-data"'):]
+    assert ">Group<" in data[: data.index("</details>")]  # the chart's own table, not just its series
+    # a single "vs rating" series is coloured by sign
+    svg = re.search(r"<svg .*?</svg>", html, re.S).group(0)
+    assert 'class="bar f-w1"' in svg and 'class="bar f-l1"' in svg
+    md = render_markdown(_linked_report())
+    assert "| Group | Games | vs rating |" in md
+
+
+def test_wide_tables_show_key_columns_on_a_phone():
+    html = render_html(_linked_report())
+    table = html[html.index('<figure class="table-block"><figcaption class="block-title">Wide'):]
+    table = table[: table.index("</figure>")]
+    assert '<label class="allcols"><input type="checkbox"> All 8 columns' in table
+    heads = re.findall(r'<th scope="col"( class="[^"]*")?>([^<]*)</th>', table)
+    minor = [name for cls, name in heads if "minor" in cls]
+    assert minor == ["Share", "W/D/L", "Rating predicts", "More"]  # Opening, Games, Score, vs rating stay
+    assert ".table-block:not(:has(.allcols input:checked)) .minor{display:none}" in html
+
+
+def test_a_demo_report_says_so_and_links_no_real_games():
+    rep = _linked_report(demo=True)
+    html = render_html(rep)
+    checker = check_html(html)
+    assert "Synthetic demo player" in html
+    assert not [h for t, h in checker.hrefs if "chess.com" in h]
+    assert '<span class="nolink">Loss · 5+0 · vs 1512 · 12 Aug</span>' in html
+    md = render_markdown(rep)
+    assert "Synthetic demo player" in md and "](https://www.chess.com" not in md
+    # the flag does not leak into the next, real report
+    assert "https://www.chess.com/game/live/105000000077" in render_html(_linked_report())
+
+
+def test_signed_pawn_values():
+    assert format_value(0.4, "signed_float2") == "+0.40"
+    assert format_value(-0.234, "signed_float2") == f"{MINUS}0.23"
+    assert format_value(0, "signed_float2") == "0.00"

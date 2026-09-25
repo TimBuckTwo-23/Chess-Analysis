@@ -65,11 +65,11 @@ either group alone.
 ### The claim rule
 
 Something becomes a **strength or weakness** only if all three hold; otherwise it
-is at most an *observation* (shown in its section, never in the top lists or the
-study plan):
+is at most an *observation* (shown in its section, marked "i", never in the lists at
+the top or the study plan):
 
 1. **Enough games** in *both* groups compared (module minimums, e.g. 8 rated games
-   in an opening family as one colour, 20–25 in a split such as "right after a
+   in an opening family as one colour, 25 in a split such as "right after a
    loss").
 2. **A significant test after multiple-testing adjustment.** Difference tests of the
    mean `score − E` between a group and your other games, paired tests against your
@@ -80,6 +80,10 @@ study plan):
 3. **An effect big enough to matter** (e.g. 0.06 points per game, about 40 Elo).
 
 This rule lives in one place, `stats.significance`, and every module uses it.
+
+The lists at the top of the report show **every** strength and weakness that passed it
+(most important first: severity × confidence), one line each; every one is explained in
+its section. Findings from two modules about the same opening are merged into one line.
 
 **Confidence** is *not* `1 − p`. A p-value of 0.004 does not make a claim 99.6%
 certain, least of all in a report that runs a few dozen tests. The confidence is
@@ -109,8 +113,8 @@ so the families are split into two tiers:
 | **0.01** | Other times of day, time controls, opponent strength, session length, time trouble, losing on time, slow openings, clock handling, quick losses in one opening | Exploratory scans (many ways to get lucky), and clock or quick-loss habits, whose paired or mirror tests have power to spare when the habit is real. |
 
 **Late night needs your time zone.** 23:00–03:00 UTC is early evening in New York.
-Without a time zone (the command line's default, `--tz UTC`) the same UTC window is
-still tested, but at 0.01 like any other block of the day, and it is titled by its
+Without a time zone (no `--tz`, or `--tz UTC` / `GMT`, which count as not given) the same
+UTC window is still tested, but at 0.01 like any other block of the day, and it is titled by its
 UTC hours ("games started 23:00–03:00 UTC"); the 4-hour blocks are too. Pass your
 zone (`--tz America/New_York`, or `--tz Etc/UTC` if you really live in UTC) to get
 the late-night test.
@@ -197,9 +201,12 @@ with results. Every strength or weakness reported on it is false. The same
 generator can *plant* realistic effects, each shifting only the games it concerns,
 and habits that are not skill effects (a rating that lags, never resigning).
 
-False claims in the top lists per report (the null player gives the time zone,
-`Etc/UTC`, so late night is tested at 0.05; seeds 0–63 and 1000–1039 for the null
-world, 24–64 fresh seeds for each variant):
+False claims per report (the null player gives the time zone, `Etc/UTC`, so late night is
+tested at 0.05; seeds 0–63 and 1000–1039 for the null world, 24–64 fresh seeds for each
+variant). These were measured on the report's top lists when they held at most five
+claims; the test now counts every strength and weakness in the lists and in every
+section, and re-measuring the 400-game null world that way (seeds 0–63) gives the same
+0.19 per report, because no null report had more than two claims:
 
 | World | 400 games | 600 | 1,200 | 3,000 |
 |---|---|---|---|---|
@@ -225,7 +232,7 @@ with care. The null world's realised edge is slightly below 0.04 (colour z-score
 average −0.1), so "worse with White" shows up a little more often than "worse with
 Black" in it.
 
-Share of 32 worlds (seeds 1000–1031) in which the report's top weaknesses name the
+Share of 32 worlds (seeds 1000–1031) in which the report's weaknesses name the
 planted effect (right kind and category), one effect at a time:
 
 | Planted effect | 400 | 600 | 1,200 | priced in, 400 / 600 |
@@ -303,7 +310,9 @@ Lichess:
 vectors. The few deliberate differences are pinned by `test_deviation_*` tests:
 * the start position is evaluated rather than assumed to be +0.15;
 * one move's centipawn loss is capped at 1000 (Lichess allows 2000);
-* a game that jumps straight to an endgame gets endgame moves.
+* a game that jumps straight to an endgame gets endgame moves;
+* accuracy is reported for a side even when the other side never moved;
+* a final position drawn by rule (repetition, 50 moves) is scored as a draw without a search.
 
 **How engine findings are tested.** Every engine comparison benchmarks you
 against your opponents in the same games. The unit is the *game*: blunders come
@@ -333,8 +342,13 @@ castling and en-passant rights. Transpositions are therefore counted together.
 * It becomes a weakness only after at least three such games, and only if that is
   more often than your ordinary error rate explains. That is a one-sided binomial
   test, Benjamini–Hochberg adjusted over the positions tested, at the strict alpha.
+* A wrong move you only ever played in games where you had already gone wrong
+  earlier in the same line (9.Nxg5, then 11.Kh1 in the same three games) is folded
+  into the earlier one: one habit, one finding. Folding never turns an observation
+  into a claim or drops a claim.
 * `--puzzles` exports your costliest mistakes (up to 300, worst first) as a PGN you
-  can import into a Lichess study (64 chapters per study) or any chess GUI.
+  can import into a Lichess study (64 chapters per study) or any chess GUI. The report
+  lists the ten costliest, each with a link to the position on a Lichess analysis board.
 
 ## 4. What is excluded
 
@@ -346,3 +360,33 @@ castling and en-passant rights. Transpositions are therefore counted together.
   measure days, and archived daily clocks store time spent rather than time
   remaining.
 * **Games with fewer than 4 plies** are left out of skill metrics.
+
+## 5. From findings to a study plan
+
+The study plan changes nothing about what is claimed; it only arranges the weaknesses
+that passed the rule (section 2):
+
+* **One item per cause.** Weaknesses of the same kind share an item: the clock (a slow
+  opening, losing on time, time trouble), when you play (after a loss, late at night,
+  long sessions), your own repeated positions, your repertoire (openings and colour), and
+  one item each for conversion, game phases, blunders, tactics and accuracy. The item takes
+  its title and numbers from its most important finding and lists the others it covers.
+* **Easiest first.** Items are ordered by what it takes to act on them, then by
+  importance: when you play (costs nothing), the clock (a habit to practise), your own
+  positions (ten minutes a day), the repertoire (weeks), technique (longer).
+* **At most three actions.** The findings' own actions, taken in turn; general training
+  advice only fills an empty place, and never when it repeats an action already there.
+* **A target with today's number** ("use at most 30% of your clock on your first 15
+  moves (now 50%)"), also stored in the JSON (`study_plan[].baseline`) for comparing
+  with the next report.
+* **Your own puzzles** (with `--engine`) are always practice material: they join the
+  positions item, or make one of their own when no position is a weakness. They are facts
+  about your games, not claims.
+
+Some actions quote numbers from your games that were not tested and are not claims:
+how each of your choices at a move scored ("after 1.e4 e5 2.Nf3 Nc6: 3.Bc4 66% in 90
+games, 3.Bb5 40% in 40"), Stockfish's average evaluation after move 10 in a weak opening
+(to tell an opening problem from a middlegame one), your blunder rate late at night
+against other times, the phase of your first slip in the winning positions you did not
+win, and the share of endgame errors made short of time. They point the practice at the
+right place; they do not add findings.

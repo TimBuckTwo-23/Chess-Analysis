@@ -120,6 +120,8 @@ def test_report_online_writes_every_format(chesscom, run, tmp_path):
         assert out.with_suffix(f".{ext}").exists()
     assert "== TesterBob: " in stdout  # display name as spelled in the games
     assert "games match" in stderr and "wrote" in stderr
+    assert f"wrote {out.with_suffix('.html').resolve()}" in stderr  # absolute paths: easy to find and open
+    assert "tip: add --tz" in stderr  # no time zone given: say what it would add
     assert report_json(out)["n_games"] == 8  # 7 March games (standard chess) + the boundary game
     assert f"{BASE}/games/2024/03" in chesscom.calls
 
@@ -397,7 +399,39 @@ def test_demo_with_a_tiny_synthetic_player(run, tmp_path):
                                "--formats", "json", "--cache-dir", str(tmp_path / "demo-cache"))
     assert code == 0, stderr
     assert "planted traits recovered" in stdout
-    assert report_json(out)["n_games"] > 0
+    assert "[not tested: needs --engine]" in stdout  # no engine: the engine-only traits are not "missed"
+    data = report_json(out)
+    assert data["n_games"] > 0 and data["demo"] is True
+    assert "tip: add --tz" not in stderr  # the demo player's time zone is known
+
+
+def test_trait_check_says_where_each_trait_was_found(capsys):
+    from chess_insights.models import Report
+
+    def ins(id_, kind, category, title):
+        return Insight(id=id_, kind=kind, category=category, title=title, detail="", severity=0.8, confidence=0.9)
+
+    listed = ins("openings.weakness.black.caro-kann-defense", "weakness", "openings", "The Caro-Kann costs you")
+    section_only = ins("habits.weakness.after-a-loss", "weakness", "habits", "You play worse right after a loss")
+    stray = ins("openings.weakness.white.ruy-lopez-opening", "weakness", "openings", "The Ruy Lopez costs you")
+    modules = [ModuleResult(key="openings", title="Openings", summary="", insights=[listed, stray]),
+               ModuleResult(key="habits", title="Habits", summary="", insights=[section_only]),
+               ModuleResult(key="engine_stats", title="Engine", summary="", stats={"games": 0})]
+    report = Report(username="u", generated_at=None, filters="", n_games=1, date_from=None, date_to=None,
+                    modules=modules, strengths=[], weaknesses=[listed, stray], study_plan=[])
+    traits = [
+        {"id": "t1", "category": "openings", "expect": "weakness", "description": "Caro", "keywords": ["caro-kann"]},
+        {"id": "t2", "category": "habits", "expect": "weakness", "description": "Tilt", "keywords": ["after a loss"]},
+        {"id": "t3", "category": "phases", "expect": "weakness", "description": "Endgame", "keywords": ["endgame"],
+         "needs_engine": True},
+        {"id": "t4", "category": "results", "expect": "strength", "description": "Rapid", "keywords": ["rapid"]},
+    ]
+    cli.print_trait_check(report, traits)
+    out = capsys.readouterr().out
+    assert "[FOUND] (weakness) Caro" in out and "[FOUND, section only] (weakness) Tilt" in out
+    assert "[not tested: needs --engine] (weakness) Endgame" in out and "[missed] (strength) Rapid" in out
+    assert "2/3 planted traits recovered (1 not tested)." in out
+    assert "match no planted trait" in out and "- (weakness) The Ruy Lopez costs you" in out
 
 
 def test_demo_rejects_a_non_positive_game_count(run):
@@ -649,3 +683,9 @@ def test_club_pgn_without_links_or_times(run, tmp_path):
     assert code == 0, stderr
     data = report_json(out)
     assert data["n_games"] == 3 and data["date_from"].startswith("2024-05-04")
+
+
+def test_engine_games_accepts_all():
+    args = cli.build_parser().parse_args(["report", "someone", "--engine-games", "all"])
+    assert args.engine_games >= 10**9
+    assert cli.build_parser().parse_args(["report", "someone", "--engine-games", "40"]).engine_games == 40

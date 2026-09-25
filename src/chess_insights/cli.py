@@ -190,6 +190,13 @@ def _tz(name: Optional[str]) -> tzinfo:
     return ZoneInfo(name)
 
 
+def _engine_games(text: str) -> int:
+    """--engine-games: a positive number, or "all"."""
+    if text.strip().lower() == "all":
+        return 10**9
+    return _positive_int(text)
+
+
 def _formats(text: str) -> tuple[str, ...]:
     from .report import _normalise_formats
 
@@ -263,7 +270,10 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
     sp.add_argument("--engine", action="store_true", help="run Stockfish analysis (slower, much deeper insights)")
     sp.add_argument("--stockfish", help="path to the Stockfish program or its folder (default: auto-detect)")
     sp.add_argument("--depth", type=_positive_int, default=12, help="Stockfish depth per position (default 12)")
-    sp.add_argument("--engine-games", type=_positive_int, default=150, help="analyse the N most recent games (default 150)")
+    sp.add_argument(
+        "--engine-games", type=_engine_games, default=150,
+        help="analyse the N most recent games (default 150), or 'all'",
+    )
     sp.add_argument("--workers", type=_non_negative_int, default=0, help="parallel engine processes (default: CPUs - 1)")
     sp.add_argument("--puzzles", action="store_true", help="with --engine: export your mistakes as a PGN puzzle file")
     sp.add_argument(
@@ -549,15 +559,23 @@ def analyse_and_write(games: list[Game], username: str, args: argparse.Namespace
     if not selected:
         raise UserError(f"nothing to analyse. Your games have {_available(games)}.", EXIT_NO_GAMES)
 
+    if args.tz is None and not getattr(args, "demo", False):
+        _say(
+            "tip: add --tz with your time zone (e.g. --tz America/New_York) for time-of-day results in your local "
+            "time and the late-night check"
+        )
     evals: dict = {}
     engine_note = "Engine analysis not run (add --engine for accuracy, blunder and phase insights)."
     if args.engine:
         evals, engine_note = run_engine(selected, username, args, cache_dir)
 
-    report = run_analysis(
-        selected, username, evals=evals, options={"tz": args.tz}, filters=filters, engine_note=engine_note
-    )
     out = _out_stem(args, username)
+    options = {"tz": args.tz}
+    if getattr(args, "puzzles", False) and evals:
+        options["puzzle_file"] = _puzzle_path(out).name  # written next to the report, after it
+    if getattr(args, "demo", False):
+        options["demo"] = True
+    report = run_analysis(selected, username, evals=evals, options=options, filters=filters, engine_note=engine_note)
     try:
         paths = write_report(report, out, formats=args.formats)
         if getattr(args, "puzzles", False) and evals:
@@ -566,8 +584,15 @@ def analyse_and_write(games: list[Game], username: str, args: argparse.Namespace
         raise UserError(f"could not write the report to {out}: {exc}", EXIT_NO_GAMES) from None
     print_summary(report)
     for p in paths:
-        _say(f"wrote {p}")
+        _say(f"wrote {_absolute(p)}")
     return report
+
+
+def _absolute(path: Path) -> Path:
+    try:
+        return Path(path).resolve()
+    except OSError:
+        return Path(path)
 
 
 def _puzzle_path(out: Path) -> Path:
@@ -616,8 +641,8 @@ def run_engine(games: list[Game], username: str, args: argparse.Namespace, cache
 def print_summary(report: Report) -> None:
     out = sys.stdout
     print(f"\n== {report.username}: {report.n_games} games ({report.filters}) ==", file=out)
-    if report.headline:
-        print(report.headline, file=out)
+    for line in report.summary_lines or ([report.headline] if report.headline else []):
+        print(line, file=out)
     if report.strengths:
         print("\nStrengths", file=out)
         for ins in report.strengths:
@@ -685,20 +710,43 @@ def cmd_demo(args: argparse.Namespace) -> int:
         games = parse_games([g for key in sorted(archives) for g in archives[key]], persona.username)
         if args.tz is None:
             args.tz = "Etc/UTC"  # the synthetic player's clock times are UTC
+        args.demo = True
         report = analyse_and_write(games, persona.username, args, cache_dir)
     finally:
         if temp:
             shutil.rmtree(cache_dir, ignore_errors=True)
 
-    hits = check_planted_traits(report, PLANTED_TRAITS)
-    print("Planted traits vs. what the analysis found:")
-    for trait, match in hits:
-        mark = "FOUND " if match else "missed"
-        print(f"  [{mark}] ({trait['expect']}) {trait['description']}")
-        if match:
-            print(f"           -> {match.title}")
-    print(f"\n{sum(1 for _, m in hits if m)}/{len(hits)} planted traits recovered.")
+    print_trait_check(report, PLANTED_TRAITS)
     return 0
+
+
+def print_trait_check(report: Report, traits: list[dict]) -> None:
+    """Planted traits found (in the report's lists, or only in a section), missed or not testable; then the
+    claims that match no planted trait."""
+    engine_ran = any(m.key == "engine_stats" and m.stats.get("games") for m in report.modules)
+    listed = {id(i) for i in list(report.strengths or []) + list(report.weaknesses or [])}
+    hits = check_planted_traits(report, traits)
+    print("Planted traits vs. what the analysis found:")
+    tested = found = 0
+    for trait, match in hits:
+        if match is None and trait.get("needs_engine") and not engine_ran:
+            mark = "not tested: needs --engine"
+        else:
+            tested += 1
+            found += match is not None
+            mark = "missed" if match is None else "FOUND" if id(match) in listed else "FOUND, section only"
+        print(f"  [{mark}] ({trait['expect']}) {trait['description']}")
+        if match is not None:
+            print(f"           -> {match.title}")
+    print(f"\n{found}/{tested} planted traits recovered" + (f" ({len(hits) - tested} not tested)." if tested < len(hits) else "."))
+    unplanted = [
+        i for i in list(report.weaknesses or []) + list(report.strengths or []) if not any(trait_matches(t, i) for t in traits)
+    ]
+    if unplanted:
+        print("Claims that match no planted trait (side effects of how the games were generated, or chance: about")
+        print("0.2 false claims per report are expected on players without real strengths or weaknesses):")
+        for ins in unplanted:
+            print(f"  - ({ins.kind}) {ins.title}")
 
 
 def check_planted_traits(report: Report, traits: list[dict]) -> list[tuple[dict, Optional[object]]]:
@@ -706,21 +754,20 @@ def check_planted_traits(report: Report, traits: list[dict]) -> list[tuple[dict,
     from .insights import all_insights
 
     pool = sorted(all_insights(report.modules), key=lambda i: -i.priority)
-    out = []
-    for trait in traits:
-        keywords = [k.lower() for k in trait.get("keywords", [])]
-        match = next(
-            (
-                i
-                for i in pool
-                if i.kind == trait["expect"]
-                and (not trait.get("category") or i.category == trait["category"])
-                and (not keywords or any(k in f"{i.id} {i.title} {i.detail}".lower() for k in keywords))
-            ),
-            None,
+    return [(trait, next((i for i in pool if trait_matches(trait, i)), None)) for trait in traits]
+
+
+def trait_matches(trait: dict, ins: object) -> bool:
+    """An insight of the trait's kind and category that mentions one of its keywords."""
+    keywords = [k.lower() for k in trait.get("keywords", [])]
+    return (
+        getattr(ins, "kind", None) == trait["expect"]
+        and (not trait.get("category") or getattr(ins, "category", None) == trait["category"])
+        and (
+            not keywords
+            or any(k in f"{getattr(ins, 'id', '')} {getattr(ins, 'title', '')} {getattr(ins, 'detail', '')}".lower() for k in keywords)
         )
-        out.append((trait, match))
-    return out
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -40,23 +40,121 @@ def test_rank_diversifies_categories_then_backfills():
     assert ids == sorted(ids, key=lambda x: -next(i.priority for i in weaknesses if i.id == x))
 
 
-def test_study_plan_combines_specific_and_generic_actions_without_repeats():
+def test_study_plan_groups_one_cause_into_one_item_with_at_most_three_actions():
     w = [
         ins("a", category="tactics", study=["Review your 5 hung-piece games"], example_games=["https://x/1"] * 7),
         ins("b", category="tactics", severity=0.5, study=[]),
     ]
-    plan = insights.build_study_plan(w)
-    assert plan[0].actions[0] == "Review your 5 hung-piece games"
-    assert len(plan[0].games) == 5
-    generic_a = set(plan[0].actions[1:])
-    assert generic_a and not generic_a & set(plan[1].actions)  # generic tips are not repeated
-    assert plan[0].category == "Tactics"
+    [item] = insights.build_study_plan(w)  # one cause: one item
+    assert item.title == "title a" and item.findings == ["title a", "title b"] and item.insight_ids == ["a", "b"]
+    assert item.actions[0] == "Review your 5 hung-piece games"
+    assert 1 < len(item.actions) <= 3 and len(set(item.actions)) == len(item.actions)  # generic tips fill the rest
+    assert item.games == ["https://x/1"]
+    assert item.category.startswith("Tactics")
+
+
+def test_study_plan_orders_items_by_effort_not_size():
+    plan = insights.build_study_plan([
+        ins("open", category="openings", severity=0.9, study=["Learn the Italian", "Replay the losses"]),
+        ins("clock", category="time", severity=0.5, study=["Budget your clock", "Play with increment"]),
+        ins("tilt", category="habits", severity=0.3, study=["Stop after a loss", "Take a break"]),
+        ins("colour", category="color", severity=0.4, study=["Narrow your Black repertoire", "Replay"]),
+    ])
+    assert [p.insight_ids[0] for p in plan] == ["tilt", "clock", "open"]  # habits, clock, then the repertoire
+    repertoire = plan[2]
+    assert repertoire.insight_ids == ["open", "colour"]  # one repertoire job
+    # the findings' own actions in turn: the first of each, then the second ...
+    assert repertoire.actions == ["Learn the Italian", "Narrow your Black repertoire", "Replay the losses"]
+
+
+def test_generic_tips_that_repeat_a_findings_own_action_are_left_out():
+    w = [ins("late", category="habits", study=[
+        "Avoid rated games between 00:00 and 04:00; play puzzles or unrated games then instead.",
+    ])]
+    [item] = insights.build_study_plan(w)
+    assert item.actions[0].startswith("Avoid rated games between")
+    assert not any("when tired" in a for a in item.actions)
+    assert insights.similar_actions(
+        "Replay your 5 most recent losses in the Ruy Lopez Opening as White and mark the move where you left known theory.",
+        "Replay your losses in this opening and mark the exact move where you left known theory.",
+    )
+    assert not insights.similar_actions("Budget your clock", "Learn the Caro-Kann plans")
+
+
+def test_practice_item_from_puzzles_even_without_weaknesses():
+    mistakes_module = ModuleResult(
+        key="mistakes", title="Positions", summary="", stats={"puzzles_exported": 40, "puzzle_file": "me-puzzles.pgn"}
+    )
+    actions = insights.practice_actions([mistakes_module])
+    assert actions and "40 positions" in actions[0] and "me-puzzles.pgn" in actions[0]
+    [item] = insights.build_study_plan([], practice=actions)
+    assert item.title == "Practise your own mistakes as puzzles" and item.actions == actions and not item.insight_ids
+    # with a repeated-position weakness, the puzzles join that item instead of making a second one
+    rep = ins("mistakes.weakness.x", category="positions", study=["Set up the position", "Add it to notes", "Replay"])
+    [item] = insights.build_study_plan([rep], practice=actions)
+    assert item.insight_ids == ["mistakes.weakness.x"] and item.actions[-1] == actions[0] and len(item.actions) == 3
+    assert insights.practice_actions([mod("mistakes")]) == []
+
+
+def test_targets_carry_todays_number():
+    slow = ins("time.weakness.slow-opening-blitz", category="time",
+               evidence={"time_class": "blitz", "your_share": 0.5, "opponent_share": 0.26})
+    text, baseline = insights.target_for(slow)
+    assert text == "Use at most 30% of your clock on your first 15 moves in blitz (now 50%)."
+    assert baseline["value"] == 0.5
+    opening = ins("openings.weakness.white.ruy-lopez-opening",
+                  evidence={"family": "Ruy Lopez Opening", "color": "white", "delta": -0.09})
+    assert insights.target_for(opening)[0] == "Score in line with your rating in the Ruy Lopez Opening (now −9 per 100 games)."
+    late = ins("habits.weakness.time-of-day-00-04", category="habits", evidence={"block": "00:00–04:00", "n": 100})
+    assert insights.target_for(late)[0] == "No rated games started 00:00–04:00 (now 100 of your rated games)."
+    assert insights.target_for(ins("x.weakness.y")) == ("", {})
+    [item] = insights.build_study_plan([slow])
+    assert item.target.startswith("Use at most 30%") and item.baseline["insight"] == slow.id
+
+
+def test_rank_can_keep_every_claim():
+    many = [ins(f"o{i}", category="openings", severity=0.9 - i * 0.01) for i in range(8)]
+    _, top = insights.rank_insights([mod("a", *many)])
+    _, everything = insights.rank_insights([mod("a", *many)], top_n=None)
+    assert len(top) == 5 and [i.id for i in everything] == [f"o{i}" for i in range(8)]
+
+
+def test_summary_lines_give_ratings_first_steps_and_a_strength():
+    results = ModuleResult(key="results", title="Results", summary="", stats={"by_time_control": {
+        "Blitz": {"rating": {"n": 221, "start": 1458, "current": 1379}},
+        "Rapid": {"rating": {"n": 114, "start": 1531, "current": 1756}},
+        "Bullet": {"rating": {"n": 5, "start": 1200, "current": 1268}},  # too few games to mention
+    }})
+    plan = insights.build_study_plan([ins("w", category="time")])
+    lines = insights.summary_lines([results], plan, [ins("s", kind="strength")], [ins("w")])
+    assert lines == [
+        "Your ratings: blitz 1379 (−79 over these games), rapid 1756 (+225).",
+        "Start with: 1. title w.",
+        "Strength to build on: title s.",
+    ]
+
+
+def test_report_lists_every_claim_labels_games_and_marks_a_demo(monkeypatch):
+    from datetime import datetime, timezone
+
+    games = [make_game(game_id=f"g{i}", url=f"https://www.chess.com/game/live/{i}", outcome="loss",
+                       end_time=datetime(2024, 5, 1 + i, tzinfo=timezone.utc)) for i in range(3)]
+    many = [ins(f"fake.weakness.{i}", category="openings", severity=0.9 - i * 0.05,
+                example_games=[g.url for g in games]) for i in range(7)]
+    modules = _capture_module(monkeypatch, [], returns=mod("fake_capture", *many))
+    report = pipeline.run_analysis(games, "tester", modules=modules, options={"demo": True})
+    assert len(report.weaknesses) == 7  # nothing hidden beyond a top 5
+    assert report.demo is True
+    label = report.game_labels["https://www.chess.com/game/live/0"]
+    assert label.startswith("Loss · ") and label.endswith("1 May")
 
 
 def test_headline():
     assert "No clear patterns" in insights.headline([], [])
     h = insights.headline([ins("s", kind="strength")], [ins("w")])
-    assert h.startswith("Biggest opportunity: title w.") and "Biggest strength: title s." in h
+    assert h.startswith("Biggest opportunity: title w.") and "Strength to build on: title s." in h
+    plan = insights.build_study_plan([ins("w")])
+    assert insights.headline([], [ins("w")], plan) == "Start with: title w."
 
 
 def _install_fake_modules(monkeypatch):
@@ -80,7 +178,7 @@ def test_pipeline_isolates_failing_modules(monkeypatch):
     assert [m.key for m in report.modules] == ["fake_good", "fake_bad"]
     assert "kaboom" in report.modules[1].summary and report.modules[1].title == "Bad section"
     assert [i.id for i in report.weaknesses] == ["fake.weakness.x"]
-    assert report.study_plan and report.headline.startswith("Biggest opportunity")
+    assert report.study_plan and report.headline.startswith("Start with")
     assert report.n_games == 2 and report.date_from <= report.date_to
     assert report.filters == "rated blitz"
 

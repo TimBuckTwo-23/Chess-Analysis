@@ -118,3 +118,8 @@ def make_game_eval(game_id: str, plies: list[PlyEval], **overrides: Any) -> Game
     )
     defaults.update(overrides)
     return GameEval(**defaults)
+
+
+def all_tables(mr):
+    """A module's tables, including those a chart carries under "Show the numbers" (Chart.table)."""
+    return list(mr.tables) + [c.table for c in mr.charts if getattr(c, "table", None) is not None]

@@ -39,6 +39,8 @@ from ..stats import (
     clamp,
     difference_test,
     pct,
+    per100,
+    per100_games,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
@@ -47,7 +49,7 @@ from ..stats import (
     summarize,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, fmt_points, recent_urls
+from .results import MAX_EXAMPLES, recent_urls
 
 KEY = "endings"
 TITLE = "How your games end"
@@ -232,11 +234,12 @@ def draw_table(by_class: dict[str, list[Game]]) -> Table:
         types = Counter(draw_type(g) for g in draws)
         counts = [types.get(k, 0) for k, _ in DRAW_TYPES]
         rows.append([tc.capitalize(), len(gs), len(draws), len(draws) / len(gs), *counts])
+    used = [i for i in range(len(DRAW_TYPES)) if any(r[4 + i] for r in rows)]  # ways no game was drawn: left out
     return Table(
         title="Draws by time control",
-        columns=["Time control", "Games", "Draws", "Draw rate", *(label for _, label in DRAW_TYPES)],
-        rows=rows,
-        formats=["text", "int", "int", "pct", *(["int"] * len(DRAW_TYPES))],
+        columns=["Time control", "Games", "Draws", "Draw rate", *(DRAW_TYPES[i][1] for i in used)],
+        rows=[r[:4] + [r[4 + i] for i in used] for r in rows],
+        formats=["text", "int", "int", "pct", *(["int"] * len(used))],
     )
 
 
@@ -246,14 +249,14 @@ def length_table(summaries: dict[str, ScoreSummary], n_left_out: int) -> Table:
         s = summaries[key]
         rows.append([label, s.n, s.wdl, s.rated_score, s.expected, s.delta, s.half_width])
     note = (
-        "Moves = full moves (a 41-ply game has 21). Difference = your score minus the Elo expected score, per game; "
-        "± is the 95% margin of error."
+        "Moves = moves as numbered on the scoresheet (a move by White and Black's reply count once). vs rating = your "
+        "score minus what your rating predicts, per game; ± is how far the true figure could plausibly be (95%)."
     )
     if n_left_out:
         note += f" {n_left_out} abandoned or very short game(s) are left out."
     return Table(
         title="Score by game length",
-        columns=["Moves", "Games", "W/D/L", "Score", "Expected", "Difference", "± (95%)"],
+        columns=["Moves", "Games", "W/D/L", "Score", "Rating predicts", "vs rating", "± (95%)"],
         rows=rows,
         formats=["text", "int", "text", "pct", "pct", "signed_pct", "pct"],
         note=note,
@@ -263,11 +266,11 @@ def length_table(summaries: dict[str, ScoreSummary], n_left_out: int) -> Table:
 def length_chart(summaries: dict[str, ScoreSummary]) -> Chart:
     return Chart(
         kind="bar",
-        title="Score vs expected by game length (moves)",
+        title="Score vs rating by game length (moves)",
         labels=[label for _, label, _, _ in LENGTH_BUCKETS],
-        series=[Series("Score − expected", [summaries[key].delta for key, _, _, _ in LENGTH_BUCKETS])],
+        series=[Series("Score vs rating", [summaries[key].delta for key, _, _, _ in LENGTH_BUCKETS])],
         value_format="signed_pct",
-        note="Per game, against the Elo expectation. Empty bars are lengths without rated games.",
+        note="Per game, against what your rating predicts. Empty bars are lengths without rated games.",
         reference=0.0,
     )
 
@@ -505,8 +508,9 @@ def length_insights(
                 title=f"Your games of {labels[key]} moves score {direction} your games of other lengths",
                 detail=(
                     f"In games lasting {labels[key]} moves you scored {pct(s.rated_score)} in {s.n_rated} games where "
-                    f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game); in your games of "
-                    f"other lengths {fmt_points(rest.test.mean)}. The gap is {fmt_points(test.mean)} points per game "
+                    f"your rating predicts {pct(s.expected)} ({per100_games(s.test.mean)} vs your rating); in your "
+                    f"games of other lengths {per100_games(rest.test.mean)}. The gap is {per100(abs(test.mean)).lstrip('+')} points "
+                    "per 100 games "
                     f"(about {abs(score_to_elo_diff(test.mean, s.expected or 0.5)):.0f} Elo). How long a game lasts "
                     "depends on the result and on when you and your opponents resign, so this describes your games "
                     "rather than proving a strength or weakness."
@@ -573,11 +577,11 @@ def _kpis(games: Sequence[Game], p: DecisiveProfile, abandoned: int) -> list[Kpi
     decisive = sum(1 for g in games if g.outcome != "draw")
     mated, mating = p.by_method["checkmate"]
     return [
-        Kpi("Decisive games", decisive / n, "pct", hint=f"{decisive} of {n}"),
+        Kpi("Games with a winner", decisive / n, "pct", hint=f"{decisive} of {n} (not drawn)"),
         Kpi("Losses by checkmate", p.loss_share("checkmate"), "pct", hint=f"{mated} of {p.losses} losses"),
         Kpi("Wins by checkmate", p.win_share("checkmate"), "pct", hint=f"{mating} of {p.wins} wins"),
         Kpi("Losses on time", p.loss_share("timeout"), "pct", hint=f"{p.by_method['timeout'][0]} games"),
-        Kpi("Games you abandoned", abandoned, "int"),
+        *([Kpi("Games you abandoned", abandoned, "int")] if abandoned else []),
         Kpi("Draw rate", (n - decisive) / n, "pct"),
     ]
 
@@ -637,15 +641,18 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     if len(games) < th.min_games:
         insights = []
 
-    tables = [
-        mix_table(by_class, games),
-        profile_table(profile, len(games) - len(played)),
-        length_table(summaries, len(games) - len(length_games)),
-        draw_table(by_class),
-    ]
-    charts = [mix_chart(by_class)]
+    mix = mix_chart(by_class)
+    mix.table = mix_table(by_class, games)
+    tables = [profile_table(profile, len(games) - len(played))]
+    charts = [mix]
+    lengths_table = length_table(summaries, len(games) - len(length_games))
     if any(s.delta is not None for s in summaries.values()):
-        charts.append(length_chart(summaries))
+        chart = length_chart(summaries)
+        chart.table = lengths_table
+        charts.append(chart)
+    else:
+        tables.append(lengths_table)
+    tables.append(draw_table(by_class))
 
     return ModuleResult(
         key=KEY,

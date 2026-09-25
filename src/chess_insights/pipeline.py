@@ -7,10 +7,10 @@ import logging
 import math
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Optional, get_args
+from typing import Any, Iterable, Optional, get_args
 
 from .context import AnalysisContext
-from .insights import build_study_plan, headline, rank_insights
+from .insights import build_study_plan, headline, practice_actions, rank_insights, summary_lines
 from .models import Game, GameEval, Insight, InsightKind, ModuleResult, Report
 
 log = logging.getLogger(__name__)
@@ -100,15 +100,48 @@ def run_modules(ctx: AnalysisContext, modules: Optional[list[tuple[str, str]]] =
     return results
 
 
+def _time_control_text(g: Game) -> str:
+    if g.time_class == "daily":
+        return "daily"
+    if not g.base_seconds:
+        return g.time_class
+    base = g.base_seconds / 60
+    return f"{base:g}+{g.increment}"
+
+
+def game_label(g: Game, year: Optional[int] = None) -> str:
+    """Link text for a game: 'Loss · 5+0 · vs 1512 · 12 Aug' (the year only when it differs from ``year``)."""
+    result = {"win": "Win", "draw": "Draw", "loss": "Loss"}.get(g.outcome, g.outcome)
+    opponent = f"vs {g.opp_rating}" if g.opp_rating else (f"vs {g.opponent}" if g.opponent else "")
+    end = g.end_time.astimezone(timezone.utc) if g.end_time.tzinfo else g.end_time
+    day = f"{end.day} {end:%b}" + (f" {end.year}" if year is not None and end.year != year else "")
+    return " · ".join(p for p in (result, _time_control_text(g), opponent, day) if p)
+
+
+def game_labels(games: list[Game], modules: list[ModuleResult], extra: Iterable[str] = ()) -> dict[str, str]:
+    """Labels for every game a finding, a diagram or the study plan links to."""
+    wanted = set(extra)
+    for m in modules:
+        for ins in m.insights or []:
+            wanted.update(ins.example_games or [])
+        for d in getattr(m, "diagrams", None) or []:
+            if d.link:
+                wanted.add(d.link)
+    year = max((g.end_time.year for g in games), default=None)
+    return {g.url: game_label(g, year) for g in games if g.url and g.url in wanted}
+
+
 def build_report(
     ctx: AnalysisContext,
     modules: list[ModuleResult],
     *,
     filters: str = "",
     engine_note: str = "",
-    top_n: int = 5,
+    top_n: Optional[int] = None,
 ) -> Report:
+    """``top_n``: how many strengths and weaknesses the report lists (None: every one that passed the rule)."""
     strengths, weaknesses = rank_insights(modules, top_n=top_n)
+    plan = build_study_plan(weaknesses, practice=practice_actions(modules))
     games = ctx.games
     return Report(
         username=ctx.username,
@@ -120,9 +153,12 @@ def build_report(
         modules=modules,
         strengths=strengths,
         weaknesses=weaknesses,
-        study_plan=build_study_plan(weaknesses),
+        study_plan=plan,
         engine_note=engine_note,
-        headline=headline(strengths, weaknesses),
+        headline=headline(strengths, weaknesses, plan),
+        summary_lines=summary_lines(modules, plan, strengths, weaknesses),
+        game_labels=game_labels(games, modules, (u for item in plan for u in item.games)),
+        demo=bool(ctx.opt("demo", False)),
     )
 
 

@@ -36,7 +36,7 @@ from ..stats import (
     significance,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, fmt_signed, slugify
+from .results import MAX_EXAMPLES, slugify
 
 KEY = "engine"
 TITLE = "Engine review"
@@ -316,22 +316,26 @@ def time_class_table(records: Sequence[Analysed]) -> tuple[Table, dict[str, Any]
         me, opp = tally(rs, True), tally(rs, False)
         mine_acc, opp_acc = _avg(r.ev.my_accuracy for r in rs), _avg(r.ev.opp_accuracy for r in rs)
         row = [
-            tc.capitalize(), len(rs), mine_acc, opp_acc, me.acpl, opp.acpl,
+            tc.capitalize(), len(rs), mine_acc, opp_acc, _pawn_loss(me.acpl), _pawn_loss(opp.acpl),
             me.per100(me.blunders), opp.per100(opp.blunders),
         ]
         rows.append(row)
-        stats[tc] = dict(zip(("games", "accuracy", "opp_accuracy", "acpl", "opp_acpl", "blunders_per100",
-                              "opp_blunders_per100"), row[1:]))
+        stats[tc] = {
+            "games": len(rs), "accuracy": mine_acc, "opp_accuracy": opp_acc, "acpl": me.acpl, "opp_acpl": opp.acpl,
+            "blunders_per100": me.per100(me.blunders), "opp_blunders_per100": opp.per100(opp.blunders),
+        }
     table = Table(
         title="By time control",
         columns=[
-            "Time control", "Games", "Your accuracy", "Opponents' accuracy", "Your avg cp loss",
-            "Opponents' avg cp loss", "Your blunders /100 moves", "Opponents' blunders /100 moves",
+            "Time control", "Games", "Your engine accuracy", "Opponents' engine accuracy",
+            "Pawns you give away per move", "Pawns they give away per move", "Your blunders /100 moves",
+            "Opponents' blunders /100 moves",
         ],
         rows=rows,
-        formats=["text", "int", "float1", "float1", "int", "int", "float1", "float1"],
-        note="Accuracy is Lichess-style (0-100). Average centipawn loss: how much of a pawn each move gave away "
-        "on average (100 = one pawn).",
+        formats=["text", "int", "float1", "float1", "float2", "float2", "float1", "float1"],
+        note="Engine accuracy is Lichess's formula (0-100), not chess.com's. Pawns given away per move: how much "
+        "worse Stockfish rated the position after each move, on average (the average centipawn loss / 100).",
+        key_columns=[0, 1, 2, 3],
     )
     return table, stats
 
@@ -416,7 +420,7 @@ def accuracy_by_result(records: Sequence[Analysed], th: Thresholds) -> tuple[Opt
     parts = [f"{_avg(v):.0f} in {labels[o]}" for o, v in by.items() if v]
     detail_parts = [f"{_avg(v):.1f} in {len(v)} {labels[o]}" for o, v in by.items() if v]
     opp = _avg(r.ev.opp_accuracy for r in records)
-    detail = f"Your average accuracy was {', '.join(detail_parts)}."
+    detail = f"Your average engine accuracy (Lichess's formula, 0-100) was {', '.join(detail_parts)}."
     if opp is not None:
         detail += f" Your opponents averaged {opp:.1f} over the same games."
     wins, losses = _avg(by["win"]), _avg(by["loss"])
@@ -425,7 +429,7 @@ def accuracy_by_result(records: Sequence[Analysed], th: Thresholds) -> tuple[Opt
         id=f"{KEY}.observation.accuracy-by-result",
         kind="observation",
         category="accuracy",
-        title=f"Your accuracy: {', '.join(parts)}",
+        title=f"Your engine accuracy: {', '.join(parts)}",
         detail=detail,
         severity=clamp(abs(wins - losses) / 40.0) if wins is not None and losses is not None else 0.1,
         confidence=sample_confidence(n),
@@ -462,6 +466,38 @@ PHASE_STUDY = {
 }
 
 
+PHASE_STRENGTH_STUDY = {
+    "opening": "Your early moves are accurate: trust them and play them faster. If the Clock section says you are "
+    "slow in the opening, this is the time to save.",
+    "middlegame": "Your middlegame is an asset: prefer keeping pieces on to early simplification.",
+    "endgame": "Your endgame is an asset: when you are a little better, trading down into an endgame suits you.",
+}
+
+
+def _pawn_loss(acpl: Optional[float]) -> Optional[float]:
+    """Average centipawn loss as pawns given away per move (43 -> 0.43)."""
+    return None if acpl is None else acpl / 100.0
+
+
+def _errors_short_of_time(records: Sequence[Analysed], ph: str, fraction: float) -> tuple[int, int]:
+    """(your mistakes and blunders in phase ``ph`` made with less than ``fraction`` of the clock left, those with
+    any clock reading)."""
+    low = timed = 0
+    for r in records:
+        g = r.game
+        if g.time_class == "daily" or not g.base_seconds:
+            continue
+        for p in r.plies:
+            if not p.is_user or p.phase != ph or p.judgement not in ("mistake", "blunder"):
+                continue
+            before = _clock_before(g, p.ply)
+            if before is None:
+                continue
+            timed += 1
+            low += before < fraction * float(g.base_seconds)
+    return low, timed
+
+
 def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, Chart, list[Insight], dict[str, Any]]:
     me_games = {ph: per_game(records, True, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
     opp_games = {ph: per_game(records, False, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
@@ -470,7 +506,8 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
     rows, stats = [], {}
     for ph in PHASES:
         m, o = me[ph], opp[ph]
-        rows.append([ph.capitalize(), m.moves, m.acpl, m.per100(m.errors), o.moves, o.acpl, o.per100(o.errors)])
+        rows.append([ph.capitalize(), m.moves, _pawn_loss(m.acpl), m.per100(m.errors), o.moves, _pawn_loss(o.acpl),
+                     o.per100(o.errors)])
         stats[ph] = {
             "moves": m.moves, "acpl": m.acpl, "errors_per100": m.per100(m.errors),
             "opp_moves": o.moves, "opp_acpl": o.acpl, "opp_errors_per100": o.per100(o.errors),
@@ -478,13 +515,15 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
     table = Table(
         title="Game phases",
         columns=[
-            "Phase", "Your moves", "Your avg cp loss", "Your mistakes+blunders /100",
-            "Opponents' moves", "Opponents' avg cp loss", "Opponents' mistakes+blunders /100",
+            "Phase", "Your moves", "Pawns you give away per move", "Your mistakes+blunders /100",
+            "Opponents' moves", "Pawns they give away per move", "Opponents' mistakes+blunders /100",
         ],
         rows=rows,
-        formats=["text", "int", "int", "float1", "int", "int", "float1"],
+        formats=["text", "int", "float2", "float1", "int", "float2", "float1"],
         note="Phases follow Lichess's rules: the middlegame starts once pieces come off or the back ranks empty; "
-        "the endgame once at most 6 queens, rooks, bishops and knights remain.",
+        "the endgame once at most 6 queens, rooks, bishops and knights remain. Pawns given away per move: how much "
+        "worse Stockfish rated the position after the move, on average (the average centipawn loss / 100).",
+        key_columns=[0, 3, 6],
     )
     chart = Chart(
         kind="bar",
@@ -495,6 +534,7 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
             Series("Opponents", [opp[ph].per100(opp[ph].errors) for ph in PHASES]),
         ],
         value_format="float1",
+        table=table,
     )
     if len(records) < th.min_games:
         return table, chart, [], stats
@@ -539,7 +579,7 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
     insights = []
     if weak:
         excess, ph, confidence = max(weak)
-        insights.append(_phase_insight(records, ph, me, opp, confidence, adjusted[ph], "weakness", excess))
+        insights.append(_phase_insight(records, ph, me, opp, confidence, adjusted[ph], "weakness", excess, th))
     if strong:
         excess, ph, confidence = max(strong)
         insights.append(_phase_insight(records, ph, me, opp, confidence, adjusted[ph], "strength", excess))
@@ -555,6 +595,7 @@ def _phase_insight(
     p_adj: float,
     kind: str,
     excess: float,
+    th: Optional["Thresholds"] = None,
 ) -> Insight:
     m, o = me[ph], opp[ph]
     m_rest, o_rest = total(me[q] for q in PHASES if q != ph), total(opp[q] for q in PHASES if q != ph)
@@ -563,9 +604,18 @@ def _phase_insight(
     detail = (
         f"In the {ph} you made {m.errors} mistakes and blunders in {m.moves} moves ({mine:.1f} per 100 moves); "
         f"your opponents made {theirs:.1f} per 100 moves in the same games. In the rest of the game: "
-        f"{_f1(rest_mine)} for you vs {_f1(rest_theirs)} for them. Average centipawn loss in the {ph}: "
-        f"{m.acpl or 0:.0f} for you vs {o.acpl or 0:.0f} for them."
+        f"{_f1(rest_mine)} for you vs {_f1(rest_theirs)} for them. On average each of your {ph} moves gave away "
+        f"{(m.acpl or 0) / 100:.2f} pawns, your opponents' {(o.acpl or 0) / 100:.2f}."
     )
+    if kind == "weakness" and th is not None:
+        low, timed = _errors_short_of_time(records, ph, th.pressure_fraction)
+        if timed >= 10:
+            half = "partly the clock, partly technique" if 0.25 <= low / timed <= 0.75 else (
+                "mostly the clock" if low / timed > 0.75 else "mostly technique, not the clock")
+            detail += (
+                f" {low} of the {timed} {ph} mistakes and blunders with a clock reading came with less than "
+                f"{th.pressure_fraction:.0%} of your time left: {half}."
+            )
     evidence = {
         "phase": ph, "moves": m.moves, "errors": m.errors, "per100": mine, "acpl": m.acpl,
         "opp_moves": o.moves, "opp_errors": o.errors, "opp_per100": theirs, "opp_acpl": o.acpl, "p_adjusted": p_adj,
@@ -595,13 +645,13 @@ def _phase_insight(
         id=f"{KEY}.strength.phase-{ph}",
         kind="strength",
         category="phases",
-        title=f"You play the {ph} better than your opponents",
+        title=f"You make fewer mistakes than your opponents in the {ph} ({mine:.1f} vs {theirs:.1f} per 100 moves)",
         detail=detail,
         severity=clamp(excess - 1.0),
         confidence=confidence,
         evidence=evidence,
         study=[
-            f"Steer games toward the {ph}: it is where you outplay people at your level.",
+            PHASE_STRENGTH_STUDY[ph],
             f"Replay the linked wins to see which {ph} skills earn you points, and keep using them.",
         ],
         example_games=_urls(
@@ -870,6 +920,17 @@ class Conversion:
         return self.opp_converted / len(self.opp_reached) if self.opp_reached else None
 
 
+def first_slip_phase(r: Analysed, win_threshold: float) -> Optional[str]:
+    """The game phase of your first mistake or blunder after you first reached a winning position."""
+    winning = False
+    for p in r.plies:
+        mine_before = p.win_before if p.is_user else 100.0 - p.win_before
+        winning = winning or mine_before >= win_threshold
+        if winning and p.is_user and p.judgement in ("mistake", "blunder"):
+            return p.phase
+    return None
+
+
 def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, list[Insight], dict[str, Any]]:
     conv = Conversion()
     peak: dict[str, float] = {}
@@ -891,12 +952,12 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     ]
     table = Table(
         title="Winning and losing positions",
-        columns=["Situation", "Games", "Won", "Drawn", "Lost", "Converted / saved"],
+        columns=["Situation", "Games", "Won", "Drawn", "Lost", "You won or held"],
         rows=rows,
         formats=["text", "int", "int", "int", "int", "pct"],
         note=f"Winning position: Stockfish gave that side at least a {th.win_threshold:.0f}% chance to win. Each "
-        "game counts once, for the side that got there first. Converted = you won those games; saved = you drew "
-        "or won anyway.",
+        "game counts once, for the side that got there first. You won or held: in the first row the share you "
+        "won, in the second the share you still drew or won.",
     )
     stats = {
         "reached": len(conv.reached), "converted": conv.converted, "rate": conv.rate,
@@ -922,22 +983,42 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         f"opponents got there first, they won {conv.opp_converted} of {len(conv.opp_reached)} ({pct(opp_rate)})."
     )
     evidence = {k: stats[k] for k in ("reached", "converted", "rate", "opp_reached", "opp_converted", "opp_rate")}
+    saved_text = (
+        f" The other way round, you saved {conv.saved} of the {len(conv.opp_reached)} games where your opponent "
+        f"got a winning position first ({pct(conv.saved / len(conv.opp_reached))})."
+    )
     if significant and rate <= opp_rate - th.min_conversion_gap:
         thrown = [r for r in conv.reached if r.game.outcome != "win"]
+        on_time = sum(1 for r in thrown if r.game.outcome == "loss" and r.game.termination == "timeout")
+        phases = Counter(ph for r in thrown if (ph := first_slip_phase(r, th.win_threshold)))
+        where = ", ".join(f"the {ph} in {phases[ph]}" for ph in PHASES if phases.get(ph))
+        detail = base + (
+            f" Of the {len(thrown)} you did not win, {on_time} were lost on time"
+            + (f"; your first mistake after reaching the winning position came in {where}." if where else ".")
+        ) + saved_text
+        middlegame_first = phases.get("middlegame", 0) > phases.get("endgame", 0)
+        technique = (
+            "Most slips came in the middlegame, before any endgame technique was needed: once you are winning, "
+            "check your opponent's checks, captures and threats before every move, and simplify only when it is safe."
+            if middlegame_first
+            else "When winning: trade pieces (not pawns), remove your opponent's counterplay first, and don't rush."
+        )
+        evidence |= {"thrown": len(thrown), "thrown_on_time": on_time, "first_slip_phase": dict(phases),
+                     "saved": conv.saved}
         insights.append(
             Insight(
                 id=f"{KEY}.weakness.conversion",
                 kind="weakness",
                 category="conversion",
                 title="You let winning positions slip more often than your opponents do",
-                detail=base,
+                detail=detail,
                 severity=clamp((opp_rate - rate) / 0.30),
                 confidence=confidence,
                 evidence=evidence | {"p_value": test.p_value},
                 study=[
                     "Replay the linked games from the moment you were winning and find the move where the advantage "
                     "started to slip.",
-                    "When winning: trade pieces (not pawns), remove your opponent's counterplay first, and don't rush.",
+                    technique,
                     "Practise converting: set up a winning position from one of your games and play it out against "
                     "an engine.",
                 ],
@@ -953,7 +1034,7 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
                 kind="strength",
                 category="conversion",
                 title="You convert winning positions better than your opponents",
-                detail=base,
+                detail=base + saved_text,
                 severity=clamp((rate - opp_rate) / 0.30),
                 confidence=confidence,
                 evidence=evidence | {"p_value": test.p_value},
@@ -965,6 +1046,8 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
                 example_games=_urls([r for r in conv.reached if r.game.outcome == "win"], _recent),
             )
         )
+    if insights:  # the saved-positions numbers are part of the conversion finding: no second card for them
+        return table, insights, stats
     saved = [r for r in conv.opp_reached if r.game.outcome != "loss"]
     save_rate = conv.saved / len(conv.opp_reached)
     if saved:
@@ -1166,7 +1249,7 @@ def tactics_section(
                 id=f"{KEY}.observation.missed-mates",
                 kind="observation",
                 category="tactics",
-                title=f"You missed {me.missed_mates} forced checkmates",
+                title=f"You missed {me.missed_mates} forced checkmates (your opponents {opp.missed_mates})",
                 detail=(
                     f"Stockfish saw a forced mate for you {me.missed_mates} times that you didn't follow through "
                     f"(your opponents: {opp.missed_mates}); you also allowed {me.allowed_mates} forced mates "
@@ -1232,6 +1315,7 @@ def anatomy_section(
         labels=labels,
         series=[Series("You", [row[2] for row in bucket_rows]), Series("Opponents", [row[4] for row in bucket_rows])],
         value_format="float1",
+        table=bucket_table,
     )
     stats = {
         "by_piece": {name: {"moves": moves[k], "blunders": blunders[k]} for k, name in PIECES},
@@ -1370,16 +1454,17 @@ def opening_section(
         avg = sum(evals) / len(evals)
         worse = sum(1 for cp in evals if cp <= -100)
         score = sum(r.game.score for r, _ in items) / len(items)
-        rows.append([family, colour.capitalize(), len(items), avg, worse, score])
+        rows.append([family, colour.capitalize(), len(items), avg / 100.0, worse, score])
         stats[f"{family} ({colour})"] = {"games": len(items), "avg_cp": avg, "worse_by_a_pawn": worse, "score": score}
     table = Table(
         title="Where your openings leave you (engine eval after move 10)",
-        columns=["Opening", "Colour", "Games", "Avg eval after move 10", "Games a pawn or more worse", "Score"],
+        columns=["Opening", "Colour", "Games", "Eval after move 10", "Games a pawn or more worse", "Score"],
         rows=rows,
-        formats=["text", "text", "int", "signed_int", "int", "pct"],
-        note="Stockfish's evaluation from your side after both players' 10th move, in centipawns (100 = one pawn), "
-        "compared with its evaluation of the start position, so White's usual small edge counts as 0; capped at "
-        "±5 pawns per game. Games from set-up positions are left out.",
+        formats=["text", "text", "int", "signed_float2", "int", "pct"],
+        note="Stockfish's evaluation from your side after both players' 10th move, in pawns (+0.40 = you are 0.4 "
+        "of a pawn better), compared with its evaluation of the start position, so White's usual small edge counts "
+        "as 0; capped at ±5 pawns per game. Only engine-analysed games that reached move 10 count, so the numbers "
+        "of games are lower than in the Openings section. Games started from a custom position are left out.",
     )
     insights: list[Insight] = []
     if len(records) < th.min_games:
@@ -1399,7 +1484,7 @@ def opening_section(
         slug = f"openings-{colour}-{slugify(family)}"
         side = colour.capitalize()
         evidence = {"family": family, "colour": colour, "games": n, "avg_cp": avg, "p_adjusted": adjusted[key]}
-        pawns = f"{avg / 100:+.1f}".replace("-", "−")
+        pawns = f"{avg / 100:+.2f}".replace("-", "−")
         if avg < 0:
             insights.append(
                 Insight(
@@ -1409,8 +1494,8 @@ def opening_section(
                     title=f"You come out of the {family} worse off as {side}",
                     detail=(
                         f"In {n} analysed games as {side} in the {family}, Stockfish rated your position after "
-                        f"move 10 at {fmt_signed(avg)} centipawns on average compared with the start (about {pawns} "
-                        f"pawns); {worse} of them were already a pawn or more worse."
+                        f"move 10 at {pawns} pawns on average compared with the start; {worse} of them were already "
+                        "a pawn or more worse."
                     ),
                     severity=clamp(abs(avg) / 150.0),
                     confidence=confidence,
@@ -1433,8 +1518,8 @@ def opening_section(
                     title=f"The {family} gives you good positions as {side}",
                     detail=(
                         f"In {n} analysed games as {side} in the {family}, Stockfish rated your position after "
-                        f"move 10 at {fmt_signed(avg)} centipawns on average compared with the start (about {pawns} "
-                        f"pawns); {better} of them were already a pawn or more better."
+                        f"move 10 at {pawns} pawns on average compared with the start; {better} of them were already "
+                        "a pawn or more better."
                     ),
                     severity=clamp(abs(avg) / 150.0),
                     confidence=confidence,
@@ -1486,8 +1571,7 @@ def _kpis(records: Sequence[Analysed], me: Tally, opp: Tally) -> list[Kpi]:
     my_acc, opp_acc = _avg(r.ev.my_accuracy for r in records), _avg(r.ev.opp_accuracy for r in records)
     return [
         Kpi("Games analysed", len(records), "int", hint=_engine_label(records)),
-        Kpi("Your accuracy", my_acc, "float1", hint=f"opponents {_f1(opp_acc)}"),
-        Kpi("Opponents' accuracy", opp_acc, "float1", hint="same games"),
+        Kpi("Your engine accuracy", my_acc, "float1", hint=f"opponents {_f1(opp_acc)} in the same games"),
         Kpi("Blunders /100 moves", me.per100(me.blunders), "float1", hint=f"opponents {_f1(opp.per100(opp.blunders))}"),
         Kpi("Mistakes /100 moves", me.per100(me.mistakes), "float1", hint=f"opponents {_f1(opp.per100(opp.mistakes))}"),
         Kpi(
@@ -1497,10 +1581,12 @@ def _kpis(records: Sequence[Analysed], me: Tally, opp: Tally) -> list[Kpi]:
             hint=f"opponents {_f1(opp.per100(opp.inaccuracies))}",
         ),
         Kpi(
-            "Average centipawn loss",
-            round(me.acpl) if me.acpl is not None else None,
-            "int",
-            hint=f"opponents {round(opp.acpl) if opp.acpl is not None else 'n/a'}",
+            "Pawns given away per move",
+            _pawn_loss(me.acpl),
+            "float2",
+            hint=f"opponents {_pawn_loss(opp.acpl):.2f} (average centipawn loss / 100)"
+            if opp.acpl is not None
+            else "average centipawn loss / 100",
         ),
     ]
 
@@ -1510,7 +1596,7 @@ def _summary(records: Sequence[Analysed], me: Tally, opp: Tally, insights: list[
     n = len(records)
     text = f"Stockfish reviewed {n} of your games"
     if my_acc is not None and opp_acc is not None:
-        text += f": your accuracy averaged {my_acc:.1f} against {opp_acc:.1f} for your opponents"
+        text += f": your engine accuracy averaged {my_acc:.1f} against {opp_acc:.1f} for your opponents"
     text += (
         f", and you blundered {_f1(me.per100(me.blunders))} times per 100 moves "
         f"(opponents {_f1(opp.per100(opp.blunders))})."
@@ -1561,8 +1647,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         insights.append(by_result)
 
     phase_table, phase_chart, phase_insights, phase_stats = phase_section(records, th)
-    tables.append(phase_table)
-    charts.append(phase_chart)
+    charts.append(phase_chart)  # carries the phase table
     insights += phase_insights
 
     pressure_table, pressure_insights, pressure_stats = pressure_section(records, th)
@@ -1579,8 +1664,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     insights += tactic_insights
 
     piece_table, bucket_table, bucket_chart, anatomy_insights, anatomy_stats = anatomy_section(records, th)
-    tables += [piece_table, bucket_table]
-    charts.append(bucket_chart)
+    tables.append(piece_table)
+    charts.append(bucket_chart)  # carries the move-number table
     insights += anatomy_insights
 
     opening_table, opening_insights, opening_stats = opening_section(records, th)

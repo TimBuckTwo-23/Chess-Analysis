@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterable, Optional, Sequence, Union
 
@@ -468,10 +469,44 @@ def difference_test(a: MeanTest, b: MeanTest, offset: float = 0.0) -> MeanTest:
 
 
 # --------------------------------------------------------------------------- formatting
-def pct(x: Optional[float], digits: int = 0) -> str:
+def pct(x: Optional[float], digits: Optional[int] = None) -> str:
+    """0.225 -> '23%', 0.075 -> '7.5%': rounded half up in decimal, with one decimal below 10%, exactly like the
+    report tables (report/html.py), so a number reads the same in the text and in the table next to it."""
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return "n/a"
-    return f"{100.0 * x:.{digits}f}%"
+    if digits is None:
+        digits = 1 if 0 < abs(float(x)) < 0.0995 else 0
+    try:
+        scaled = Decimal(repr(float(x))) * 100
+        return f"{scaled.quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP):f}%"
+    except (InvalidOperation, ValueError, OverflowError):
+        return f"{100.0 * x:.{digits}f}%"
+
+
+MINUS = "\u2212"  # real minus sign
+
+
+def per100(x: float) -> str:
+    """Points per game as points per 100 games: 0.094 -> '+9', -0.24 -> '\u221224', 0.004 -> '+0.4', 0 -> '0'."""
+    v = Decimal(repr(float(x))) * 100
+    whole = v.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    if whole == 0:
+        tenth = v.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        return "0" if tenth == 0 else f"{tenth:+f}".replace("-", MINUS)
+    return f"{whole:+f}".replace("-", MINUS)
+
+
+def per100_games(x: float) -> str:
+    """'+9 per 100 games' (score minus the rating's prediction, in game points)."""
+    return f"{per100(x)} per 100 games"
+
+
+def vs_rating(x: float) -> str:
+    """'9 points per 100 games below your rating' / '... above your rating' / 'level with your rating'."""
+    text = per100(x)
+    if text == "0":
+        return "level with your rating"
+    return f"{text.lstrip('+' + MINUS)} points per 100 games {'above' if x > 0 else 'below'} your rating"
 
 
 def signed_pct(x: Optional[float], digits: int = 0) -> str:

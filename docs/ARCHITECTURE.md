@@ -2,19 +2,19 @@
 
 ```
 chess.com PubAPI ──api.py──> raw game JSON (disk cache, one file per month)
-                                   │
-                              parse.py            PGN files (manual export) ──parse.py──┐
-                                   ▼                                                  │
-                              list[Game]  <───────────────────────────────────────────┘
+                                   │                 saved JSON archives (--json) ──┐
+                              parse.py            PGN files (--pgn) ──parse.py──────┤
+                                   ▼                                                │
+                              list[Game]  <─────────────────────────────────────────┘
                                    │  dataset.filter_games (time class, rules, rated, dates)
                                    ▼
                   ┌──────── AnalysisContext (games, df, evals, options) ────────┐
                   │                                                              │
       optional engine.py (Stockfish) ── evals: dict[game_id, GameEval] ──────────┤
                   │                                                              │
-   analysis/results  openings  time_mgmt  endings  habits  engine_stats   (each: analyze(ctx) -> ModuleResult)
+   analysis/results openings time_mgmt endings habits engine_stats mistakes   (each: analyze(ctx) -> ModuleResult)
                   │                                                              │
-                  └──────────── insights.py: rank + dedupe + study plan ─────────┘
+                  └───── insights.py: rank + dedupe + grouped study plan + headline ─────┘
                                    ▼
                                 Report ──report/html.py | markdown.py | json_export.py──> files
 ```
@@ -26,8 +26,10 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 * **Game** — one game normalised to the analysed player's side (`color`, `outcome`,
   `my_rating`, `clocks` …). Produced only by `parse.py`.
 * **GameEval / PlyEval** — per-ply Stockfish verdicts for one game. Produced only by `engine.py`.
-* **AnalysisContext** (`context.py`) — `games` (filtered, sorted by end time), `df`
-  (`dataset.to_frame`, one row per game), `evals`, `options`.
+* **AnalysisContext** (`context.py`) — `games` (filtered, sorted by end time), `evals`,
+  `options` (e.g. `tz`, `puzzle_file`, `demo`), and `df` (`dataset.to_frame`, one row per
+  game, built on first use; no module reads it at the moment, so pandas could become an
+  optional dependency).
 * **Analysis module** — `analysis/<name>.py` exposing
 
   ```python
@@ -40,15 +42,19 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 * **Insight** — `severity` (effect size, 0..1) × `confidence` (statistical
   confidence, 0..1) = `priority`. Titles are plain language; `detail` carries the
   numbers; `study` holds concrete actions; `example_games` holds chess.com URLs.
-* **Report** — top strengths / weaknesses / study plan plus every module's
-  tables and charts. Renderers only ever see a `Report`.
+* **Report** — every strength and weakness (ranked), the study plan (one `StudyItem`
+  per cause, with the insight ids it covers, a target and a baseline), the headline
+  lines, labels for the linked games, and every module's tables and charts. A `Chart`
+  can carry its full `table` (shown under "Show the numbers" instead of listing the same
+  numbers twice); a `Table` can name its `key_columns` (what a phone shows first).
+  Renderers only ever see a `Report`.
 
 ## Statistical rules (apply everywhere)
 
 1. Compare scores with the **Elo expected score**, not 50 %. Beating weaker
    players is not a strength.
 2. Never flag anything below the module's minimum sample size (defaults: 8
-   games for an opening family as one colour, 20 for a split like
+   games for an opening family as one colour, 25 for a split like
    "after a loss").
 3. **One claim rule.** A strength or weakness needs `stats.significance(...)`
    to pass: enough games, a BH-adjusted p-value at or below the tier's alpha,
@@ -58,7 +64,8 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
    `stats.summarize` / `mean_test(..., min_sd=...)` / `two_proportion_test` /
    `one_sided`. Anything that fails the rule is at most an observation.
    `tests/test_null_calibration.py` enforces the result: on data with no real
-   effects, a report may contain on average no more than 0.3 false claims.
+   effects, a report (its lists and every section) may contain on average no more
+   than 0.3 false claims.
 4. Shrink small-sample rates (`stats.shrink`) before sorting "best/worst" lists.
 5. Standard chess only by default. Variants and abandoned 0-move games distort
    everything.
@@ -73,13 +80,15 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
    players and overperform against stronger ones, and the true size of that
    effect is uncertain (`stats.ATTENUATION_RANGE`). Colour claims must hold for
    every White first-move edge in `stats.WHITE_EDGE_RANGE`.
-11. **Compare subsets with the player's other games**, not only with the rating's
+9. **Compare subsets with the player's other games**, not only with the rating's
    expectation. A lagging rating (an improving player) lifts every game, so an
    opening is compared with the player's other openings of the same colour, a
    game-length band with games of other lengths, and so on.
-9. Exclude games with fewer than 4 plies (aborted starts, instant abandons) from
+10. Exclude games with fewer than 4 plies (aborted starts, instant abandons) from
    skill metrics. They still count in the results totals.
-10. Word findings as associations ("you score worse after 11 pm"), not causes.
+11. Word findings as associations ("you score worse after 11 pm"), not causes, and
+   in the report's units: "+9 per 100 games vs your rating", pawns rather than
+   centipawns.
 
 ## Module ownership
 
@@ -88,17 +97,21 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 | `api.py` | HTTP client for the chess.com PubAPI: User-Agent, serial requests, retries with backoff on 429/5xx, typed errors |
 | `fetch.py` | Download all monthly archives into a disk cache (past months are immutable, the current month is refreshed) and load them offline |
 | `parse.py` | chess.com JSON / PGN → `Game`: result mapping, termination, time control, opening name from `ECOUrl`, SAN moves + `[%clk]` clocks |
+| `models.py` | The shared data contracts (`Game`, `GameEval`, `Insight`, `ModuleResult`, `StudyItem`, `Report` ...) |
+| `context.py` | `AnalysisContext`, the one object every analysis module receives |
 | `dataset.py` | Filtering and the pandas frame |
-| `stats.py` | Shared statistics helpers |
+| `stats.py` | Shared statistics helpers, the claim rule, and number wording (`pct`, `per100_games`, `vs_rating`) |
 | `synth.py` | Synthetic chess.com-format archives for a player with planted strengths and weaknesses (demo and recovery tests) |
 | `analysis/results.py` | Score vs expected, rating trends, colour, opponent-strength buckets, time classes |
-| `analysis/openings.py` | Repertoire performance by opening family/line and colour |
-| `analysis/time_mgmt.py` | Clock usage, time trouble, flagging, fast/slow moves |
+| `analysis/openings.py` | Repertoire performance by opening family/line and colour; your choices at key moves; repertoire breadth counted on your own moves |
+| `analysis/time_mgmt.py` | Time trouble, flagging, opening pace, clock balance at moves 20 and 30, think time by move number |
 | `analysis/endings.py` | How games end, game-length performance |
 | `analysis/habits.py` | Sessions, tilt after losses, fatigue, time of day |
 | `engine.py` | Stockfish analysis (parallel workers, disk cache), Lichess-style win%, accuracy, judgements, phases, tags |
 | `analysis/engine_stats.py` | Accuracy, blunder rates, phase weaknesses, conversion, missed tactics, opening outcome |
-| `insights.py` | Rank, dedupe and diversify insights; build the study plan |
+| `analysis/mistakes.py` | Repeated mistakes keyed by position (EPD), the costliest-puzzles table, and the `--puzzles` PGN export |
+| `insights.py` | Rank and dedupe insights; group weaknesses by cause into the study plan (easiest first, targets); the headline lines |
 | `pipeline.py` | Run everything, isolate module failures, build the `Report` |
-| `report/*` | HTML (self-contained, mobile-first, dark mode), Markdown and JSON output |
+| `report/*` | HTML (one file, mobile-first, dark mode; self-contained apart from web fonts, with offline fallbacks), Markdown and JSON output |
 | `cli.py` | `chess-insights fetch / report / demo` |
+| `__main__.py` | `python -m chess_insights` |

@@ -8,7 +8,7 @@ import pytest
 from chess_insights.analysis import endings
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
-from factories import make_game
+from factories import make_game, all_tables
 
 C960_FEN = "bnrqkrnb/pppppppp/8/8/8/8/PPPPPPPP/BNRQKRNB w KQkq - 0 1"
 
@@ -66,7 +66,7 @@ def claims(mr):
 
 
 def table(mr, title):
-    return next(t for t in mr.tables if t.title == title)
+    return next(t for t in all_tables(mr) if t.title == title)
 
 
 def rows_by_first(t):
@@ -114,7 +114,7 @@ def test_zero_move_games_and_missing_ratings_do_not_break_anything():
     mr = run(games)
     assert mr.stats["n_played"] == 10 and mr.stats["abandoned"]["abandoned"] == 5
     length = rows_by_first(table(mr, "Score by game length"))
-    assert length["≤ 20"]["Games"] == 10 and length["≤ 20"]["Difference"] is None
+    assert length["≤ 20"]["Games"] == 10 and length["≤ 20"]["vs rating"] is None
     assert all(len(c.labels) for c in mr.charts) and not any(c.title.startswith("Score vs") for c in mr.charts)
     assert "5 abandoned or very short game(s)" in table(mr, "Score by game length").note
 
@@ -207,9 +207,9 @@ def test_length_table_rows():
     assert [r[0] for r in table(mr, "Score by game length").rows] == ["≤ 20", "21–30", "31–45", "46–60", "61+"]
     assert rows["≤ 20"]["W/D/L"] == "1/0/0" and rows["21–30"]["W/D/L"] == "0/0/1"
     e = 1 / (1 + 10 ** (100 / 400))
-    assert rows["61+"]["Expected"] == pytest.approx(e) and rows["61+"]["Difference"] == pytest.approx(0.5 - e)
+    assert rows["61+"]["Rating predicts"] == pytest.approx(e) and rows["61+"]["vs rating"] == pytest.approx(0.5 - e)
     assert rows["31–45"]["Games"] == 0 and rows["31–45"]["Score"] is None
-    chart = next(c for c in mr.charts if c.title.startswith("Score vs expected by game length"))
+    chart = next(c for c in mr.charts if c.title.startswith("Score vs rating by game length"))
     assert chart.series[0].values[2] is None and chart.series[0].values[0] == pytest.approx(0.5)
 
 
@@ -288,7 +288,7 @@ def test_length_is_not_a_finding_when_nearly_every_game_has_that_length():
     games = [g("win", "resignation", moves_san=moves(15)) for _ in range(40)]
     games += [g("loss", "resignation", moves_san=moves(50)) for _ in range(5)]
     mr = run(games)
-    assert rows_by_first(table(mr, "Score by game length"))["≤ 20"]["Difference"] == pytest.approx(0.5)
+    assert rows_by_first(table(mr, "Score by game length"))["≤ 20"]["vs rating"] == pytest.approx(0.5)
     assert not [i for i in mr.insights if ".length-" in i.id]
 
 

@@ -39,6 +39,7 @@ PUZZLE_MIN_DROP = 10.0
 MIN_REPEATS = 2  # games with the same wrong move in the same position, for the table
 MIN_CLAIM_REPEATS = 3  # ... and for a weakness: two games can be a coincidence
 PUZZLE_LIMIT = 300  # the costliest puzzles exported by --puzzles
+PUZZLE_TABLE_ROWS = 10  # the costliest puzzles listed in the report, each with a Lichess board link
 LICHESS_STUDY_CHAPTERS = 64  # a Lichess study holds at most this many puzzles
 MAX_INSIGHTS = 3
 MAX_DIAGRAMS = 4
@@ -392,13 +393,50 @@ def _slug(epd: str) -> str:
     return hashlib.sha1(epd.encode()).hexdigest()[:10]
 
 
+def fold_follow_ups(repeated: list[RepeatedMistake]) -> tuple[list[RepeatedMistake], dict[int, list[RepeatedMistake]]]:
+    """Merge a wrong move that only ever happened in games where you had already gone wrong earlier in the same
+    line (9.Nxg5 and then 11.Kh1 in the same three games) into that earlier one: one habit, one finding.
+
+    A follow-up is folded only when its games are a subset of the earlier move's games and it is not a claim while
+    the earlier one is only an observation (folding never removes a claim nor promotes one). Returns the kept
+    mistakes (in their original order) and, by ``id()`` of each kept one, the follow-ups folded into it.
+    """
+    kept: list[RepeatedMistake] = []
+    folded: dict[int, list[RepeatedMistake]] = {}
+    by_ply = sorted(repeated, key=lambda r: (r.first.ply, -r.weight))
+    games = {id(r): {g.game_id for g in r.played_in} for r in repeated}
+    absorbed: set[int] = set()
+    for r in by_ply:
+        root = next(
+            (
+                k
+                for k in by_ply
+                if id(k) not in absorbed
+                and k is not r
+                and k.first.ply < r.first.ply
+                and games[id(r)] <= games[id(k)]
+                and (k.significant or not r.significant)
+            ),
+            None,
+        )
+        if root is not None:
+            absorbed.add(id(r))
+            folded.setdefault(id(root), []).append(r)
+    kept = [r for r in repeated if id(r) not in absorbed]
+    return kept, folded
+
+
 # --------------------------------------------------------------------------- module
-def _insight(r: RepeatedMistake) -> Insight:
+def _insight(r: RepeatedMistake, follow_ups: Iterable[RepeatedMistake] = ()) -> Insight:
     e = r.first
     played = move_label(e.fen, r.san)
     best = move_label(e.fen, r.best_san) if r.best_san else None
     line = format_line(e.game.moves_san[: e.ply], e.game.initial_fen, last_n=10)
-    title = f"You played {played} here in {r.errors} of {_plural(r.reached, 'game')}" + (
+    # named by opening and move number, so the line reads on its own in the lists at the top (no "here")
+    fields = e.fen.split()
+    move_no = fields[5] if len(fields) > 5 else "?"
+    where = f"{e.game.opening_family}, move {move_no}" if e.game.opening_family else f"Move {move_no}"
+    title = f"{where}: you played {played} in {r.errors} of {_plural(r.reached, 'game')}" + (
         f"; {best} is better" if best else ""
     )
     analysed = (
@@ -406,20 +444,30 @@ def _insight(r: RepeatedMistake) -> Insight:
     )
     detail = (
         f"After {line} you played {played} in {r.errors} of the {_plural(r.reached, 'game')} that reached this "
-        f"position. {analysed}: the move lost about {r.avg_drop:.0f} percentage points of winning chances"
+        f"position. {analysed}: the move cost you about {r.avg_drop:.0f} in 100 of your chances to win"
         + (f"; Stockfish prefers {best}." if best else ".")
     )
     if r.significant:
+        per = round(1 / r.base_rate) if r.base_rate else 0
         detail += (
-            f" That is far more often than your usual error rate ({r.base_rate:.0%} of your moves) explains, "
-            "so it is a habit, not bad luck."
+            f" You go wrong on about 1 move in {per} overall, so playing this one move in {r.errors} of "
+            f"{r.reached} games is a habit, not bad luck."
+            if per
+            else " That is a habit, not bad luck."
         )
     else:
         detail += " Too few games yet to call it a habit."
+    extra = [f for f in follow_ups]
+    if extra:
+        moves = "; ".join(
+            f"{move_label(f.first.fen, f.san)}" + (f" ({move_label(f.first.fen, f.best_san)} is better)" if f.best_san else "")
+            for f in sorted(extra, key=lambda f: f.first.ply)
+        )
+        detail += f" In the same games you went on to play {moves}: fix the first move and the rest goes with it."
     return Insight(
         id=f"{KEY}.{'weakness' if r.significant else 'observation'}.{_slug(r.epd + ' ' + r.uci)}",
         kind="weakness" if r.significant else "observation",
-        category="openings" if e.ply < 40 else "tactics",
+        category="positions",
         title=title,
         detail=detail,
         severity=clamp(r.weight / 60.0),
@@ -446,19 +494,26 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         )
     events = collect_errors(ctx.games, ctx.evals)
     repeated = assess(find_repeated(events, ctx.games, ctx.evals), *error_rate(ctx.games, ctx.evals))
-    claims = [r for r in repeated if r.significant]
+    distinct, follow_ups = fold_follow_ups(repeated)
+    claims = [r for r in distinct if r.significant]
+    habits = sum(r.significant for r in repeated)  # counting follow-ups folded into an earlier finding
     puzzles = [e for e in events if e.drop >= PUZZLE_MIN_DROP and e.best_san]
     exported = min(len(puzzles), PUZZLE_LIMIT)
     n_analysed = sum(1 for g in ctx.games if g.game_id in ctx.evals)
 
-    puzzle_hint = "export with --puzzles"
+    puzzle_file = str(ctx.opt("puzzle_file", "") or "")
+    puzzle_hint = f"in {puzzle_file}" if puzzle_file else "export with --puzzles"
     if len(puzzles) > PUZZLE_LIMIT:
         puzzle_hint = f"the {PUZZLE_LIMIT} costliest of {len(puzzles)}; " + puzzle_hint
     if exported > LICHESS_STUDY_CHAPTERS:
-        puzzle_hint += f" (a Lichess study holds {LICHESS_STUDY_CHAPTERS})"
+        puzzle_hint += f" (a Lichess study holds {LICHESS_STUDY_CHAPTERS}: start with the first ones)"
     kpis = [
-        Kpi("Games analysed", n_analysed, "int"),
-        Kpi("Wrong moves you repeated", len(repeated), "int", hint=f"{len(claims)} of them a clear habit"),
+        Kpi(
+            "Wrong moves you repeated",
+            len(repeated),
+            "int",
+            hint=f"{habits} of them a clear habit",
+        ),
         Kpi("Games with those moves", sum(r.errors for r in repeated), "int"),
         Kpi("Puzzles from your games", exported, "int", hint=puzzle_hint),
     ]
@@ -490,12 +545,36 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                 formats=["text", "text", "int", "int", "text", "text", "pct", "url"],
                 note=f"A wrong move lost at least {MIN_DROP:.0f} percentage points of winning chances in Stockfish's "
                 "analysis. Reached and Played it count all your games, analysed or not; positions are matched "
-                "exactly, so transpositions count together.",
+                "exactly, so the same position reached by a different move order counts together.",
+            )
+        )
+
+    costliest = sorted(puzzles, key=lambda e: (-e.drop, e.game.end_time))[:PUZZLE_TABLE_ROWS]
+    if costliest:
+        tables.append(
+            Table(
+                title="Your costliest mistakes (puzzles)",
+                columns=["Opening", "Your move", "Better", "Winning chances lost", "Position", "Game"],
+                rows=[
+                    [
+                        e.game.opening_family or "",
+                        e.move_label,
+                        e.best_label or "",
+                        e.drop / 100.0,
+                        "https://lichess.org/analysis/" + e.fen.replace(" ", "_"),
+                        e.game.url,
+                    ]
+                    for e in costliest
+                ],
+                formats=["text", "text", "text", "pct", "url", "url"],
+                key_columns=[1, 2, 4],
+                note="Open the position (a Lichess analysis board) and find the better move before you look at it. "
+                + (f"All {exported} are in {puzzle_file}." if puzzle_file else "Export them all with --puzzles."),
             )
         )
 
     diagrams = []
-    for r in repeated[:MAX_DIAGRAMS]:
+    for r in distinct[:MAX_DIAGRAMS]:
         e = r.first
         diagrams.append(
             Diagram(
@@ -509,14 +588,14 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         )
 
     # The claims first (most costly first), then the most costly of the rest as observations.
-    shown = (claims + [r for r in repeated if not r.significant])[:MAX_INSIGHTS]
-    insights = [_insight(r) for r in shown]
+    shown = (claims + [r for r in distinct if not r.significant])[:MAX_INSIGHTS]
+    insights = [_insight(r, follow_ups.get(id(r), ())) for r in shown]
 
     if repeated:
         summary = (
             f"In {n_analysed} analysed games Stockfish found {_plural(len(repeated), 'wrong move')} you played in "
             f"more than one game in the same position"
-            + (f", {len(claims)} of them often enough to be a habit" if claims else "")
+            + (f", {habits} of them often enough to be a habit" if habits else "")
             + ". These are the cheapest points to win back: learn the right move once and it pays off every time "
             "the position comes up."
         )
@@ -535,7 +614,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         insights=insights,
         diagrams=diagrams,
         stats={"repeated_positions": len(repeated), "claims": len(claims), "puzzles": len(puzzles),
-               "puzzles_exported": exported, "errors": len(events)},
+               "puzzles_exported": exported, "errors": len(events), "puzzle_file": puzzle_file,
+               "follow_ups_folded": sum(len(v) for v in follow_ups.values())},
     )
 
 

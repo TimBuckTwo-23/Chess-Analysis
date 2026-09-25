@@ -11,13 +11,15 @@ renderer, so both outputs show identical numbers.
 
 from __future__ import annotations
 
+import hashlib
 import html as _html
 import itertools
 import math
 import numbers
 import re
 import unicodedata
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -37,7 +39,7 @@ MISSING = "—"  # em dash for None / NaN
 MINUS = "−"  # real minus sign
 NUMERIC_FORMATS = frozenset(f for f in VALUE_FORMATS if f not in ("text", "url"))
 _PCT_FORMATS = frozenset({"pct", "signed_pct"})
-_SIGNED_FORMATS = frozenset({"signed_pct", "signed_int"})
+_SIGNED_FORMATS = frozenset({"signed_pct", "signed_int", "signed_float2"})
 _URL_RE = re.compile(r"^https?://", re.I)
 HUGE = 1e15  # beyond this, numbers are shown in scientific notation (1.5e+18) instead of 19 grouped digits
 
@@ -264,6 +266,8 @@ def format_value(value: Any, fmt: Optional[str] = None) -> str:
         return _number_text(_quantize(x, 1), 1)
     if fmt == "float2":
         return _number_text(_quantize(x, 2), 2)
+    if fmt == "signed_float2":
+        return _number_text(_quantize(x, 2), 2, signed=True)
     if fmt in _PCT_FORMATS:
         return _percent(x, signed=fmt == "signed_pct")
     return _seconds(x)
@@ -296,9 +300,29 @@ def safe_url(value: Any) -> Optional[str]:
 
 
 def url_link_text(url: str) -> str:
-    """Short link text for a URL table cell: "game" for chess.com games, else "view"."""
+    """Short link text for a URL table cell: "game" for chess.com games, "board" for a Lichess analysis board, else "view"."""
     lowered = url.lower()
-    return "game" if "chess.com" in lowered and "/game/" in lowered else "view"
+    if "chess.com" in lowered and "/game/" in lowered:
+        return "game"
+    return "board" if "lichess.org/analysis" in lowered else "view"
+
+
+def is_game_url(url: Any) -> bool:
+    """A chess.com game page (a demo report never links these: its games are made up)."""
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    return (host == "chess.com" or host.endswith(".chess.com")) and "/game/" in parts.path.lower()
+
+
+# Set while a demo report renders: its game links would point at real games of other people.
+NO_GAME_LINKS: ContextVar[bool] = ContextVar("NO_GAME_LINKS", default=False)
+DEMO_NOTE = (
+    "Synthetic demo player: the games, opponents and ratings are made up to test the analysis, "
+    "so the game links are shown as text only."
+)
 
 
 # =========================================================================== shared report wording
@@ -309,16 +333,20 @@ GLYPH_MEANINGS = {
     "?!": "Minor weakness",
     "!!": "Major strength",
     "!": "Strength",
-    "=": "Observation",
+    "i": "Observation",
 }
 METHOD_NOTES = (
-    "Every score is compared with the Elo expected score for the rating gap in each game, not with 50%. "
-    "Beating lower-rated players is expected, so it is not counted as a strength.",
-    "Strengths and weaknesses need a minimum number of games (about 8 for an opening with one colour, "
-    "20 for splits such as games after a loss). Smaller samples appear as observations or are left out.",
-    "Priority is how big the effect is multiplied by how sure we are of it. The confidence label reflects "
-    "the number of games and how consistent the pattern is.",
-    "chess.com accuracy (Game Review) and this report's engine accuracy use different formulas. "
+    "Every score is compared with what your rating predicts for each game (the Elo expected score for the "
+    "rating gap), not with 50%. Beating lower-rated players is expected, so it is not counted as a strength. "
+    "“+9 per 100 games vs your rating” means 9 game points more than your rating predicts in 100 games.",
+    "A strength or weakness needs enough games (about 8 for an opening with one colour, 25 for splits such as "
+    "games after a loss) and a significance test that allows for how many things were tested. On players "
+    "without any real strengths or weaknesses, a report lists about 0.2 false claims on average.",
+    "Observations (marked i) are patterns that did not pass that test, or plain facts: read them as context.",
+    "Findings are associations, not proof of a cause: “you score less late at night” does not say why.",
+    "The lists at the top show every strength and weakness, most important first (importance = how big the "
+    "effect is × how sure we are); each finding is explained in its section.",
+    "chess.com Game Review accuracy and this report's engine accuracy use different formulas. "
     "Compare each only with itself.",
 )
 
@@ -336,13 +364,14 @@ def _priority(ins: Insight) -> float:
 
 
 def glyph_for(ins: Insight) -> str:
-    """Chess annotation glyph for an insight: ??, ?, ?! for weaknesses, !!, ! for strengths, = otherwise."""
+    """Chess annotation glyph for an insight: ??, ?, ?! for weaknesses, !!, ! for strengths, i (information)
+    otherwise ("=" would read as "equal position" to a chess player)."""
     kind, p = insight_kind(ins), _priority(ins)
     if kind == "weakness":
         return "??" if p >= 0.5 else "?" if p >= 0.25 else "?!"
     if kind == "strength":
         return "!!" if p >= 0.5 else "!"
-    return "="
+    return "i"
 
 
 def confidence_label(confidence: Any) -> str:
@@ -399,6 +428,24 @@ def text_or_empty(value: Any) -> str:
 def plan_titles(report: Report) -> set[str]:
     """Titles already covered by the study plan (their study steps are shown there)."""
     return {text_or_empty(item.title) for item in report.study_plan or []}
+
+
+def plan_numbers(report: Report) -> dict[str, int]:
+    """Insight id -> the number of the study-plan item that works on it (1-based)."""
+    out: dict[str, int] = {}
+    for k, item in enumerate(report.study_plan or [], 1):
+        for iid in getattr(item, "insight_ids", None) or []:
+            out.setdefault(str(iid), k)
+    return out
+
+
+def game_link_text(url: str, labels: Optional[dict[str, str]], i: int) -> str:
+    """'Loss · 5+0 · vs 1512 · 12 Aug' when the report knows the game, else 'Game 1'."""
+    label = (labels or {}).get(url)
+    return text_or_empty(label) or f"Game {i}"
+
+
+MAX_GAME_LINKS = 3  # example games shown per finding or plan item
 
 
 def valid_urls(urls: Iterable[Any], limit: int = 5) -> list[str]:
@@ -779,7 +826,7 @@ def _tick_text(v: float, fmt: Optional[str], step: float, span: float) -> str:
         return ("0" if q == 0 else _number_text(q, d)) + "s"
     d = _decimals(step)
     q = _quantize(v, d)
-    return _number_text(q, d, grouping=fmt != "rating", signed=fmt == "signed_int")
+    return _number_text(q, d, grouping=fmt != "rating", signed=fmt in ("signed_int", "signed_float2"))
 
 
 def _linear(d0: float, d1: float, r0: float, r1: float) -> Callable[[float], float]:
@@ -860,6 +907,13 @@ def _vline(cls: str, x: float, y1: float, y2: float) -> str:
 
 def reference_text(ref: float, fmt: Optional[str]) -> str:
     return f"Reference {format_value(ref, fmt)}"
+
+
+def _bar_slot(data: ChartData, series: Sequence[Any], slots: Sequence[str], j: int, v: float) -> str:
+    """A single signed series (score vs rating) is coloured by sign: above zero green, below red."""
+    if len(series) == 1 and data.fmt in _SIGNED_FORMATS:
+        return "w1" if v >= 0 else "l1"
+    return slots[j]
 
 
 def _zero_class(data: ChartData, values: Sequence[float]) -> str:
@@ -972,7 +1026,10 @@ def _svg_columns(
                 v = vals[i]
                 if v is None:
                     continue
-                out.append(f'<path class="bar {_cls("f", slots[j])}" d="{_vbar(bx + j * (bw + GAP), bw, base_y, y(v))}"/>')
+                out.append(
+                    f'<path class="bar {_cls("f", _bar_slot(data, series, slots, j, v))}" '
+                    f'd="{_vbar(bx + j * (bw + GAP), bw, base_y, y(v))}"/>'
+                )
         out.append("</g>")
         if cap_txt and cap_txt[i]:
             v = series[0][1][i] or 0.0
@@ -1087,7 +1144,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
             if v is None:
                 continue
             by = cy - group / 2 + j * (bh + GAP)
-            out.append(f'<path class="bar {_cls("f", slots[j])}" d="{_hbar(by, bh, x(0.0), x(v))}"/>')
+            out.append(f'<path class="bar {_cls("f", _bar_slot(data, series, slots, j, v))}" d="{_hbar(by, bh, x(0.0), x(v))}"/>')
         out.append("</g>")
         if single:
             v = series[0][1][i]
@@ -1240,6 +1297,8 @@ def _fold_series(series: list[tuple[str, list[Optional[float]]]]) -> list[tuple[
 # =========================================================================== HTML blocks
 def _link(url: str, text: str, *, cls: str = "") -> str:
     class_attr = f' class="{cls}"' if cls else ""
+    if NO_GAME_LINKS.get() and is_game_url(url):
+        return f'<span class="nolink{" " + cls if cls else ""}">{_esc(text)}</span>'
     return (
         f'<a{class_attr} href="{_esc(url)}" target="_blank" rel="noopener noreferrer" title="{_esc(url)}">'
         f'{_esc(text)}<span aria-hidden="true"> ↗</span></a>'
@@ -1263,6 +1322,26 @@ def _cell_html(value: Any, fmt: Optional[str]) -> tuple[str, str]:
     return _esc(text), "wide" if len(text) > 24 else ""
 
 
+# Columns a phone shows by default in a wide table (the rest sit behind "All columns").
+KEY_COLUMN_NAMES = frozenset({"games", "score", "vs rating", "difference", "played it", "your move", "engine move"})
+WIDE_TABLE_COLUMNS = 5
+
+
+def key_columns(table: Table, ncol: int) -> Optional[set[int]]:
+    """Column indices a phone shows by default, or None when the table is narrow enough to show whole."""
+    if ncol <= WIDE_TABLE_COLUMNS:
+        return None
+    declared = getattr(table, "key_columns", None)
+    if declared:
+        keep = {int(c) for c in declared if 0 <= int(c) < ncol}
+    else:
+        names = [text_or_empty(c).lower() for c in (table.columns or [])]
+        keep = {0} | {c for c, name in enumerate(names) if name in KEY_COLUMN_NAMES}
+        if len(keep) < 3:
+            keep = set(range(4))
+    return keep if len(keep) < ncol else None
+
+
 def _table_html(table: Table, *, show_title: bool = True) -> str:
     columns = [text_or_empty(c) for c in (table.columns or [])]
     rows = [list(r) if isinstance(r, (list, tuple)) else [r] for r in (table.rows or [])]
@@ -1279,17 +1358,25 @@ def _table_html(table: Table, *, show_title: bool = True) -> str:
         fmts = list(table.formats or [])
         fmts = [f if f else None for f in fmts] + [None] * (ncol - len(fmts))
         numeric = [is_numeric_format(fmts[c], (r[c] for r in rows)) for c in range(ncol)]
+        keep = key_columns(table, ncol)
+        minor = [keep is not None and c not in keep for c in range(ncol)]
+        if keep is not None:
+            parts.append(
+                f'<label class="allcols"><input type="checkbox"> All {ncol} columns '
+                f'<span class="allcols-hint">(showing {len(keep)})</span></label>'
+            )
         label = f' aria-label="{_esc(title)}"' if title else ""
         parts.append(f'<div class="table-wrap" role="region" tabindex="0"{label}><table><thead><tr>')
         for c, name in enumerate(columns):
-            cls = ' class="num"' if numeric[c] else ""
+            classes = " ".join(x for x in ("num" if numeric[c] else "", "minor" if minor[c] else "") if x)
+            cls = f' class="{classes}"' if classes else ""
             parts.append(f'<th scope="col"{cls}>{_esc(name)}</th>')
         parts.append("</tr></thead><tbody>")
         for r in rows:
             parts.append("<tr>")
             for c, value in enumerate(r):
                 inner, extra = _cell_html(value, fmts[c])
-                classes = " ".join(x for x in ("num" if numeric[c] else "", extra) if x)
+                classes = " ".join(x for x in ("num" if numeric[c] else "", extra, "minor" if minor[c] else "") if x)
                 parts.append(f'<td class="{classes}">{inner}</td>' if classes else f"<td>{inner}</td>")
             parts.append("</tr>")
         parts.append("</tbody></table></div>")
@@ -1337,8 +1424,9 @@ def _chart_html(chart: Chart) -> str:
             series = series[:MAX_SERIES]
     if not any(v is not None for _, vals in series for v in vals):
         kind = "table"  # only the hidden series carry numbers: show them as a table
+    full = chart.table if isinstance(getattr(chart, "table", None), Table) else None
     if kind == "table":
-        parts.append(_table_html(chart_table(chart), show_title=False))
+        parts.append(_table_html(full or chart_table(chart), show_title=False))
     else:
         stacks: Optional[list[list[int]]] = None
         keyed = list(range(len(series)))
@@ -1368,7 +1456,7 @@ def _chart_html(chart: Chart) -> str:
     if kind != "table":
         parts.append(
             '<details class="chart-data"><summary>Show the numbers</summary>'
-            f"{_table_html(chart_table(chart), show_title=False)}</details>"
+            f"{_table_html(full or chart_table(chart), show_title=False)}</details>"
         )
     parts.append("</figure>")
     return "".join(parts)
@@ -1390,11 +1478,13 @@ def _kpi_html(kpi: Kpi) -> str:
     return f'<div class="kpi"><dt>{_esc(kpi.label)}</dt><dd class="{cls}">{value_html}</dd>{hint}</div>'
 
 
-def _games_html(urls: Iterable[Any], label: str) -> str:
-    links = valid_urls(urls)
+def _games_html(
+    urls: Iterable[Any], label: str, labels: Optional[dict[str, str]] = None, limit: int = MAX_GAME_LINKS
+) -> str:
+    links = valid_urls(urls, limit)
     if not links:
         return ""
-    items = "".join(_link(u, f"Game {i}") for i, u in enumerate(links, 1))
+    items = "".join(_link(u, game_link_text(u, labels, i)) for i, u in enumerate(links, 1))
     return f'<div class="games"><span class="games-label">{_esc(label)}</span>{items}</div>'
 
 
@@ -1407,13 +1497,55 @@ def _confidence_html(confidence: Any) -> str:
     )
 
 
-def _insight_html(ins: Insight, *, compact: bool, show_study: bool) -> str:
+@dataclass
+class PageIndex:
+    """Cross-references for one rendered page: where each finding sits and which plan item covers it."""
+
+    labels: dict[str, str] = field(default_factory=dict)  # game URL -> link text
+    anchors: dict[int, str] = field(default_factory=dict)  # id(insight object) -> its card's id
+    anchor_by_id: dict[str, str] = field(default_factory=dict)  # insight id -> first card with that id
+    section_by_id: dict[str, str] = field(default_factory=dict)  # insight id -> section title
+    plan_by_id: dict[str, int] = field(default_factory=dict)  # insight id -> plan item number
+    seen_games: set[str] = field(default_factory=set)  # games already linked higher up the page
+
+    def games_for(self, urls: Iterable[Any]) -> list[str]:
+        """Up to MAX_GAME_LINKS games, preferring ones not linked earlier on the page."""
+        valid = valid_urls(urls, limit=50)
+        fresh = [u for u in valid if u not in self.seen_games][:MAX_GAME_LINKS]
+        picked = fresh or valid[:2]
+        self.seen_games.update(picked)
+        return picked
+
+
+def page_index(report: Report, anchors: Sequence[str]) -> PageIndex:
+    idx = PageIndex(labels=dict(getattr(report, "game_labels", None) or {}), plan_by_id=plan_numbers(report))
+    taken = set(_RESERVED_IDS) | {a.lower() for a in anchors} | {f"{a}-h".lower() for a in anchors}
+    for module in report.modules or []:
+        title = text_or_empty(module.title) or text_or_empty(module.key) or "Section"
+        for ins in module.insights or []:
+            base = "f-" + (re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(ins.id)).strip("-") or "finding")
+            anchor, k = base, 2
+            while anchor.lower() in taken:
+                anchor, k = f"{base}-{k}", k + 1
+            taken.add(anchor.lower())
+            idx.anchors[id(ins)] = anchor
+            idx.anchor_by_id.setdefault(text_or_empty(ins.id), anchor)
+            idx.section_by_id.setdefault(text_or_empty(ins.id), title)
+    return idx
+
+
+def _insight_html(
+    ins: Insight, *, compact: bool, show_study: bool, page: Optional[PageIndex] = None
+) -> str:
+    page = page or PageIndex()
     kind = insight_kind(ins)
     h = "h4" if compact else "h3"
     glyph = glyph_for(ins)
     meaning = GLYPH_MEANINGS[glyph]
     kicker = f"{KIND_LABELS[kind]} · {category_label(ins.category)}"
-    parts = [f'<article class="card insight insight--{kind}{" insight--compact" if compact else ""}">']
+    anchor = page.anchors.get(id(ins))
+    id_attr = f' id="{_esc(anchor)}"' if anchor else ""
+    parts = [f'<article class="card insight insight--{kind}{" insight--compact" if compact else ""}"{id_attr}>']
     parts.append(
         f'<div class="insight-head"><span class="glyph glyph--{kind}" role="img" aria-label="{_esc(meaning)}" '
         f'title="{_esc(meaning)}">{_esc(glyph)}</span><div class="insight-heading">'
@@ -1421,24 +1553,35 @@ def _insight_html(ins: Insight, *, compact: bool, show_study: bool) -> str:
     )
     if text_or_empty(ins.detail):
         parts.append(f'<p class="insight-detail">{_esc(ins.detail)}</p>')
+    plan_no = page.plan_by_id.get(text_or_empty(ins.id))
     steps = [text_or_empty(s) for s in (ins.study or []) if text_or_empty(s)]
-    if show_study and steps:
+    if plan_no:
+        parts.append(f'<p class="in-plan">What to do: <a href="#plan-{plan_no}">study plan, item {plan_no}</a></p>')
+    elif show_study and steps:
         items = "".join(f"<li>{_esc(s)}</li>" for s in steps)
         if compact:
             parts.append(
-                f'<details class="study"><summary>What to do ({len(steps)})</summary><ul class="checklist">{items}</ul></details>'
+                f'<details class="study"><summary>What to do ({len(steps)})</summary><ul class="todo">{items}</ul></details>'
             )
         else:
-            parts.append(f'<div class="study"><p class="mini-label">What to do</p><ul class="checklist">{items}</ul></div>')
-    parts.append(f'<div class="insight-meta">{_confidence_html(ins.confidence)}{_games_html(ins.example_games, "Review")}</div>')
+            parts.append(f'<div class="study"><p class="mini-label">What to do</p><ul class="todo">{items}</ul></div>')
+    games = "" if plan_no else _games_html(page.games_for(ins.example_games), "Review", page.labels)
+    parts.append(f'<div class="insight-meta">{_confidence_html(ins.confidence)}{games}</div>')
     parts.append("</article>")
     return "".join(parts)
 
 
-def _study_html(items: Sequence[StudyItem]) -> str:
+def action_key(username: str, text: str) -> str:
+    """Stable key under which a ticked study action is remembered in the browser."""
+    return hashlib.sha1(f"{username}\n{text}".encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _study_html(items: Sequence[StudyItem], page: Optional[PageIndex] = None, username: str = "") -> str:
+    page = page or PageIndex()
     head = (
         '<div class="section-head"><h2 id="study-h">Study plan</h2>'
-        '<p class="section-sub">Most important first. Work through it from the top.</p></div>'
+        '<p class="section-sub">Easiest changes first. Related findings share one item, with at most three '
+        "actions; tick them off as you go (this browser remembers).</p></div>"
     )
     if not items:
         body = '<p class="empty">Nothing to study yet: no weakness stood out clearly enough in these games.</p>'
@@ -1447,46 +1590,92 @@ def _study_html(items: Sequence[StudyItem]) -> str:
         for i, item in enumerate(items, 1):
             actions = [text_or_empty(a) for a in (item.actions or []) if text_or_empty(a)]
             checklist = (
-                '<ul class="checklist">' + "".join(f"<li>{_esc(a)}</li>" for a in actions) + "</ul>" if actions else ""
+                '<ul class="checklist">'
+                + "".join(
+                    f'<li><label><input type="checkbox" data-k="{action_key(username, a)}"><span>{_esc(a)}</span></label></li>'
+                    for a in actions
+                )
+                + "</ul>"
+                if actions
+                else ""
             )
             kicker = f'<p class="kicker">{_esc(item.category)}</p>' if text_or_empty(item.category) else ""
             why = f'<p class="plan-why">{_esc(item.why)}</p>' if text_or_empty(item.why) else ""
+            ids = list(getattr(item, "insight_ids", None) or [])
+            titles = list(getattr(item, "findings", None) or [])
+            also = ""
+            if len(titles) > 1:
+                links = []
+                for iid, t in zip(ids[: len(titles)], titles):
+                    anchor = page.anchor_by_id.get(text_or_empty(iid))
+                    links.append(f'<li><a href="#{_esc(anchor)}">{_esc(t)}</a></li>' if anchor else f"<li>{_esc(t)}</li>")
+                also = f'<p class="mini-label">Also covers</p><ul class="plan-also">{"".join(links[1:])}</ul>'
+            target = text_or_empty(getattr(item, "target", ""))
+            target_html = (
+                f'<p class="plan-target"><span class="mini-label">Target for your next report:</span> {_esc(target)}</p>'
+                if target
+                else ""
+            )
+            games = _games_html(page.games_for(item.games), "Review", page.labels)
             lis.append(
-                f'<li class="plan-item"><span class="plan-num" aria-hidden="true">{i}.</span><div class="plan-body">'
-                f'{kicker}<h3 class="plan-title">{_esc(item.title)}</h3>{why}{checklist}'
-                f"{_games_html(item.games, 'Review these games')}</div></li>"
+                f'<li class="plan-item" id="plan-{i}"><span class="plan-num" aria-hidden="true">{i}.</span>'
+                f'<div class="plan-body">{kicker}<h3 class="plan-title">{_esc(item.title)}</h3>{why}{also}'
+                f"{checklist}{target_html}{games}</div></li>"
             )
         body = '<ol class="plan">' + "".join(lis) + "</ol>"
     return f'<section class="section" id="study" aria-labelledby="study-h">{head}{body}</section>'
 
 
-def _sw_html(report: Report) -> str:
-    covered = plan_titles(report)
+def _glance_html(report: Report, page: Optional[PageIndex] = None) -> str:
+    """Every strength and weakness as one line each, linked to its explanation: nothing hidden, nothing repeated."""
+    page = page or PageIndex()
 
-    def column(key: str, title: str, glyph: str, insights: Sequence[Insight], empty: str) -> str:
-        cards = "".join(
-            _insight_html(i, compact=False, show_study=text_or_empty(i.title) not in covered) for i in insights
-        )
-        body = f'<div class="cards">{cards}</div>' if cards else f'<p class="empty">{_esc(empty)}</p>'
+    def column(key: str, title: str, insights: Sequence[Insight], empty: str) -> str:
         kind = "strength" if key == "strengths" else "weakness"
+        if insights:
+            lis = []
+            for ins in insights:
+                glyph = glyph_for(ins)
+                iid = text_or_empty(ins.id)
+                anchor = page.anchor_by_id.get(iid)
+                title_html = f'<a href="#{_esc(anchor)}">{_esc(ins.title)}</a>' if anchor else _esc(ins.title)
+                where = [page.section_by_id.get(iid, "")]
+                plan_no = page.plan_by_id.get(iid)
+                if plan_no:
+                    where.append(f"plan item {plan_no}")
+                where_text = " · ".join(w for w in where if w)
+                lis.append(
+                    f'<li><span class="glyph glyph--{kind} glyph--xs" role="img" aria-label="{_esc(GLYPH_MEANINGS[glyph])}" '
+                    f'title="{_esc(GLYPH_MEANINGS[glyph])}">{_esc(glyph)}</span><span class="glance-text">{title_html}'
+                    + (f'<span class="glance-where">{_esc(where_text)}</span>' if where_text else "")
+                    + "</span></li>"
+                )
+            body = f'<ul class="glance-list">{"".join(lis)}</ul>'
+        else:
+            body = f'<p class="empty">{_esc(empty)}</p>'
+        count = f' <span class="count">{len(insights)}</span>' if insights else ""
         return (
-            f'<section class="sw-col" id="{key}" aria-labelledby="{key}-h"><div class="sw-head">'
-            f'<span class="glyph glyph--{kind} glyph--sm" aria-hidden="true">{glyph}</span>'
-            f'<h2 id="{key}-h">{title}</h2></div>{body}</section>'
+            f'<section class="sw-col" id="{key}" aria-labelledby="{key}-h">'
+            f'<h2 id="{key}-h" class="glance-head">{title}{count}</h2>{body}</section>'
         )
 
     key = (
         '<p class="glyph-key">Marks follow chess annotation: <b>??</b> serious, <b>?</b> clear, <b>?!</b> minor weakness; '
-        "<b>!!</b> major, <b>!</b> solid strength; <b>=</b> observation.</p>"
+        "<b>!!</b> major, <b>!</b> solid strength; <b>i</b> observation. Most important first; tap a line for the details.</p>"
     )
     more = "More games make patterns reliable enough to report."
     return (
         '<div class="section sw">'
-        + column("strengths", "Strengths", "!", report.strengths or [], f"No clear strengths yet. {more}")
-        + column("weaknesses", "Weaknesses", "?", report.weaknesses or [], f"No clear weaknesses yet. {more}")
+        + column("weaknesses", "Weaknesses", report.weaknesses or [], f"No clear weaknesses yet. {more}")
+        + column("strengths", "Strengths", report.strengths or [], f"No clear strengths yet. {more}")
         + key
         + "</div>"
     )
+
+
+def _sw_html(report: Report) -> str:
+    """The strengths and weaknesses lists (kept for callers of the earlier card layout)."""
+    return _glance_html(report, page_index(report, module_anchors(list(report.modules or []))))
 
 
 def lichess_analysis_url(fen: str) -> Optional[str]:
@@ -1673,7 +1862,10 @@ def _diagram_html(d: Diagram, id_prefix: str = "b-") -> str:
     )
 
 
-def _module_html(module: ModuleResult, anchor: str) -> str:
+def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = None) -> str:
+    """Summary, key numbers and findings stay open; charts and tables fold away under one toggle (a phone
+    would otherwise scroll through every number before reaching the next section)."""
+    page = page or PageIndex()
     title = text_or_empty(module.title) or text_or_empty(module.key) or "Section"
     parts = [f'<section class="section module" id="{anchor}" aria-labelledby="{anchor}-h">']
     parts.append(f'<div class="section-head"><h2 id="{anchor}-h">{_esc(title)}</h2>')
@@ -1682,23 +1874,32 @@ def _module_html(module: ModuleResult, anchor: str) -> str:
     parts.append("</div>")
     if module.kpis:
         parts.append('<dl class="kpis">' + "".join(_kpi_html(k) for k in module.kpis) + "</dl>")
-    if module.charts:
-        parts.append('<div class="charts">' + "".join(_chart_html(c) for c in module.charts) + "</div>")
+    if module.insights:
+        ranked = sorted(module.insights, key=lambda i: -_priority(i))
+        parts.append(
+            f'<div class="findings"><h3 class="sub-head">Findings <span class="count">{len(ranked)}</span></h3>'
+            '<div class="cards cards--grid">'
+            + "".join(_insight_html(i, compact=True, show_study=True, page=page) for i in ranked)
+            + "</div></div>"
+        )
     if getattr(module, "diagrams", None):
         parts.append(
             '<div class="boards">'
             + "".join(_diagram_html(d, f"{anchor}-b{i}-") for i, d in enumerate(module.diagrams, 1))
             + "</div>"
         )
-    for table in module.tables or []:
-        parts.append(_table_html(table))
-    if module.insights:
-        ranked = sorted(module.insights, key=lambda i: -_priority(i))
+    blocks = []
+    if module.charts:
+        blocks.append('<div class="charts">' + "".join(_chart_html(c) for c in module.charts) + "</div>")
+    blocks += [_table_html(table) for table in module.tables or []]
+    if blocks:
+        n_charts, n_tables = len(module.charts or []), len(module.tables or [])
+        what = " and ".join(
+            x for x in (f"{n_charts} chart{'s' if n_charts != 1 else ''}" if n_charts else "",
+                        f"{n_tables} table{'s' if n_tables != 1 else ''}" if n_tables else "") if x
+        )
         parts.append(
-            f'<div class="findings"><h3 class="sub-head">Findings <span class="count">{len(ranked)}</span></h3>'
-            '<div class="cards cards--grid">'
-            + "".join(_insight_html(i, compact=True, show_study=True) for i in ranked)
-            + "</div></div>"
+            f'<details class="more"><summary>Show {what}</summary><div class="more-body">{"".join(blocks)}</div></details>'
         )
     parts.append("</section>")
     return "".join(parts)
@@ -1721,7 +1922,7 @@ def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
         base = re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(m.key)).strip("-") or f"module-{i}"
         if not base[0].isalpha():
             base = f"m-{base}"
-        if base.lower() in _RESERVED_IDS:
+        if base.lower() in _RESERVED_IDS or re.match(r"(?i)^(?:plan-\d+|f-)", base):
             base = f"{base}-section"
         anchor, k = base, 2
         while anchor.lower() in taken or f"{anchor}-h".lower() in taken:
@@ -1740,20 +1941,36 @@ def _masthead_html(report: Report) -> str:
         meta.append(f"<span>{_esc(report.filters)}</span>")
     sep = '<span class="sep" aria-hidden="true">·</span>'
     engine = f'<p class="engine-note">{_esc(report.engine_note)}</p>' if text_or_empty(report.engine_note) else ""
+    demo = f'<p class="demo-note" role="note">{_esc(DEMO_NOTE)}</p>' if getattr(report, "demo", False) else ""
     name = text_or_empty(report.username) or "Your games"
     return (
         '<header class="masthead"><p class="brand"><span class="board-mark" aria-hidden="true"></span>Chess Insights</p>'
-        f'<h1 class="player">{_esc(name)}</h1><p class="meta">{sep.join(meta)}</p>{engine}</header>'
+        f'<h1 class="player">{_esc(name)}</h1><p class="meta">{sep.join(meta)}</p>{engine}{demo}</header>'
     )
 
 
-def _headline(report: Report) -> str:
+def headline_lines(report: Report) -> list[str]:
+    """The lines at the top of the report: ratings, where to start, a strength (or why there is nothing yet)."""
+    lines = [text_or_empty(x) for x in (getattr(report, "summary_lines", None) or []) if text_or_empty(x)]
+    if lines:
+        return lines
     text = text_or_empty(report.headline)
     if text:
-        return text
+        return [text]
     if not report.n_games:
-        return "No games matched the filters, so there is nothing to analyse yet."
-    return "No clear patterns yet. Play more games, or widen the filters, for reliable insights."
+        return ["No games matched the filters, so there is nothing to analyse yet."]
+    return ["No clear patterns yet. Play more games, or widen the filters, for reliable insights."]
+
+
+def _headline(report: Report) -> str:
+    return " ".join(headline_lines(report))
+
+
+def _lede_html(report: Report) -> str:
+    lines = headline_lines(report)
+    if len(lines) == 1:
+        return f'<p class="lede">{_esc(lines[0])}</p>'
+    return '<ul class="lede lede--lines">' + "".join(f"<li>{_esc(line)}</li>" for line in lines) + "</ul>"
 
 
 def _nav_html(report: Report, anchors: Sequence[str]) -> str:
@@ -1762,9 +1979,9 @@ def _nav_html(report: Report, anchors: Sequence[str]) -> str:
         return f'<a href="#{href}">{_esc(text)}{badge}</a>'
 
     chips = [
-        chip("study", "Study plan", len(report.study_plan or [])),
-        chip("strengths", "Strengths", len(report.strengths or [])),
         chip("weaknesses", "Weaknesses", len(report.weaknesses or [])),
+        chip("strengths", "Strengths", len(report.strengths or [])),
+        chip("study", "Study plan", len(report.study_plan or [])),
     ]
     chips += [chip(a, text_or_empty(m.title) or a) for m, a in zip(report.modules or [], anchors)]
     return f'<nav class="chips" aria-label="Sections">{"".join(chips)}</nav>'
@@ -1780,16 +1997,17 @@ def _footer_html(report: Report) -> str:
 def _body_html(report: Report) -> str:
     modules = list(report.modules or [])
     anchors = module_anchors(modules)
+    page = page_index(report, anchors)
+    top = [_glance_html(report, page), _study_html(report.study_plan or [], page, text_or_empty(report.username))]
     return "".join(
         [
             '<div class="ci" lang="en">',
             _masthead_html(report),
-            f'<p class="lede">{_esc(_headline(report))}</p>',
+            _lede_html(report),
             _nav_html(report, anchors),
             '<main class="sections">',
-            _study_html(report.study_plan or []),
-            _sw_html(report),
-            *(_module_html(m, a) for m, a in zip(modules, anchors)),
+            *top,
+            *(_module_html(m, a, page) for m, a in zip(modules, anchors)),
             "</main>",
             _footer_html(report),
             "</div>",
@@ -1925,9 +2143,32 @@ body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font-sa
 .plan-body{display:grid;gap:8px;max-width:72ch;min-width:0}
 .plan-title{font:600 18px/1.3 var(--font-sans)}
 .plan-why{color:var(--ink-2)}
-.checklist{list-style:none;display:grid;gap:6px}
-.checklist li{position:relative;padding-left:26px}
-.checklist li::before{content:"";position:absolute;left:1px;top:.3em;width:13px;height:13px;border:1.5px solid var(--board-dark);border-radius:3px}
+.checklist{list-style:none;display:grid;gap:8px}
+.checklist label{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;cursor:pointer}
+.checklist input{width:18px;height:18px;margin:2px 0 0;accent-color:var(--accent)}
+.checklist input:checked+span{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--axis)}
+.todo{padding-left:1.1em;display:grid;gap:6px}
+.plan-also{list-style:none;display:grid;gap:4px;font-size:14px}
+.plan-also li::before{content:"+ ";color:var(--muted)}
+.plan-target{font-size:14px;color:var(--ink-2);padding:8px 12px;background:var(--accent-wash);border-radius:6px}
+.in-plan{font-size:14px;color:var(--ink-2)}
+.lede--lines{list-style:none;display:grid;gap:8px}
+.lede--lines li{padding-left:12px;border-left:3px solid var(--accent)}
+.glance-head{display:flex;align-items:baseline;gap:8px}
+.glance-list{list-style:none;display:grid;gap:10px}
+.glance-list li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start}
+.glyph.glyph--xs{width:28px;height:24px;font-size:13px;border-radius:5px}
+.glance-text{display:grid;gap:1px;min-width:0;overflow-wrap:anywhere}
+.glance-text a{color:var(--ink);text-decoration:none;font-weight:500}
+.glance-text a:hover{text-decoration:underline}
+.glance-where{font-size:13px;color:var(--muted)}
+details.more{border:1px solid var(--hairline);border-radius:8px;background:var(--surface);min-width:0}
+details.more>summary{cursor:pointer;padding:10px 14px;font:600 14px/1.3 var(--font-cond);color:var(--ink-2)}
+.more-body{display:flex;flex-direction:column;gap:20px;padding:4px 14px 16px;min-width:0}
+.more .table-wrap{--wrap-bg:var(--surface)}
+.allcols{display:none}
+.nolink{color:var(--ink-2);white-space:nowrap}
+.demo-note{margin-top:6px;padding:8px 12px;border-radius:6px;background:var(--bad-wash);color:var(--ink);font-size:14px}
 .games{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:13px}
 .games-label{color:var(--muted);font-weight:500}
 .games a{white-space:nowrap}
@@ -2024,6 +2265,9 @@ details.study[open] summary{margin-bottom:8px}
 .ci-tip-head{opacity:.72;margin-bottom:2px}
 .ci-tip strong{font-family:var(--font-mono);font-weight:600;margin-right:8px}
 @media (max-width:560px){
+  .allcols{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-2);cursor:pointer;width:max-content}
+  .allcols-hint{color:var(--muted)}
+  .table-block:not(:has(.allcols input:checked)) .minor{display:none}
   .player{font-size:28px}
   .lede{font-size:17px}
   .ci-chart{padding:12px 8px 10px}
@@ -2075,6 +2319,18 @@ _SCRIPT = """<script>
     var el = e.target && e.target.closest ? e.target.closest(".ci-chart [data-tip]") : null;
     if (el) show(el, e.clientX, e.clientY); else tip.hidden = true;
   }
+  var boxes = document.querySelectorAll(".plan input[type=checkbox][data-k]");
+  for (var b = 0; b < boxes.length; b++) {
+    (function (box) {
+      var key = "chess-insights:" + box.getAttribute("data-k");
+      try { box.checked = window.localStorage.getItem(key) === "1"; } catch (e) {}
+      box.addEventListener("change", function () {
+        try {
+          if (box.checked) window.localStorage.setItem(key, "1"); else window.localStorage.removeItem(key);
+        } catch (e) {}
+      });
+    })(boxes[b]);
+  }
   document.addEventListener("pointermove", track);
   document.addEventListener("pointerdown", track);
   window.addEventListener("scroll", function () { tip.hidden = true; }, { passive: true });
@@ -2123,7 +2379,11 @@ def render_html(report: Report, *, standalone: bool = True) -> str:
     """
     title = f"<title>{_esc(report_title(report))}</title>"
     style = f"<style>{build_css(standalone)}</style>"
-    body = _body_html(report)
+    token = NO_GAME_LINKS.set(bool(getattr(report, "demo", False)))
+    try:
+        body = _body_html(report)
+    finally:
+        NO_GAME_LINKS.reset(token)
     if not standalone:
         return f"{title}\n{style}\n{_FONT_LINK}\n{body}\n{_SCRIPT}\n"
     return (

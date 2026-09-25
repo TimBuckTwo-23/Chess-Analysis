@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Iterable
+from typing import Any, Iterable, Optional, Sequence
 
 from .models import Insight, ModuleResult, StudyItem
+from .stats import MINUS, pct, per100_games
 
 # Generic, well-known study material per weakness category. Module insights carry
 # the *specific* actions ("review these 7 Caro-Kann losses"); this library adds the
@@ -32,7 +33,6 @@ STUDY_LIBRARY: dict[str, dict[str, object]] = {
     "openings": {
         "label": "Opening repertoire",
         "actions": [
-            "Replay your losses in this opening and mark the exact move where you left known theory.",
             "Study 3-5 annotated master games in the line so you learn the plans, not just moves.",
         ],
     },
@@ -58,8 +58,7 @@ STUDY_LIBRARY: dict[str, dict[str, object]] = {
     "habits": {
         "label": "Playing habits",
         "actions": [
-            "Adopt a stop rule: after two losses in a row, take at least a 15-minute break.",
-            "Avoid rated games when tired; play puzzles instead.",
+            "Stop rule: after any loss, take at least a 15-minute break before the next rated game.",
         ],
     },
     "accuracy": {
@@ -87,6 +86,12 @@ STUDY_LIBRARY: dict[str, dict[str, object]] = {
         "actions": [
             "Practise winning won positions against an engine or a friend: start from +3 and play it out.",
             "When winning, trade pieces (not pawns), remove counterplay first, and don't rush.",
+        ],
+    },
+    "positions": {
+        "label": "Your own positions",
+        "actions": [
+            "Keep a file of the positions you got wrong and replay them once a week until the right move is automatic.",
         ],
     },
     "tactics": {
@@ -143,9 +148,11 @@ def _dedupe(insights: Iterable[Insight]) -> list[Insight]:
     return list(best.values())
 
 
-def _diverse_top(insights: list[Insight], top_n: int, per_category: int) -> list[Insight]:
-    """Highest priority first, but at most ``per_category`` per category unless we run short."""
+def _diverse_top(insights: list[Insight], top_n: Optional[int], per_category: int) -> list[Insight]:
+    """Highest priority first, but at most ``per_category`` per category unless we run short (all when ``top_n`` is None)."""
     ranked = sorted(insights, key=lambda i: (-i.priority, i.id))
+    if top_n is None:
+        return ranked
     picked: list[Insight] = []
     counts: dict[str, int] = {}
     for ins in ranked:
@@ -173,12 +180,12 @@ MIN_CONFIDENCE = 0.5
 def rank_insights(
     modules: Iterable[ModuleResult],
     *,
-    top_n: int = 5,
+    top_n: Optional[int] = 5,
     min_confidence: float = MIN_CONFIDENCE,
     min_priority: float = 0.05,
     per_category: int = 2,
 ) -> tuple[list[Insight], list[Insight]]:
-    """(top strengths, top weaknesses) across all modules.
+    """(top strengths, top weaknesses) across all modules; ``top_n=None`` keeps every one, most important first.
 
     Observations never rank. The report's false-claim rate on data without real effects is
     checked by tests/test_null_calibration.py, and its power by tests/test_power.py.
@@ -193,43 +200,322 @@ def rank_insights(
     return strengths, weaknesses
 
 
-def build_study_plan(weaknesses: list[Insight], *, max_items: int = 6, max_actions: int = 5) -> list[StudyItem]:
-    """One study item per top weakness, most important first.
+# Study-plan groups: findings with the same cause become one plan item (a slow opening and losing
+# on time are one clock problem; two weak openings are one repertoire job). Items are ordered by
+# effort, cheapest first: when you play costs nothing, a clock habit takes a few games, your own
+# positions ten minutes a day, a repertoire change a few weeks, technique longer.
+# category -> (group key, label, effort note, effort rank)
+PLAN_GROUPS: dict[str, tuple[str, str, str, int]] = {
+    "habits": ("habits", "When you play", "costs nothing: start today", 0),
+    "time": ("time", "Your clock", "practise it in your next games", 1),
+    "positions": ("positions", "Your own positions", "10 minutes a day", 2),
+    "openings": ("repertoire", "Your repertoire", "a few weeks of work", 3),
+    "color": ("repertoire", "Your repertoire", "a few weeks of work", 3),
+    "conversion": ("conversion", "Converting winning positions", "longer-term training", 4),
+    "phases": ("phases", "Game phases", "longer-term training", 4),
+    "blunders": ("blunders", "Blunders", "longer-term training", 4),
+    "tactics": ("tactics", "Tactics", "longer-term training", 4),
+    "accuracy": ("accuracy", "Accuracy", "longer-term training", 4),
+}
+_OTHER_EFFORT = 5
+MAX_PLAN_GAMES = 3
 
-    Specific actions from the insight come first, then generic training advice
-    for its category (each generic tip used once across the whole plan).
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text.lower()) if len(w) > 3}
+
+
+def similar_actions(a: str, b: str, threshold: float = 0.6) -> bool:
+    """Two study actions saying nearly the same thing (most of the shorter one's words are in the other)."""
+    wa, wb = _words(a), _words(b)
+    if not wa or not wb:
+        return a.strip().lower() == b.strip().lower()
+    return len(wa & wb) / min(len(wa), len(wb)) >= threshold
+
+
+def _add_action(actions: list[str], action: str, fuzzy: bool = True) -> bool:
+    """Append ``action`` unless it repeats one already there (``fuzzy``: nearly the same words; else exactly)."""
+    if not action or any(similar_actions(action, a) if fuzzy else action.strip() == a.strip() for a in actions):
+        return False
+    actions.append(action)
+    return True
+
+
+def plan_group(category: str) -> tuple[str, str, str, int]:
+    """(group key, label, effort note, effort rank) of a weakness category."""
+    if category in PLAN_GROUPS:
+        return PLAN_GROUPS[category]
+    label = str(STUDY_LIBRARY.get(category, {}).get("label", category or "Other"))
+    return category or "other", label, "", _OTHER_EFFORT
+
+
+def _move_label(fen: Any, san: Any) -> str:
+    parts = str(fen or "").split()
+    if not san or len(parts) < 2:
+        return str(san or "")
+    number = parts[5] if len(parts) > 5 else "1"
+    return f"{number}.{san}" if parts[1] == "w" else f"{number}...{san}"
+
+
+def _pawns(cp: float) -> str:
+    return f"{cp / 100:+.1f}".replace("-", MINUS)
+
+
+def _num(value: Any) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value == value else None
+
+
+def target_for(ins: Insight) -> tuple[str, dict[str, Any]]:
+    """What to aim for by the next report, with today's number: (sentence, {"metric", "value"}); ("", {}) if none."""
+    ev = dict(ins.evidence or {})
+    classes = ev.get("time_classes")
+    if classes and isinstance(ev.get(classes[0]), dict):  # merged across time controls: the first one
+        ev = {**ev[classes[0]], "time_class": classes[0]}
+    tc = ev.get("time_class") or ""
+    i = ins.id
+    if ".slow-opening" in i and _num(ev.get("your_share")) is not None and _num(ev.get("opponent_share")) is not None:
+        mine, theirs = ev["your_share"], ev["opponent_share"]
+        goal = max(0.05, round((theirs + 0.05) / 0.05) * 0.05)
+        return (
+            f"Use at most {pct(goal)} of your clock on your first 15 moves in {tc} (now {pct(mine)}).",
+            {"metric": f"share of the clock used on the first 15 moves ({tc})", "value": mine},
+        )
+    if ".lost-on-time" in i and ev.get("n"):
+        lost, won, n = ev.get("lost_on_time", 0), ev.get("won_on_time", 0), ev["n"]
+        return (
+            f"Lose no more {tc} games on time than you win on time (now {lost} lost and {won} won in {n} games).",
+            {"metric": f"losses on time minus wins on time per game ({tc})", "value": (lost - won) / n},
+        )
+    if ".time-trouble" in i and _num(ev.get("trouble_rate")) is not None:
+        return (
+            f"Get into time trouble no more often than your opponents in {tc}: "
+            f"{pct(ev.get('opponent_trouble_rate'))} of games (now {pct(ev['trouble_rate'])}).",
+            {"metric": f"share of games in time trouble ({tc})", "value": ev["trouble_rate"]},
+        )
+    if i.endswith(".after-a-loss") and _num(ev.get("delta")) is not None:
+        return (
+            f"Score in line with your rating in games started right after a loss (now {per100_games(ev['delta'])}).",
+            {"metric": "score vs rating right after a loss, per game", "value": ev["delta"]},
+        )
+    if (".late-night" in i or ".time-of-day-" in i) and ev.get("n"):
+        window = ev.get("window") or ev.get("block") or ""
+        return (
+            f"No rated games started {window} (now {ev['n']} of your rated games).",
+            {"metric": f"rated games started {window}", "value": ev["n"]},
+        )
+    if ".long-sessions" in i and ev.get("from_game"):
+        return (
+            f"Stop each session after {int(ev['from_game']) - 1} games.",
+            {"metric": "score vs rating late in a session, per game", "value": ev.get("delta")},
+        )
+    if i.startswith("openings.weakness.early-losses") and ev.get("losses"):
+        return (
+            f"Fewer quick losses in the {ev.get('family')} (now {ev.get('short_losses')} of {ev['losses']} losses "
+            "were over within 25 moves).",
+            {"metric": f"quick losses in the {ev.get('family')}", "value": ev.get("short_losses")},
+        )
+    if i.startswith("openings.weakness.") and _num(ev.get("delta")) is not None:
+        return (
+            f"Score in line with your rating in the {ev.get('family')} (now {per100_games(ev['delta'])}).",
+            {"metric": f"score vs rating in the {ev.get('family')} ({ev.get('color')}), per game", "value": ev["delta"]},
+        )
+    if ".openings-" in i and _num(ev.get("avg_cp")) is not None:
+        return (
+            f"Come out of the {ev.get('family')} level by move 10 (now {_pawns(ev['avg_cp'])} on average).",
+            {"metric": f"engine eval after move 10 in the {ev.get('family')} (centipawns)", "value": ev["avg_cp"]},
+        )
+    if i.endswith(".conversion") and _num(ev.get("rate")) is not None and _num(ev.get("opp_rate")) is not None:
+        return (
+            f"Win {pct(ev['opp_rate'])} of the games where you reach a winning position, like your opponents "
+            f"(now {pct(ev['rate'])}).",
+            {"metric": "share of winning positions converted", "value": ev["rate"]},
+        )
+    if (".phase-" in i or ".blunder-rate" in i) and _num(ev.get("per100")) is not None:
+        where = f" in the {ev['phase']}" if ev.get("phase") else ""
+        what = "mistakes and blunders" if ev.get("phase") else "blunders"
+        return (
+            f"Cut your {what}{where} to your opponents' {ev.get('opp_per100', 0):.1f} per 100 moves "
+            f"(now {ev['per100']:.1f}).",
+            {"metric": f"{what}{where} per 100 moves", "value": ev["per100"]},
+        )
+    if i.startswith("mistakes.weakness") and ev.get("best"):
+        best, played = _move_label(ev.get("fen"), ev["best"]), _move_label(ev.get("fen"), ev.get("move"))
+        return (
+            f"Play {best} the next time this position comes up (you played {played} in {ev.get('errors')} of "
+            f"{ev.get('reached')} games).",
+            {"metric": f"games with {played} in this position", "value": ev.get("errors")},
+        )
+    if _num(ev.get("delta")) is not None:
+        return (
+            f"Score in line with your rating here (now {per100_games(ev['delta'])}).",
+            {"metric": "score vs rating, per game", "value": ev["delta"]},
+        )
+    return "", {}
+
+
+def _round_robin(
+    lists: Sequence[Sequence[str]], limit: int, taken: Optional[list[str]] = None, fuzzy_within: bool = True
+) -> list[str]:
+    """The first entry of each list, then the second of each ..., up to ``limit``, skipping repeats.
+
+    Two findings' actions often share a template ("Replay your 5 most recent losses in the X ...") while being
+    about different things, so across lists only exact repeats are dropped; within one list, near-duplicates too.
     """
-    used_generic: set[str] = set()
+    out = list(taken or [])
+    for k in range(max((len(x) for x in lists), default=0)):
+        for items in lists:
+            if len(out) >= limit:
+                return out
+            if k < len(items):
+                action = str(items[k])
+                if not fuzzy_within or not any(similar_actions(action, str(prev)) for prev in items[:k]):
+                    _add_action(out, action, fuzzy=False)
+    return out
+
+
+def practice_actions(modules: Iterable[ModuleResult]) -> list[str]:
+    """Study actions built from facts, not claims: your own mistakes as puzzles (needs the engine)."""
+    m = next((m for m in modules if m.key == "mistakes"), None)
+    stats = (m.stats if m else None) or {}
+    n = stats.get("puzzles_exported") or 0
+    if not n:
+        return []
+    where = f"in {stats['puzzle_file']}" if stats.get("puzzle_file") else "(export them with --puzzles)"
+    return [
+        f"Solve 10 of your own puzzles a day: {n} positions from your games where your move cost a lot, {where}. "
+        "Import the file into a Lichess study or any chess program."
+    ]
+
+
+def build_study_plan(
+    weaknesses: list[Insight],
+    *,
+    max_items: int = 6,
+    max_actions: int = 3,
+    practice: Sequence[str] = (),
+) -> list[StudyItem]:
+    """One plan item per cause, cheapest to fix first (see PLAN_GROUPS).
+
+    Each item takes its title, reasons and target from its most important finding, lists the others it
+    covers, and gets at most ``max_actions`` actions: the findings' own, taken in turn, near-duplicates
+    left out; generic training advice only fills empty places. ``practice`` actions (your own puzzles)
+    go to the positions item, which is created for them when no repeated-position finding exists.
+    """
+    groups: dict[str, list[Insight]] = {}
+    for ins in sorted(weaknesses, key=lambda i: (-i.priority, i.id)):
+        groups.setdefault(plan_group(ins.category)[0], []).append(ins)
+    if practice and "positions" not in groups:
+        groups["positions"] = []
+    info = {k: plan_group(members[0].category if members else "positions") for k, members in groups.items()}
+    order = sorted(groups, key=lambda k: (info[k][3], -(groups[k][0].priority if groups[k] else 0.0), k))
     plan: list[StudyItem] = []
-    for ins in sorted(weaknesses, key=lambda i: -i.priority)[:max_items]:
-        lib = STUDY_LIBRARY.get(ins.category, {})
-        actions = [a for a in ins.study if a]
-        for tip in lib.get("actions", []):  # type: ignore[union-attr]
-            if len(actions) >= max_actions:
+    for key in order[:max_items]:
+        members = groups[key]
+        _, label, effort, _ = info[key]
+        kicker = f"{label} · {effort}" if effort else label
+        if not members:  # practice only: no finding behind it
+            actions = _round_robin([list(practice)], max_actions)
+            plan.append(
+                StudyItem(
+                    title="Practise your own mistakes as puzzles",
+                    why="Stockfish marked the moves in your games that cost the most. Solving them is the most "
+                    "direct training there is: the positions come from your openings and your kind of game.",
+                    actions=actions,
+                    category=kicker,
+                    target="Solve every puzzle in the file once before your next report.",
+                )
+            )
+            continue
+        lead = members[0]
+        reserved = 1 if key == "positions" and practice else 0
+        actions = _round_robin([m.study for m in members], max_actions - reserved)
+        for tip in STUDY_LIBRARY.get(lead.category, {}).get("actions", []):  # type: ignore[union-attr]
+            if len(actions) >= max_actions - reserved:
                 break
-            if tip not in used_generic and tip not in actions:
-                actions.append(tip)
-                used_generic.add(tip)
+            _add_action(actions, str(tip))
+        if reserved:
+            actions = _round_robin([list(practice)], max_actions, taken=actions)
+        games = _round_robin([m.example_games for m in members], MAX_PLAN_GAMES, fuzzy_within=False)
+        ids: list[str] = []
+        for m in members:
+            ids += [m.id, *[str(x) for x in (m.evidence or {}).get("also_found_by") or []]]
+        target, baseline = target_for(lead)
+        if baseline:
+            baseline = {**baseline, "insight": lead.id}
         plan.append(
             StudyItem(
-                title=ins.title,
-                why=ins.detail,
-                actions=actions[:max_actions],
-                games=list(ins.example_games[:5]),
-                category=str(lib.get("label", ins.category)),
-                priority=ins.priority,
+                title=lead.title,
+                why=lead.detail,
+                actions=actions,
+                games=games,
+                category=kicker,
+                priority=max(m.priority for m in members),
+                insight_ids=list(dict.fromkeys(ids)),
+                findings=[m.title for m in members],
+                target=target,
+                baseline=baseline,
             )
         )
     return plan
 
 
-def headline(strengths: list[Insight], weaknesses: list[Insight]) -> str:
-    """One or two sentences for the top of the report / terminal."""
+def standing_line(modules: Iterable[ModuleResult], min_games: int = 20, max_pools: int = 3) -> str:
+    """'Your ratings: rapid 1756 (+225 over these games), blitz 1379 (−79).' from the results section."""
+    m = next((m for m in modules if m.key == "results"), None)
+    pools = ((m.stats if m else None) or {}).get("by_time_control") or {}
+    rows = []
+    for pool, s in pools.items():
+        rating = (s or {}).get("rating") or {}
+        if not isinstance(rating, dict) or rating.get("current") is None or (rating.get("n") or 0) < min_games:
+            continue
+        rows.append((rating.get("n") or 0, str(pool), rating))
+    if not rows:
+        return ""
+    parts = []
+    for k, (_, pool, rating) in enumerate(sorted(rows, key=lambda r: (-r[0], r[1]))[:max_pools]):
+        text = f"{pool.lower()} {rating['current']}"
+        change = rating.get("change")
+        if change is None and isinstance(rating.get("start"), (int, float)):
+            change = rating["current"] - rating["start"]
+        if isinstance(change, (int, float)):
+            sign = f"{change:+d}".replace("-", MINUS) if change else "±0"
+            text += f" ({sign} over these games)" if k == 0 else f" ({sign})"
+        parts.append(text)
+    return "Your ratings: " + ", ".join(parts) + "."
+
+
+def summary_lines(
+    modules: Iterable[ModuleResult], plan: Sequence[StudyItem], strengths: Sequence[Insight], weaknesses: Sequence[Insight]
+) -> list[str]:
+    """The top of the report in three short lines: where you stand, where to start, a strength to build on."""
+    modules = list(modules)
+    lines = []
+    standing = standing_line(modules)
+    if standing:
+        lines.append(standing)
+    if plan:
+        firsts = [f"{k}. {item.title.rstrip('.')}" for k, item in enumerate(plan[:3], 1)]
+        lines.append("Start with: " + " · ".join(firsts) + ".")
+    if strengths:
+        lines.append(f"Strength to build on: {strengths[0].title.rstrip('.')}.")
+    if not strengths and not weaknesses:
+        lines.append("No clear strengths or weaknesses yet: play more games (or widen the filters) for reliable insights.")
+    return lines
+
+
+def headline(
+    strengths: Sequence[Insight], weaknesses: Sequence[Insight], plan: Optional[Sequence[StudyItem]] = None
+) -> str:
+    """One or two sentences for the top of the report / terminal: where to start, and a strength to build on."""
     if not strengths and not weaknesses:
         return "No clear patterns yet — play more games (or widen the filters) for reliable insights."
     parts = []
-    if weaknesses:
+    if plan:
+        parts.append(f"Start with: {plan[0].title.rstrip('.')}.")
+    elif weaknesses:
         parts.append(f"Biggest opportunity: {weaknesses[0].title.rstrip('.')}.")
     if strengths:
-        parts.append(f"Biggest strength: {strengths[0].title.rstrip('.')}.")
+        parts.append(f"Strength to build on: {strengths[0].title.rstrip('.')}.")
     return " ".join(parts)

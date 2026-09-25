@@ -1,8 +1,8 @@
 """The report must not invent strengths or weaknesses.
 
 On null-world data (tests/null_world.py: realistic rating noise and White's
-first-move edge, but no real effects), every strength/weakness that reaches
-the report's top lists is a false claim. Each module runs dozens of tests, so a
+first-move edge, but no real effects), every strength/weakness in the report
+(its lists at the top and every section's findings) is a false claim. Each module runs dozens of tests, so a
 small rate is unavoidable; the significance policy in ``stats`` (two alpha tiers,
 Benjamini-Hochberg within each family of tests) is tuned to keep it near 0.1-0.2
 claims per report (docs/METHODOLOGY.md, section 2). The null player lives in UTC and
@@ -38,7 +38,20 @@ OPTIONS = {"tz": "Etc/UTC"}  # the null world's schedule is in UTC
 
 
 def claims_of(report) -> list[tuple[str, float]]:
-    return [(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses]
+    """Every strength and weakness anywhere in the report: the lists at the top and every section's findings
+    (a claim below the lists' priority floor still reads as a claim in its section)."""
+    listed = {(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses}
+    in_sections = {
+        (i.id, round(i.confidence, 2)) for m in report.modules for i in m.insights if i.kind in ("strength", "weakness")
+    }
+    return sorted(listed | in_sections)
+
+
+def test_the_lists_show_every_claim_in_the_sections(null_reports):
+    for report in null_reports:
+        listed = {i.id for i in report.strengths + report.weaknesses}
+        in_sections = {i.id for m in report.modules for i in m.insights if i.kind in ("strength", "weakness")}
+        assert listed <= in_sections
 
 
 @pytest.fixture(scope="module")

@@ -47,12 +47,15 @@ from ..stats import (  # noqa: F401  (ScoreSummary, summarize, difference_test, 
     clamp,
     difference_test,
     pct,
+    per100,
+    per100_games,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
     shrink_effect,
     significance,
     summarize,
+    vs_rating,
     with_p_value,
 )
 
@@ -97,7 +100,7 @@ class Thresholds:
 
 # --------------------------------------------------------------------------- shared helpers
 def fmt_points(x: float) -> str:
-    """'+0.07' / '−0.12' points per game (real minus sign)."""
+    """'+0.07' / '−0.12' points per game (real minus sign). The report text uses ``stats.per100_games``."""
     if round(x, 2) == 0:
         return "0.00"
     return f"{x:+.2f}".replace("-", MINUS)
@@ -239,11 +242,12 @@ def time_control_table(by_pool: dict[str, list[Game]], summaries: dict[str, Scor
         rows.append([pool, s.n, s.wdl, *_score_cells(s), h.current, h.change, h.peak])
     unrated = sum(s.n - s.n_rated for s in summaries.values())
     note = (
-        "Difference = your score minus the Elo expected score, per game (+5% = 5 extra points per 100 games). "
-        "Each time control has its own rating, so judge each row against its own expectation."
+        "Rating predicts = the Elo expected score for the rating gap in each game; vs rating = your score minus that, "
+        "per game (+5% = 5 extra points per 100 games). Each time control has its own rating, so judge each row "
+        "against its own prediction."
     )
     if unrated:
-        note += f" Expected and Difference leave out {unrated} game(s) without ratings."
+        note += f" Rating predicts and vs rating leave out {unrated} game(s) without ratings."
     return Table(
         title="By time control",
         columns=[
@@ -251,8 +255,8 @@ def time_control_table(by_pool: dict[str, list[Game]], summaries: dict[str, Scor
             "Games",
             "W/D/L",
             "Score",
-            "Expected",
-            "Difference",
+            "Rating predicts",
+            "vs rating",
             "Current rating",
             "Change",
             "Peak",
@@ -295,9 +299,9 @@ def delta_chart(summaries: dict[str, ScoreSummary], min_games: int) -> Optional[
         return None
     return Chart(
         kind="bar",
-        title="Score vs expected by time control",
+        title="Score vs rating by time control",
         labels=pools,
-        series=[Series("Score − expected", [summaries[p].delta for p in pools])],
+        series=[Series("Score vs rating", [summaries[p].delta for p in pools])],
         value_format="signed_pct",
         note=(
             "Per game, against each time control's own rating expectation "
@@ -308,7 +312,8 @@ def delta_chart(summaries: dict[str, ScoreSummary], min_games: int) -> Optional[
 
 
 # --------------------------------------------------------------------------- insights
-def _colour_study(colour: str, games: Sequence[Game]) -> list[str]:
+def _colour_study(colour: str, games: Sequence[Game], flagged: Iterable[str] = ()) -> list[str]:
+    """``flagged``: openings of this colour with a finding of their own; the advice never pushes you deeper into one."""
     losses = [g for g in games if g.outcome == "loss"]
     families: dict[str, int] = {}
     for g in games:
@@ -319,13 +324,18 @@ def _colour_study(colour: str, games: Sequence[Game]) -> list[str]:
         f"Replay your last {k} losses with {colour.capitalize()} and note where you first got a worse position: "
         "the opening, a tactic, or later in the game."
     ]
+    flagged = set(flagged)
     if families:
         fam, n = max(families.items(), key=lambda kv: (kv[1], kv[0]))
+    if families and fam not in flagged:
         study.append(
             f"Your most common opening with {colour.capitalize()} is the {fam} ({n} games): study its main plans and "
             "typical middlegames so you reach positions you understand."
         )
-    if colour == "black":
+    if flagged:
+        names = " and the ".join(sorted(flagged))
+        study.append(f"Start with the {names}: see its finding under Openings.")
+    elif colour == "black":
         study.append("Choose one reply to 1.e4 and one to 1.d4 and stick with them for your next 50 games as Black.")
     else:
         study.append(
@@ -411,10 +421,10 @@ def colour_insight(
     colour_games = [g for g in games if g.color == weaker]
     lo, hi = WHITE_EDGE_RANGE
     detail = (
-        f"With {weaker.capitalize()} you score {pct(ws.rated_score)} in {ws.n_rated} games where "
-        f"{pct(ws.expected)} was expected ({fmt_points(ws.test.mean)} points per game); "
-        f"with {stronger.capitalize()} {pct(ss.rated_score)} where "
-        f"{pct(ss.expected)} was expected ({fmt_points(ss.test.mean)}). White normally scores about "
+        f"With {weaker.capitalize()} you score {pct(ws.rated_score)} in {ws.n_rated} games where your rating "
+        f"predicts {pct(ws.expected)} ({per100_games(ws.test.mean)} vs your rating); "
+        f"with {stronger.capitalize()} {pct(ss.rated_score)} where it predicts "
+        f"{pct(ss.expected)} ({per100_games(ss.test.mean)}). White normally scores about "
         f"{lo * 100:.0f}-{hi * 100:.0f} points per 100 games more than Black; your White-minus-Black gap is "
         f"{fmt_signed((excess + WHITE_EDGE) * 100)}, about {abs(excess) * 100:.0f} points per 100 games "
         f"{'wider' if excess > 0 else 'narrower'} than usual (about {abs(score_to_elo_diff(abs(excess))):.0f} Elo)."
@@ -443,7 +453,7 @@ def colour_insight(
                 "p_value": deciding.p_value,
                 "explained_by": [f"{c}:{fam}" for c, fam in explained_by] if explained else [],
             },
-            study=_colour_study(weaker, colour_games),
+            study=_colour_study(weaker, colour_games, {fam for c, fam, k in opening_claims if c == weaker}),
             example_games=recent_urls(colour_games, "loss"),
         ),
         central,
@@ -576,8 +586,8 @@ def opponent_insights(games: Sequence[Game], th: Thresholds) -> tuple[list[Insig
                 detail=(
                     f"Against opponents rated more than 50 points {side} you, you score {pct(s.rated_score)} in "
                     f"{s.n_rated} games where about {pct(s.expected)} would be normal for the rating gap "
-                    f"({fmt_points(s.test.mean)} points per game); in your other games {fmt_points(r.test.mean)}. "
-                    f"The gap is {fmt_points(t_att.mean)} points per game ({fmt_points(t_raw.mean)} against the plain "
+                    f"({per100_games(s.test.mean)}); in your other games {per100_games(r.test.mean)}. "
+                    f"The gap is {per100(t_att.mean)} points per 100 games ({per100(t_raw.mean)} against the plain "
                     "Elo formula), so it holds whatever allowance is made for rating noise."
                 ),
                 severity=severity_from_points(shrink_effect(effect, se)),
@@ -658,10 +668,10 @@ def time_control_insights(
     name = pool.lower()
     gap_elo = abs(score_to_elo_diff(test.mean))
     detail = (
-        f"Measured against your own rating in each: in {name} you score {pct(s.rated_score)} where "
-        f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game, {s.n_rated} games); in your "
-        f"other time controls {pct(rest.rated_score)} where {pct(rest.expected)} was expected "
-        f"({fmt_points(rest.test.mean)}, {rest.n_rated} games). The gap is worth about {gap_elo:.0f} Elo. Each time "
+        f"Measured against your own rating in each: in {name} you score {pct(s.rated_score)} where your rating "
+        f"predicts {pct(s.expected)} ({per100_games(s.test.mean)}, {s.n_rated} games); in your "
+        f"other time controls {pct(rest.rated_score)} where it predicts {pct(rest.expected)} "
+        f"({per100_games(rest.test.mean)}, {rest.n_rated} games). The gap is worth about {gap_elo:.0f} Elo. Each time "
         f"control has its own rating, so this is also what a {name} rating that lags behind your recent results "
         "there looks like."
     )
@@ -726,31 +736,32 @@ def trend_insight(trend: Trend, th: Thresholds) -> Insight:
     """
     name = trend.pool.lower()
     change = trend.change
+    moved = trend.last - trend.first
     detail = (
         f"Over the last {TREND_DAYS} days ({trend.n} rated games) your {name} rating went from {trend.first} to "
-        f"{trend.last}; the trend line says {fmt_signed(change)} points. In those games you scored "
-        f"{fmt_points(trend.test.mean)} points per game against your rating's expectation."
+        f"{trend.last} ({fmt_signed(moved)}); a straight line through all those games says {fmt_signed(change)}. "
+        f"In those games you scored {per100_games(trend.test.mean)} vs your rating."
+    )
+    title = (
+        f"Your {name} rating went from {trend.first} to {trend.last} in the last {TREND_DAYS} days "
+        f"({fmt_signed(moved) if moved else 'no change'})"
     )
     if change >= TREND_FLAT:
-        title = f"Your {name} rating is up about {change:.0f} points in the last {TREND_DAYS} days"
         study = [
-            "Keep doing what works: note what changed recently (more puzzles, slower games, a new opening) "
-            "and stick with it.",
-            f"Replay your three best {name} wins from this period to lock in the patterns.",
+            f"Replay your three best {name} wins from this period to see what is working.",
+            f"Compare your recent {name} games with earlier ones: which openings or habits changed?",
         ]
         wins = sorted(
             (g for g in trend.games if g.outcome == "win"), key=lambda g: (g.rating_diff or 0, g.end_time), reverse=True
         )
         examples = [g.url for g in wins if g.url][:MAX_EXAMPLES]
     elif change <= -TREND_FLAT:
-        title = f"Your {name} rating has slipped about {abs(change):.0f} points in the last {TREND_DAYS} days"
         study = [
             f"Replay your last five {name} losses and look for a common thread: the opening, blunders, or the clock.",
             "Take a short break from rated games, or play a slower time control for a week, then come back fresh.",
         ]
         examples = recent_urls(trend.games, "loss")
     else:
-        title = f"Your {name} rating has been stable over the last {TREND_DAYS} days"
         study = [
             "A plateau usually needs a change in training, not more games: pick one weakness from this report and "
             "work on it for the next 30 days.",
@@ -771,6 +782,7 @@ def trend_insight(trend: Trend, th: Thresholds) -> Insight:
             "change": change,
             "first": trend.first,
             "last": trend.last,
+            "moved": moved,
             "delta": trend.test.mean,
             "p_value": trend.test.p_value,
         },
@@ -785,9 +797,12 @@ def _avg(values: Iterable[Optional[float]]) -> Optional[float]:
 
 
 def accuracy_section(
-    by_pool: dict[str, list[Game]], th: Thresholds
+    by_pool: dict[str, list[Game]], th: Thresholds, engine_ran: bool = False
 ) -> tuple[Optional[Table], Optional[Insight], dict[str, Any]]:
-    """chess.com Game Review accuracy (only present for reviewed games)."""
+    """chess.com Game Review accuracy (only present for reviewed games).
+
+    With engine analysis (``engine_ran``) the Engine review section reports accuracy over games nobody
+    picked for review, so the chess.com numbers stay a table (no second, differently scaled finding)."""
     rows, stats = [], {}
     for pool, games in by_pool.items():
         rev = [g for g in games if g.my_accuracy is not None]
@@ -801,15 +816,18 @@ def accuracy_section(
         stats[pool] = {"n": len(rev), "mine": mine, "wins": wins, "losses": losses, "opponents": opp}
     if not rows:
         return None, None, stats
+    note = "chess.com only reports accuracy for games you ran Game Review on, so these games may not be typical."
+    if engine_ran:
+        note += " Its scale differs from the engine accuracy in the Engine review section: compare each only with itself."
     table = Table(
-        title="chess.com accuracy (reviewed games)",
+        title="chess.com Game Review accuracy (games you reviewed)",
         columns=["Time control", "Reviewed games", "Your accuracy", "In wins", "In losses", "Opponents"],
         rows=rows,
         formats=["text", "int", "float1", "float1", "float1", "float1"],
-        note="chess.com only reports accuracy for games you ran Game Review on, so these games may not be typical.",
+        note=note,
     )
     reviewed = [g for games in by_pool.values() for g in games if g.my_accuracy is not None]
-    if len(reviewed) < th.min_accuracy_games:
+    if len(reviewed) < th.min_accuracy_games or engine_ran:
         return table, None, stats
     mine = _avg(g.my_accuracy for g in reviewed) or 0.0
     wins = _avg(g.my_accuracy for g in reviewed if g.outcome == "win")
@@ -828,7 +846,7 @@ def accuracy_section(
     )
     if opp is not None:
         detail += f" Your opponents averaged {opp:.1f} in the same games."
-    title = f"Your chess.com accuracy averages {mine:.1f}"
+    title = f"Your chess.com Game Review accuracy averages {mine:.1f}"
     if wins is not None and losses is not None:
         title += f" ({wins:.1f} in wins, {losses:.1f} in losses)"
     worst = sorted(losses_g, key=lambda g: (g.my_accuracy or 0.0, -g.end_time.timestamp()))
@@ -859,13 +877,24 @@ def _opening_claims(ctx: AnalysisContext, games: Sequence[Game]) -> list[tuple[s
     return openings.claimed_families(games, openings.Thresholds.from_ctx(ctx))
 
 
-def _kpis(games: Sequence[Game], overall: ScoreSummary, by_pool: dict[str, list[Game]], min_games: int) -> list[Kpi]:
+def _kpis(
+    games: Sequence[Game],
+    overall: ScoreSummary,
+    by_pool: dict[str, list[Game]],
+    min_games: int,
+    trends: Optional[dict[str, Trend]] = None,
+) -> list[Kpi]:
     kpis = [
         Kpi("Games", overall.n, "int", hint=f"{games[0].end_time:%Y-%m} to {games[-1].end_time:%Y-%m}"),
         Kpi("Win / draw / loss", f"{overall.wins} / {overall.draws} / {overall.losses}", "text"),
         Kpi("Score", overall.score, "pct", hint="wins + half the draws"),
-        Kpi("Expected score", overall.expected, "pct", hint="what the Elo ratings predict"),
-        Kpi("Score vs expected", overall.delta, "signed_pct", hint="per game: +2% = 2 extra points per 100 games"),
+        Kpi("Rating predicts", overall.expected, "pct", hint="the Elo expected score for your games"),
+        Kpi(
+            "Score vs rating",
+            overall.delta,
+            "signed_pct",
+            hint="per game (+2% would be 2 extra points per 100 games)",
+        ),
         Kpi(
             "Rating equivalent",
             round(score_to_elo_diff(overall.delta, overall.expected))
@@ -884,16 +913,19 @@ def _kpis(games: Sequence[Game], overall: ScoreSummary, by_pool: dict[str, list[
         main = sorted(with_rating, key=lambda p: -histories[p].n)[:1]
     for pool in main:
         h = histories[pool]
-        hint = f"{h.n} games" + (f", {fmt_signed(h.change)} over the period" if h.change is not None else "")
+        hint = f"{h.n} rated games" + (f", {fmt_signed(h.change)} over the period" if h.change is not None else "")
+        trend = (trends or {}).get(pool)
+        if trend is not None:
+            hint += f", {fmt_signed(trend.last - trend.first)} in the last {TREND_DAYS} days"
         kpis.append(Kpi(f"{pool} rating", h.current, "rating", hint=hint))
     if main:
         h = histories[main[0]]
         kpis.append(
             Kpi(
-                "Peak rating",
+                f"Peak {main[0].lower()} rating",
                 h.peak,
                 "rating",
-                hint=f"{main[0].lower()}, {h.peak_time:%Y-%m-%d}" if h.peak_time else main[0].lower(),
+                hint=f"{h.peak_time:%Y-%m-%d}" if h.peak_time else "",
             )
         )
     return kpis
@@ -907,7 +939,7 @@ def _summary(overall: ScoreSummary, insights: list[Insight], th: Thresholds) -> 
         where = f"in {n} games" if overall.n_rated == n else f"in the {overall.n_rated} of {n} games with ratings"
         text = (
             f"You scored {pct(overall.rated_score)} {where} where your ratings predicted {pct(overall.expected)} "
-            f"({fmt_points(overall.test.mean)} points per game)."
+            f"({per100_games(overall.test.mean)} vs your rating)."
         )
     if n < th.min_games:
         return (
@@ -944,14 +976,14 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     tables.append(
         Table(
             title="By colour",
-            columns=["Colour", "Games", "W/D/L", "Score", "Expected", "Difference"],
+            columns=["Colour", "Games", "W/D/L", "Score", "Rating predicts", "vs rating"],
             rows=[
                 ["White", white.n, white.wdl, *_score_cells(white)],
                 ["Black", black.n, black.wdl, *_score_cells(black)],
             ],
             formats=["text", "int", "text", *_SCORE_FORMATS],
             note=(
-                "The Elo expectation ignores colour: White typically scores about 2% above it and Black about 2% below."
+                "The rating's prediction ignores colour: White typically scores about 2% above it and Black about 2% below."
             ),
         )
     )
@@ -975,13 +1007,13 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     tables.append(
         Table(
             title="By opponent strength",
-            columns=["Opponent vs you", "Games", "W/D/L", "Score", "Elo expected", "Realistic expected", "Difference"],
+            columns=["Opponent vs you", "Games", "W/D/L", "Score", "Elo formula", "Predicted", "vs rating"],
             rows=rows,
             formats=["text", "int", "text", "pct", "pct", "pct", "signed_pct"],
             note=(
                 "Opponent rating minus yours before the game. Ratings are imperfect, so everyone scores a little below "
-                "the Elo formula against weaker players and above it against stronger ones; Difference is measured "
-                "against that realistic expectation."
+                "the Elo formula against weaker players and above it against stronger ones; Predicted allows for "
+                "that, and vs rating is measured against it."
                 + (f" {no_diff} game(s) without ratings are not included." if no_diff else "")
             ),
         )
@@ -992,7 +1024,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                 kind="bar",
                 title="Score vs realistic expectation by opponent strength",
                 labels=[label for _, label in OPPONENT_BUCKETS],
-                series=[Series("Score − expected", deltas)],
+                series=[Series("Score vs rating", deltas)],
                 value_format="signed_pct",
                 note="Opponent rating minus yours. Empty bars are buckets without games.",
                 reference=0.0,
@@ -1011,7 +1043,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     insights.extend(trend_insight(t, th) for t in trends)
 
     # chess.com accuracy
-    acc_table, acc_insight, acc_stats = accuracy_section(by_pool, th)
+    acc_table, acc_insight, acc_stats = accuracy_section(by_pool, th, engine_ran=bool(ctx.evals))
     if acc_table:
         tables.append(acc_table)
     if acc_insight:
@@ -1024,7 +1056,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         key=KEY,
         title=TITLE,
         summary=_summary(overall, insights, th),
-        kpis=_kpis(games, overall, by_pool, th.min_chart_games),
+        kpis=_kpis(games, overall, by_pool, th.min_chart_games, {t.pool: t for t in trends}),
         tables=tables,
         charts=charts,
         insights=insights,

@@ -42,11 +42,12 @@ from ..stats import (
     mean_test,
     normal_cdf,
     pct,
+    per100_games,
     severity_from_points,
     significance,
     summarize,
 )
-from .results import MAX_EXAMPLES, fmt_points
+from .results import MAX_EXAMPLES
 
 KEY = "time"
 TITLE = "Clock & time management"
@@ -339,12 +340,12 @@ def _class_order(time_class: str, n: int) -> tuple[int, int, str]:
 
 # --------------------------------------------------------------------------- insights
 def _score_phrase(s: ScoreSummary) -> str:
-    """'54% where 49% was expected (+0.05 per game, 40 games)' (plain score without ratings)."""
+    """'54% where your rating predicts 49% (+5 per 100 games, 40 games)' (plain score without ratings)."""
     if s.n_rated == 0 or s.expected is None:
         return f"{pct(s.score)} in {s.n} games"
     return (
-        f"{pct(s.rated_score)} where {pct(s.expected)} was expected "
-        f"({fmt_points(s.test.mean)} per game, {s.n_rated} games)"
+        f"{pct(s.rated_score)} where your rating predicts {pct(s.expected)} "
+        f"({per100_games(s.test.mean)}, {s.n_rated} games)"
     )
 
 
@@ -515,6 +516,12 @@ def opening_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
     )
     if cp and cp.n:
         detail += f" You were behind on the clock at move {cp.move} in {pct(cp.behind_rate)} of {cp.n} games."
+    if cs.in_trouble.n_rated and cs.not_in_trouble.n_rated:
+        detail += (
+            f" It costs points later: in the {cs.in_trouble.n_rated} games where you ran low on time you scored "
+            f"{pct(cs.in_trouble.rated_score)} ({per100_games(cs.in_trouble.test.mean)} vs your rating), in the other "
+            f"{cs.not_in_trouble.n_rated} {pct(cs.not_in_trouble.rated_score)} ({per100_games(cs.not_in_trouble.test.mean)})."
+        )
     (base, inc), _ = Counter((c.game.base_seconds or 0, c.game.increment) for c in slow).most_common(1)[0]
     per_move = max(1, round(cs.opp_opening * base / OPENING_MOVES))
     study = [
@@ -620,16 +627,18 @@ def trouble_table(classes: Sequence[ClassStats]) -> Table:
             "You in time trouble",
             "Opponents in time trouble",
             "Score in time trouble",
-            "Difference in time trouble",
+            "vs rating in time trouble",
             "Score otherwise",
-            "Difference otherwise",
+            "vs rating otherwise",
         ],
         rows=rows,
         formats=["text", "int", "pct", "pct", "pct", "signed_pct", "pct", "signed_pct"],
+        key_columns=[0, 2, 4, 6],
         note=(
             "Time trouble: after one of your moves your clock was below 10% of the starting time (at least 5 s), "
             "or you ran out of time. Opponents are measured in the same games. Scores cover games with ratings; "
-            "Difference is your score minus the Elo expected score, per game."
+            "vs rating is your score minus what your rating predicts, per game. (The Engine review counts a move as "
+            "short of time below 15% of the clock: a wider net for single moves.)"
         ),
     )
 
@@ -832,10 +841,14 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
 
     main = classes[0]
     profile = think_profile(main.clocks)
-    tables = [trouble_table(classes), flag_table(classes), pace_table(classes), think_table(main.time_class, profile)]
+    tables = [trouble_table(classes), flag_table(classes), pace_table(classes)]
     charts = [trouble_chart(classes)]
     if any(row[1] is not None for row in profile):
-        charts.append(think_chart(main.time_class, profile))
+        chart = think_chart(main.time_class, profile)
+        chart.table = think_table(main.time_class, profile)
+        charts.append(chart)
+    else:
+        tables.append(think_table(main.time_class, profile))
 
     summary = (
         f"In {main.time_class} ({main.n} games with clocks) you got into time trouble in {pct(main.trouble_rate)} "

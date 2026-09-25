@@ -75,7 +75,7 @@ def test_games_without_ratings_do_not_break_anything():
     games = [make_game(outcome="win" if i % 3 else "loss", my_rating=None, opp_rating=None) for i in range(40)]
     mr = run(games)
     kpis = {k.label: k.value for k in mr.kpis}
-    assert kpis["Expected score"] is None and kpis["Score vs expected"] is None and kpis["Rating equivalent"] is None
+    assert kpis["Rating predicts"] is None and kpis["Score vs rating"] is None and kpis["Rating equivalent"] is None
     assert "no ratings" in mr.summary
     assert not [i for i in mr.insights if i.kind != "observation"]
     buckets = next(t for t in mr.tables if t.title == "By opponent strength")
@@ -240,8 +240,8 @@ def test_time_control_table_and_pools():
     assert (row["Games"], row["W/D/L"]) == (5, "3/1/1")
     assert row["Score"] == pytest.approx(3.5 / 5)
     exp = [g.expected_score for g in blitz_all]
-    assert row["Expected"] == pytest.approx(sum(exp) / 5)
-    assert row["Difference"] == pytest.approx(sum(g.score - e for g, e in zip(blitz_all, exp)) / 5)
+    assert row["Rating predicts"] == pytest.approx(sum(exp) / 5)
+    assert row["vs rating"] == pytest.approx(sum(g.score - e for g, e in zip(blitz_all, exp)) / 5)
     # rating history uses rated games only: first game has no pre-game rating, so it starts from 1510
     assert (row["Current rating"], row["Change"], row["Peak"]) == (1512, 2, 1525)
     assert len(table.formats) == len(table.columns)
@@ -263,7 +263,8 @@ def test_rating_chart_months_union_with_gaps():
     kpis = {k.label: k for k in mr.kpis}
     assert kpis["Blitz rating"].value == 1454 and kpis["Rapid rating"].value == 1653
     assert "Bullet rating" not in kpis  # fewer than 10 games
-    assert kpis["Peak rating"].value == 1454 and "blitz" in kpis["Peak rating"].hint
+    assert kpis["Peak blitz rating"].value == 1454
+    assert "rated games" in kpis["Blitz rating"].hint
 
 
 def test_time_control_that_stands_out_is_one_claim():
@@ -285,7 +286,7 @@ def test_time_control_that_stands_out_is_one_claim():
     worst = [i for i in run(blitz_only_off).insights if "time-control" in i.id]
     assert [i.id for i in worst] == ["results.weakness.time-control-blitz"]
     assert any("increment" in s for s in worst[0].study)
-    bar = next(c for c in mr.charts if c.title == "Score vs expected by time control")
+    bar = next(c for c in mr.charts if c.title == "Score vs rating by time control")
     assert bar.labels == ["Blitz", "Rapid"] and bar.series[0].values == pytest.approx([14 / 40 - 0.5, 0.25])
 
 
@@ -307,19 +308,22 @@ def test_rating_trend_rising_is_an_observation():
     mr = run(games)
     trend = next(i for i in mr.insights if "trend-blitz" in i.id)
     assert trend.kind == "observation" and trend.id == "results.observation.trend-blitz"
-    assert "up about 135 points" in trend.title  # slope 1.5/day x 90 days
+    # the title gives the actual change, first to last; the trend line (slope 1.5/day x 90 days) is in the detail
+    assert trend.title == "Your blitz rating went from 1500 to 1587 in the last 90 days (+87)"
+    assert "a straight line through all those games says +135" in trend.detail
     assert mr.stats["trends"]["Blitz"]["change"] == pytest.approx(135.0)
+    assert "Keep doing what works" not in " ".join(trend.study)
 
 
 def test_rating_trend_falling_and_stable_are_observations():
     falling = [make_game(outcome="loss", my_rating=1600 - 2 * i, opp_rating=1600, end_time=at(i)) for i in range(20)]
     ins = next(i for i in run(falling).insights if "trend" in i.id)
-    assert ins.kind == "observation" and "slipped" in ins.title
+    assert ins.kind == "observation" and ins.title.endswith("(−38)")
     stable = [
         make_game(outcome="win" if i % 2 else "loss", my_rating=1500 + (i % 2), end_time=at(i)) for i in range(20)
     ]
     ins = next(i for i in run(stable).insights if "trend" in i.id)
-    assert ins.kind == "observation" and "stable" in ins.title
+    assert ins.kind == "observation" and ins.title.endswith("(+1)") and "plateau" in ins.study[0]
     old = [make_game(my_rating=1500, end_time=at(i)) for i in range(20)] + [make_game(end_time=at(400))]
     assert not [i for i in run(old).insights if "trend" in i.id]  # nothing in the last 90 days
 
@@ -400,11 +404,12 @@ def test_accuracy_observation_needs_twenty_reviewed_games():
     ins = next(i for i in mr.insights if i.id == "results.observation.chesscom-accuracy")
     assert ins.kind == "observation" and "85.0 in wins, 65.0 in losses" in ins.title
     assert ins.example_games and set(ins.example_games) <= {g.url for g in games if g.outcome == "loss"}
-    table = next(t for t in mr.tables if t.title.startswith("chess.com accuracy"))
+    assert "chess.com Game Review accuracy" in ins.title
+    table = next(t for t in mr.tables if t.title.startswith("chess.com Game Review accuracy"))
     assert table.rows == [["Blitz", 20, pytest.approx(77.0), 85.0, 65.0, pytest.approx(74.0)]]
     fewer = run(games[1:])
     assert "results.observation.chesscom-accuracy" not in ids(fewer)
-    assert any(t.title.startswith("chess.com accuracy") for t in fewer.tables)
+    assert any(t.title.startswith("chess.com Game Review accuracy") for t in fewer.tables)
 
 
 # --------------------------------------------------------------------------- options & real data

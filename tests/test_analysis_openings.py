@@ -9,7 +9,7 @@ from chess_insights.analysis import openings
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
 from chess_insights.stats import shrink
-from factories import make_game
+from factories import make_game, all_tables
 
 CARO = ["e4", "c6", "d4", "d5", "e5", "Bf5", "Nf3", "e6", "Be2", "c5"]
 FRENCH = ["e4", "e6", "d4", "d5", "Nc3", "Bb4", "e5", "c5"]
@@ -96,7 +96,7 @@ def insight(mr: ModuleResult, id_: str):
 
 
 def table(mr: ModuleResult, title: str):
-    return next(t for t in mr.tables if t.title == title)
+    return next(t for t in all_tables(mr) if t.title == title)
 
 
 # --------------------------------------------------------------------------- empty / exclusions / missing data
@@ -128,7 +128,7 @@ def test_games_without_ratings():
     assert not [i for i in mr.insights if i.kind != "observation"]
     row = dict(zip(table(mr, "As Black").columns, table(mr, "As Black").rows[0]))
     assert row["Games"] == 22 and row["Score"] == pytest.approx(2 / 22)
-    assert row["Expected"] is None and row["Difference"] is None and row["Adjusted"] is None and row["± (95%)"] is None
+    assert row["Rating predicts"] is None and row["vs rating"] is None and row["Fair estimate"] is None and row["± (95%)"] is None
     assert mr.charts == []
 
 
@@ -172,9 +172,9 @@ def test_group_row_values():
     all_games = games + [short, flagged]
     e = 1 / (1 + 10 ** (100 / 400))
     assert row["Games"] == 10 and row["W/D/L"] == "3/1/6" and row["Share"] == 1.0
-    assert row["Score"] == pytest.approx(3.5 / 10) and row["Expected"] == pytest.approx(e)
-    assert row["Difference"] == pytest.approx(3.5 / 10 - e)
-    assert row["Adjusted"] == pytest.approx(shrink(3.5 / 10 - e, 10, 0.0, 10.0))
+    assert row["Score"] == pytest.approx(3.5 / 10) and row["Rating predicts"] == pytest.approx(e)
+    assert row["vs rating"] == pytest.approx(3.5 / 10 - e)
+    assert row["Fair estimate"] == pytest.approx(shrink(3.5 / 10 - e, 10, 0.0, 10.0))
     assert row["Avg moves"] == pytest.approx(sum(g.full_moves for g in all_games) / 10)
     # the default factory loss is a 20-ply resignation (short); the timeout doesn't count
     assert row["Short losses"] == 5
@@ -250,8 +250,8 @@ def test_bad_opening_with_enough_games_is_a_weakness():
     assert ins is not None and ins.category == "openings"
     assert ins.title == "You score less with the Caro-Kann Defense than with your other Black openings"
     assert ins.detail.startswith(
-        "You score 20% in 30 games where 50% was expected (−0.30 points per game against your rating); "
-        "in your other 30 games as Black, 0.00. The gap is −0.30 points per game"
+        "You score 20% in 30 games where your rating predicts 50%: 30 points per 100 games below your rating, "
+        "while your other 30 games as Black score level with your rating. The gap is 30 points per 100 games"
     )
     recent_losses = sorted((g for g in caro if g.outcome == "loss"), key=lambda g: g.end_time, reverse=True)
     assert ins.example_games == [g.url for g in recent_losses[:5]]
@@ -325,16 +325,49 @@ def test_early_losses_not_repeated_for_a_family_already_flagged():
 
 
 def test_repertoire_breadth_observations():
+    # Counted on your own moves: five first moves as White is broad; Black always answers 1.e4 with 1...c6.
     white = []
-    for i in range(10):
-        white += [make_game(color="white", opening_family=f"System {i}", opening=None) for _ in range(3)]
+    for i, first in enumerate(["e4", "d4", "c4", "Nf3", "g3"]):
+        white += [make_game(color="white", opening_family=f"System {i}", opening=None, moves_san=[first, "e5"]) for _ in range(6)]
     black = play("caro", 12, 12)
     mr = run(white + black)
     broad = insight(mr, "openings.observation.breadth-white")
-    assert broad.kind == "observation" and "very broad" in broad.title and "8 openings" in broad.title
+    assert broad.kind == "observation" and broad.title == "As White you mix 4 first moves to cover 80% of your games"
+    assert "1.d4 20%" in broad.detail and "one first move" in broad.study[0]
     compact = insight(mr, "openings.observation.breadth-black")
-    assert "compact" in compact.title and "1 opening cover" in compact.title
-    assert mr.stats["breadth"] == {"white": 8, "black": 1}
+    assert compact.title == "As Black you answer 1.e4 mainly with 1 reply" and "1...c6 100%" in compact.detail
+    assert "compact repertoire" in compact.study[0]
+    assert mr.stats["breadth"] == {"white": 4, "black": 1}
+
+
+def test_breadth_ignores_opening_names_your_opponent_chose():
+    # 1.e4 in every White game: meeting the Sicilian, the French and the Caro-Kann is not a broad repertoire
+    white = [
+        make_game(color="white", opening_family=fam, moves_san=moves, outcome=o)
+        for fam, moves in (("Sicilian Defense", SICILIAN), ("French Defense", FRENCH), ("Caro-Kann Defense", CARO))
+        for o in ("win", "loss") * 10
+    ]
+    ins = insight(run(white), "openings.observation.breadth-white")
+    assert ins.title == "As White you open with 1.e4 in 100% of your games"
+
+
+def test_choice_points_compare_your_own_moves_and_advise_the_better_one():
+    # After 1.e4 e5 2.Nf3 Nc6 you play 3.Bc4 (the Italian, scoring well) or 3.Bb5 (the Ruy Lopez, scoring badly)
+    ruy = ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6", "Ba4", "Nf6"]
+    italian = play("italian", 24, 6)
+    ruy_games = [
+        make_game(color="white", opening_family="Ruy Lopez Opening", opening="Ruy Lopez Opening: Morphy Defense",
+                  moves_san=ruy * 4, outcome="win" if i % 5 == 0 else "loss")
+        for i in range(30)
+    ]
+    mr = run(italian + ruy_games)
+    choices = table(mr, "Your choices at key moves")
+    rows = {r[1]: r for r in choices.rows}
+    assert rows["3.Bc4"][0] == "1.e4 e5 2.Nf3 Nc6" and rows["3.Bc4"][2] == 30 and rows["3.Bb5"][2] == 30
+    ins = insight(mr, "openings.weakness.white.ruy-lopez-opening")
+    assert ins is not None
+    assert ins.study[0].startswith("After 1.e4 e5 2.Nf3 Nc6 you have a choice: 3.Bc4 scores 80% in 30 games")
+    assert "Play 3.Bc4" in ins.study[0]
 
 
 def test_bh_adjustment_is_recorded_for_every_tested_family():
@@ -413,3 +446,16 @@ def test_quick_resigner_has_no_early_loss_weaknesses():
     tests = mr.stats["early_loss_tests"]
     assert tests["black:French Defense"]["short_loss_share"] == 1.0 and tests["black:French Defense"]["gap"] == 0.0
     assert all(not t["significant"] for t in tests.values())
+
+
+def test_openings_your_opponent_chose_are_labelled_vs_and_never_your_best():
+    assert openings.display_name("Sicilian Defense", "white") == "vs Sicilian Defense"
+    assert openings.display_name("Sicilian Defense", "black") == "Sicilian Defense"
+    assert openings.display_name("Italian Game", "black") == "vs Italian Game"
+    sicilian = [make_game(color="white", opening_family="Sicilian Defense", moves_san=SICILIAN, outcome="win")
+                for _ in range(20)]  # your opponents' choice, scoring very well for you
+    mr = run(sicilian + play("italian", 10, 10))
+    kpis = {k.label: k.value for k in mr.kpis}
+    assert kpis.get("Best of your openings") != "Sicilian Defense (White)"
+    white = table(mr, "As White")
+    assert "vs Sicilian Defense" in [r[0] for r in white.rows]
