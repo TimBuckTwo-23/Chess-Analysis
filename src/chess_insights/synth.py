@@ -274,8 +274,8 @@ class Persona:
     # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
     endgame_error_factor: float = 4.0
     # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
-    throw_win_share: float = 0.50
-    opponent_throw_win_share: float = 0.05
+    throw_win_share: float = 0.45
+    opponent_throw_win_share: float = 0.02
 
 
 DEFAULT_PERSONA = Persona()
