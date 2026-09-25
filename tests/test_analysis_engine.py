@@ -387,7 +387,6 @@ def clustered_world(seed: int, *, n_games: int = 120, n: int = 60, shape: float 
     Each side of each game gets its own error intensity from a Gamma(shape) distribution (small shape = heavy
     clustering); you and your opponents share it unless ``my_factor`` scales yours.
     """
-    import math
     import random
 
     from chess_insights.models import PlyEval
