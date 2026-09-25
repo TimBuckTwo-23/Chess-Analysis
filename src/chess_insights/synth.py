@@ -158,7 +158,16 @@ _BLACK_VS_D4 = (("qgd_harrwitz", 0.35), ("qgd_exchange", 0.30), ("london", 0.35)
 
 @dataclass
 class Persona:
-    """A fictional chess.com player. Score shifts are points per game relative to the Elo expectation."""
+    """A fictional chess.com player and the traits planted in their games.
+
+    ``*_shift`` values are points per game added to the Elo expectation when a game's intended
+    result is drawn. They add up where contexts overlap (a late-night Caro-Kann straight after a
+    loss gets three), and games with none of the planted contexts get ``baseline_shift``: a real
+    player's rating already prices in their weaknesses, so their ordinary games sit a little above
+    expectation and the rating stays roughly stable. The defaults are calibrated so the planted
+    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.10,
+    rapid +0.08 (blitz about 0, bullet -0.03).
+    """
 
     username: str = "demo_player"
     start_ratings: dict[str, int] = field(
@@ -167,35 +176,33 @@ class Persona:
     time_class_mix: dict[str, float] = field(
         default_factory=lambda: {"blitz": 0.60, "rapid": 0.28, "bullet": 0.10, "daily": 0.02}
     )
-    # Score shift for every game of a time class (T8: stronger at rapid than at blitz).
+    # T8: stronger at rapid than at the fast time controls
     time_class_shift: dict[str, float] = field(
-        default_factory=lambda: {"blitz": -0.02, "rapid": 0.07, "bullet": 0.0, "daily": 0.0}
+        default_factory=lambda: {"blitz": -0.01, "rapid": 0.09, "bullet": -0.03, "daily": 0.0}
     )
-    # Shift for games with none of the planted contexts. A real player's rating already prices in
-    # their weaknesses, so their "normal" games sit slightly above expectation and the rating stays stable.
-    baseline_shift: float = 0.04
+    baseline_shift: float = 0.09
     # T1: Caro-Kann as Black against 1.e4
     caro_kann_share: float = 0.38
-    caro_kann_shift: float = -0.18
-    # T2: Italian Game as White
+    caro_kann_shift: float = -0.155
+    # T2: Italian Game as White (share of all White games; White always opens 1.e4)
     italian_share: float = 0.45
-    italian_shift: float = 0.12
+    italian_shift: float = 0.18
     # T3: blitz clock handling
     blitz_opening_time_factor: float = 2.1  # time used on moves 1-15 relative to a typical opponent
     blitz_flag_share: float = 0.28  # share of planned blitz losses that end on the clock
-    low_clock_error_factor: float = 2.2  # error rate multiplier with < 10% of the clock left
+    low_clock_error_factor: float = 2.2  # error-rate multiplier with less than 10% of the clock left
     # T4: tilt
-    tilt_shift: float = -0.12
+    tilt_shift: float = -0.14
     tilt_window_min: float = 15.0
     quick_requeue_after_loss: float = 0.8
     # T5: late-night play (games starting 23:00-03:00 UTC)
-    late_night_shift: float = -0.10
+    late_night_shift: float = -0.115
     late_session_share: float = 0.22
-    # T6: endgame error rate relative to the middlegame
+    # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
     endgame_error_factor: float = 2.5
-    # T7: share of non-wins in which the player first had a clearly winning position (opponents: lower)
-    throw_win_share: float = 0.30
-    opponent_throw_win_share: float = 0.08
+    # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
+    throw_win_share: float = 0.40
+    opponent_throw_win_share: float = 0.05
 
 
 DEFAULT_PERSONA = Persona()
@@ -278,7 +285,7 @@ TIME_CONTROLS: dict[str, tuple[tuple[str, float], ...]] = {
 _DRAW_RATE = {"bullet": 0.05, "blitz": 0.06, "rapid": 0.08, "daily": 0.10}
 # P(a decisive game ends on the clock | player loses), P(... | player wins); blitz losses use the persona.
 _FLAG_SHARE = {"bullet": (0.35, 0.30), "blitz": (0.28, 0.08), "rapid": (0.07, 0.05), "daily": (0.0, 0.0)}
-_RESIGN_P = {"bullet": 0.25, "blitz": 0.40, "rapid": 0.50, "daily": 0.55}
+_RESIGN_P = {"bullet": 0.20, "blitz": 0.30, "rapid": 0.40, "daily": 0.45}
 _OPENING_TIME_FRACTION = {"bullet": 0.22, "blitz": 0.20, "rapid": 0.24}  # clock share a typical player uses on moves 1-15
 _PLAYER_OPENING_FACTOR = {"bullet": 1.25, "rapid": 1.25}  # blitz comes from the persona (T3)
 _SESSION_SIZE_WEIGHTS = (15, 20, 20, 15, 10, 8, 6, 6)  # 1..8 games
@@ -855,7 +862,7 @@ def _is_endgame(board: chess.Board) -> bool:
 class _Played:
     index: int
     sans: list[str]
-    clocks: list[int]  # tenths of a second on the mover's clock after each ply
+    clocks: list[int]  # [%clk] in tenths: live = mover's clock after the ply; daily = time spent / 10 (as chess.com archives it)
     think: list[int]  # tenths of a second spent on each ply
     final_think: int  # tenths spent by the side to move before the game ended (flag / resignation / agreement)
     end_kind: str  # checkmate | resignation | timeout | agreement | repetition | stalemate | insufficient | 50move | timevsinsufficient
@@ -892,24 +899,37 @@ class _Director:
             return "drawer"
         return "winner" if side == self.winner else "loser"
 
-    def error_multiplier(self, side: chess.Color, score: int, move_no: int) -> float:
+    def error_multiplier(self, side: chess.Color, score: int, move_no: int, endgame: bool) -> tuple[float, float]:
+        """(blunder multiplier, mistake/inaccuracy multiplier) for ``side``, whose eval is ``score``."""
         role = self.role(side)
         if self.plan.finish == "flag" and self.swing_phase == 2:
             if role == "winner":
-                return 0.35
-            return 2.0 if score >= 150 else 0.6  # the side that will flag keeps the board level
-        if role == "winner":
-            return 0.5 if score < 150 else 0.3
+                return 0.2, 0.35
+            m = 2.0 if score >= 150 else 0.6  # the side that will flag keeps the board level
+            return m, m
+        if role == "winner":  # rarely throws the game away; ordinary mistakes still happen
+            return (0.2, 0.5) if score < 150 else (0.15, 0.3)
         if role == "loser":
-            ramp = _clamp((move_no - 10) / 22.0, 0.0, 1.0)
-            if score >= 150:
-                return 2.5 + 2.5 * ramp
-            if score > -250:
-                return 1.0 + 2.5 * ramp
-            return 1.0
-        if score >= 100:
-            return 2.0
-        return 0.3 if score <= -100 else 0.35
+            ramp = _clamp((move_no - 12) / 28.0, 0.0, 1.0)
+            if side == self.player and not endgame:
+                ramp *= 0.6  # the player tends to hold the middlegame and go wrong later (T6)
+            elif side != self.player and endgame:
+                ramp *= 0.5  # opponents mostly go wrong before the endgame
+            if score >= 150:  # ahead against the script: gives it back
+                m = 2.5 + 2.5 * ramp
+            elif score > -250:
+                m = 1.0 + 2.5 * ramp
+            else:
+                m = 1.0
+            return m, m
+        if score >= 100:  # a draw is on the cards: the side that got ahead lets it go again
+            return 3.0, 3.0
+        return (0.15, 0.3) if score <= -100 else (0.2, 0.35)
+
+    def error_floor(self, side: chess.Color) -> Optional[int]:
+        """Lowest score (cp, own view) an error may leave ``side`` with: the side meant to win, or
+        both sides in a game meant to be drawn, never blunder into a clearly lost position."""
+        return -100 if self.role(side) in ("winner", "drawer") else None  # margin for the shallow search
 
     def is_intended_winner(self, side: chess.Color) -> bool:
         return self.winner is not None and side == self.winner
@@ -983,22 +1003,28 @@ class _GamePlayer:
 
     # ---- errors ----------------------------------------------------------
     def _error_kind(self, side: chess.Color, score: int, move_no: int, ply: int, board: chess.Board, clock: int) -> Optional[str]:
+        """Draw this move's quality: None (a good move), "inaccuracy", "mistake" or "blunder"."""
         is_player = side == self.player
-        mult = self.director.error_multiplier(side, score, move_no)
+        endgame = _is_endgame(board)
+        blunder_role, other_role = self.director.error_multiplier(side, score, move_no, endgame)
+        context = 1.0  # phase, clock and opening effects shared by all error kinds
         if ply < len(self.book) + 12:
-            mult *= 0.5
-        elif _is_endgame(board):
-            mult *= self.persona.endgame_error_factor if is_player else 1.0
+            context *= 0.5
+        elif endgame and is_player:
+            context *= self.persona.endgame_error_factor
         if self.live:
             seconds_left, base = clock / 10.0, float(self.plan.base)
+            low = self.persona.low_clock_error_factor if is_player else 1.3
             if seconds_left < max(10.0, 0.10 * base):
-                mult *= self.persona.low_clock_error_factor if is_player else 1.3
+                context *= low
             elif seconds_left < 0.20 * base:
-                mult *= 1.0 + 0.4 * (self.persona.low_clock_error_factor - 1.0) if is_player else 1.1
+                context *= 1.0 + 0.4 * (low - 1.0)
         if self.caro and is_player and ply < len(self.book) + 16:
-            mult *= 1.6  # comes out of the Caro-Kann worse than it should
-        pb, pm, pi = _BASE_ERROR_RATES
-        pb, pm, pi = pb * mult, pm * mult, pi * math.sqrt(mult)
+            context *= 1.6  # comes out of the Caro-Kann worse than it should
+        base_b, base_m, base_i = _BASE_ERROR_RATES
+        pb = base_b * blunder_role * context
+        pm = base_m * other_role * context
+        pi = base_i * math.sqrt(other_role * context)
         total = pb + pm + pi
         if total > 0.8:
             pb, pm, pi = (x * 0.8 / total for x in (pb, pm, pi))
@@ -1011,15 +1037,19 @@ class _GamePlayer:
             return "inaccuracy"
         return None
 
-    def _choose(self, board: chess.Board, cands: list[Candidate], kind: Optional[str]) -> tuple[chess.Move, float]:
-        """Pick a move of the requested quality; returns it with its win-percentage drop."""
+    def _choose(
+        self, board: chess.Board, cands: list[Candidate], kind: Optional[str], floor: Optional[int]
+    ) -> tuple[chess.Move, float]:
+        """Pick a move of the requested quality; returns it with its win-percentage drop.
+
+        ``floor``: an erring side never picks a move that leaves it below this score (cp).
+        """
         rng = self.rng
         best_wp = _win_pct(cands[0][1])
-        prefer_repeat = self.director.wants_draw and board.fullmove_number >= 15
         if kind is None:
             ok = [(m, best_wp - _win_pct(s)) for m, s in cands if best_wp - _win_pct(s) < 4.0]
-            if prefer_repeat and rng.random() < 0.6:
-                for m, drop in ok:
+            if self.director.wants_draw and board.fullmove_number >= 15 and rng.random() < 0.6:
+                for m, drop in ok:  # steer towards a repetition
                     board.push(m)
                     repeats = board.is_repetition(2)
                     board.pop()
@@ -1028,12 +1058,17 @@ class _GamePlayer:
             if len(ok) == 1 or rng.random() < 0.72:
                 return ok[0]
             return rng.choice(ok[1:])
+        kinds = ("blunder", "mistake", "inaccuracy")
         pool = cands
         for attempt in range(2):
             ref = _win_pct(pool[0][1])
-            for k in ("blunder", "mistake", "inaccuracy")[("blunder", "mistake", "inaccuracy").index(kind) :]:
+            for k in kinds[kinds.index(kind) :]:
                 lo, hi = _ERROR_BANDS[k]
-                band = [(m, ref - _win_pct(s)) for m, s in pool if lo <= ref - _win_pct(s) < hi]
+                band = [
+                    (m, ref - _win_pct(s))
+                    for m, s in pool
+                    if lo <= ref - _win_pct(s) < hi and (floor is None or s >= floor)
+                ]
                 if band:
                     return rng.choice(band)
             if attempt == 0:
@@ -1052,8 +1087,8 @@ class _GamePlayer:
             else:
                 return False
         if mated_soon:
-            p *= 0.6  # some players let the mate happen
-        if self.director.is_intended_winner(side):
+            p *= 0.4  # many club players let the mate happen
+        if self.director.is_intended_winner(side) or self.director.wants_draw:
             p *= 0.2  # stubborn: keeps hoping for a swindle
         return self.rng.random() < p
 
@@ -1109,7 +1144,7 @@ class _GamePlayer:
                     break
                 last_score[side] = score
                 kind = self._error_kind(side, score, move_no, ply, board, clock[side])
-                move, drop = self._choose(board, cands, kind)
+                move, drop = self._choose(board, cands, kind, self.director.error_floor(side))
             sans.append(board.san(move))
             moves.append(move)
             board.push(move)
@@ -1119,7 +1154,7 @@ class _GamePlayer:
                 clock[side] = clock[side] - think + plan.inc * 10
                 clocks.append(clock[side])
             else:
-                clocks.append(DAILY_SECONDS * 10 - think)
+                clocks.append(think // 10)  # archived daily games store time spent / 10 in [%clk]
 
         if not self.live and plan.max_duration is not None:
             total = sum(thinks) + final_think
@@ -1128,7 +1163,7 @@ class _GamePlayer:
                 scale = budget / total
                 thinks = [max(1, int(t * scale)) for t in thinks]
                 final_think = int(final_think * scale)
-                clocks = [DAILY_SECONDS * 10 - t for t in thinks]
+                clocks = [t // 10 for t in thinks]
 
         accuracy = None
         if plan.reviewed and drops[chess.WHITE] and drops[chess.BLACK]:
@@ -1424,21 +1459,22 @@ def _assemble(
             t = end + timedelta(seconds=int(p.gap_after))
         free_at = times[games[-1].index][1]
 
-    # 2. ratings evolve with the actual results, in the order games finished (one pool per time class)
+    # 2. ratings evolve with the actual results, in the order games finished (one pool per time class).
+    # chess.com shows post-game ratings; changes are symmetric so the pre-game ratings can be recovered.
     fallback = int(sum(persona.start_ratings.values()) / len(persona.start_ratings)) if persona.start_ratings else 1500
-    rating = {tc: float(persona.start_ratings.get(tc, fallback)) for tc in TIME_CONTROLS}
+    rating = {tc: int(persona.start_ratings.get(tc, fallback)) for tc in TIME_CONTROLS}
     order = sorted(plans, key=lambda p: (times[p.index][1], p.index))
     shown: dict[int, tuple[int, int]] = {}
     for p in order:
         rec = played[p.index]
         mine = rating[p.time_class]
-        theirs = mine + p.offset
+        theirs = max(100, mine + p.offset)
         score = 0.5 if rec.winner is None else float(rec.winner == p.color)
-        delta = K_FACTOR * (score - _expected(p.offset)) if p.rated else 0.0
-        mine_after, theirs_after = max(100.0, mine + delta), max(100.0, theirs - delta)
+        delta = int(round(K_FACTOR * (score - _expected(theirs - mine)))) if p.rated else 0
+        delta = min(max(delta, 100 - mine), theirs - 100)  # chess.com ratings never drop below 100
+        mine_after, theirs_after = mine + delta, theirs - delta
         rating[p.time_class] = mine_after
-        me, opp = int(round(mine_after)), int(round(theirs_after))
-        shown[p.index] = (me, opp) if p.color == "white" else (opp, me)
+        shown[p.index] = (mine_after, theirs_after) if p.color == "white" else (theirs_after, mine_after)
 
     # 3. ids increase with start time, like chess.com's
     base_ts = window_start.timestamp()

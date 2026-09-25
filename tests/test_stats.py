@@ -74,3 +74,12 @@ def test_formatting_helpers():
     assert stats.median([3, 1, 2]) == 2 and stats.median([1, 2, 3, 4]) == 2.5 and stats.median([]) is None
     assert stats.score_to_elo_diff(0.0) == 0.0
     assert stats.score_to_elo_diff(0.1) == pytest.approx(-400 * math.log10(1 / 0.6 - 1))  # 60% score = +70 Elo
+
+
+def test_mean_test_min_sd_keeps_small_streaky_samples_honest():
+    losses = [-0.5] * 8  # eight straight losses where 50% was expected
+    naive = stats.mean_test(losses)
+    floored = stats.mean_test(losses, min_sd=stats.SCORE_RESIDUAL_SD)
+    assert naive.p_value < 1e-6  # zero variance -> fake certainty
+    assert 0.001 < floored.p_value < 0.01
+    assert stats.mean_test([0.3, -0.7] * 40, min_sd=0.01).se == stats.mean_test([0.3, -0.7] * 40).se

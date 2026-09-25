@@ -61,11 +61,19 @@ class MeanTest:
         return clamp(1.0 - self.p_value)
 
 
-def mean_test(values: Iterable[float], min_se: float = 1e-9) -> MeanTest:
+# Per-game standard deviation of (score - expected) when a player performs exactly to
+# their rating with ~10% draws: sqrt(E(1-E) - draws/4) ~ 0.47 near E = 0.5. Used as a
+# floor so that streaky small samples (8 straight losses) don't produce se ~ 0, p ~ 0.
+SCORE_RESIDUAL_SD = 0.45
+
+
+def mean_test(values: Iterable[float], min_se: float = 1e-9, min_sd: float = 0.0) -> MeanTest:
     """z-test of mean(values) against 0 (normal approximation).
 
-    Typical use: ``mean_test(g.score - g.expected_score for g in games)`` — is the
-    player over/under-performing their rating in this subset?
+    Typical use: ``mean_test((g.score - g.expected_score for g in games), min_sd=SCORE_RESIDUAL_SD)``
+    — is the player over/under-performing their rating in this subset? ``min_sd``
+    floors the per-item standard deviation so small, streaky samples keep honest
+    p-values.
     """
     xs = [float(v) for v in values if v is not None and not math.isnan(v)]
     n = len(xs)
@@ -75,7 +83,7 @@ def mean_test(values: Iterable[float], min_se: float = 1e-9) -> MeanTest:
     if n == 1:
         return MeanTest(1, m, float("inf"), 0.0, 1.0)
     var = sum((x - m) ** 2 for x in xs) / (n - 1)
-    se = max(math.sqrt(var / n), min_se)
+    se = max(math.sqrt(max(var, min_sd**2) / n), min_se)
     z = m / se
     p = 2.0 * (1.0 - normal_cdf(abs(z)))
     return MeanTest(n, m, se, z, p)
