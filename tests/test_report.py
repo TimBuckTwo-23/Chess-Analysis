@@ -1382,7 +1382,10 @@ def test_write_report_survives_bad_text_and_never_truncates(report, tmp_path, mo
     good = write_report(report, tmp_path / "bob")
     before = {p: p.read_bytes() for p in good}
     # a renderer error leaves every earlier file exactly as it was, and no temporary files behind
-    monkeypatch.setitem(report_pkg.FORMATS, "json", ("json", lambda r: (_ for _ in ()).throw(TypeError("boom"))))
+    def broken(_report):
+        raise TypeError("boom")
+
+    monkeypatch.setitem(report_pkg.FORMATS, "json", ("json", broken))
     with pytest.raises(TypeError, match="boom"):
         write_report(report, tmp_path / "bob")
     assert {p: p.read_bytes() for p in good} == before

@@ -27,6 +27,10 @@ their clocks / how they end):
     probability that a loss by mate or resignation becomes a loss on time.
 ``"colour": ("black", -0.08)``
     points per game with that colour (on top of White's normal edge).
+``"play_on": 0.8``
+    probability that a loss the player would have resigned is played on instead, 10-30
+    more moves, to checkmate (a resignation habit: results are unchanged, but the player's
+    losses get longer and end in mate more often).
 ``"baseline": 0.03``
     points per game added to every game. The null world anchors each game's true
     expectation to the *current* rating, so on its own a planted weakness makes the
@@ -82,7 +86,17 @@ LATE_NIGHT_HOURS = frozenset({23, 0, 1, 2})  # games started 23:00-03:00 UTC
 TILT_WINDOW = timedelta(minutes=15)
 DEFAULT_MAIN_SHARE = 0.40  # share of a colour's games in a planted opening family
 PLANT_KEYS = frozenset(
-    {"opening", "short_losses", "tilt_after_loss", "late_night", "time_trouble", "flagging", "colour", "baseline"}
+    {
+        "opening",
+        "short_losses",
+        "tilt_after_loss",
+        "late_night",
+        "time_trouble",
+        "flagging",
+        "colour",
+        "baseline",
+        "play_on",
+    }
 )
 
 
@@ -133,6 +147,20 @@ def _force_low_clock(prng: random.Random, clocks: list[float], side: int, base: 
     tail = mine[first:] or mine[-1:]
     for k, i in enumerate(tail):
         clocks[i] = round(min(clocks[i], low * (1.0 - 0.5 * k / len(tail))), 1)
+
+
+def _play_on(prng: random.Random, moves: list[str], clocks: list[float], base: int, inc: int) -> None:
+    """Extend a resigned game by 10-30 random moves and clocks, in place (the planted stream only)."""
+    board = chess.Board()
+    for san in moves:
+        board.push_san(san)
+    for _ in range(prng.randint(20, 60)):
+        legal = list(board.legal_moves)
+        if not legal:
+            break
+        moves.append(board.san_and_push(prng.choice(legal)))
+        prev = clocks[-2] if len(clocks) >= 2 else float(base)
+        clocks.append(round(max(0.0, prev - prng.uniform(0, 0.02) * base) + inc, 1))
 
 
 def _next_session_start(srng: random.Random, after: datetime) -> datetime:
@@ -256,6 +284,10 @@ def null_games(
         clocks = _clocks(rng, len(moves), base, inc, flag_side)
         if trouble:
             _force_low_clock(prng, clocks, 0 if color == "white" else 1, base)
+        if "play_on" in planted and outcome == "loss" and termination == "resignation":
+            if prng.random() < planted["play_on"]:  # the game is labelled a mate, as the player plays on to the end
+                _play_on(prng, moves, clocks, base, inc)
+                termination, my_code = "checkmate", "checkmated"
 
         # schedule: sessions of quick re-queues, independent of results
         duration = timedelta(seconds=min(2 * base + 80 * inc, 60 + len(moves) * base / 60))

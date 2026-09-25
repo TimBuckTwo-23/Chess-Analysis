@@ -403,6 +403,8 @@ class FamilyTest:
     test: MeanTest  # difference_test(family, rest): points per game, both against the Elo expectation
     prior_n: float = 10.0  # Thresholds.prior_n
     p_adjusted: float = 1.0  # weighted BH over every family tested
+    kind: Optional[InsightKind] = None  # the claim it supports, if any (family_tests fills it in)
+    retest_gap: Optional[float] = None  # the gap against the rest without the colour's other claimed families
 
     @property
     def effect(self) -> float:
@@ -410,12 +412,14 @@ class FamilyTest:
         return shrink(self.test.mean, self.group.summary.n_rated, 0.0, self.prior_n)
 
 
-def family_tests(families: list[OpeningGroup], by_colour: dict[Color, list[Game]], th: Thresholds) -> list[FamilyTest]:
+def family_tests(
+    families: list[OpeningGroup], by_colour: dict[Color, list[Game]], th: Thresholds
+) -> list[FamilyTest]:
     """Each named family with enough rated games vs the rest of that colour's games, weighted-BH adjusted.
 
     When a colour's games are exactly two groups (two families, or one family and some unnamed
     games), both comparisons are the same test; it is kept once, for the group whose own score
-    is further from its rating.
+    is further from its rating. ``FamilyTest.kind`` says which ones the module claims.
     """
     out: list[FamilyTest] = []
     for grp in families:
@@ -435,6 +439,25 @@ def family_tests(families: list[OpeningGroup], by_colour: dict[Color, list[Game]
     adjusted = weighted_bh_adjust([t.test.p_value for t in out], [t.group.summary.n_rated for t in out])
     for t, p in zip(out, adjusted, strict=True):
         t.p_adjusted = p
+        t.kind = _claim_kind(t, th)
+    # One real outlier moves the "rest" of every other family of that colour: a weak Caro-Kann makes
+    # the French look better than "the rest". Claims are accepted strongest first (smallest p-value);
+    # each later one must also hold against the rest without the colour's families accepted before it
+    # (with the same multiple-testing factor).
+    for color in ("white", "black"):
+        accepted: list[FamilyTest] = []
+        for t in sorted((t for t in out if t.group.color == color and t.kind), key=lambda t: t.test.p_value):
+            if accepted:
+                left_out = {id(g) for c in accepted for g in c.group.games} | {id(g) for g in t.group.games}
+                rest = summarize([g for g in by_colour[color] if id(g) not in left_out])
+                retest = FamilyTest(t.group, rest, difference_test(t.group.summary.test, rest.test), t.prior_n)
+                factor = t.p_adjusted / t.test.p_value if t.test.p_value > 0 else 1.0
+                retest.p_adjusted = min(1.0, retest.test.p_value * factor)
+                t.retest_gap = retest.test.mean
+                if rest.n_rated < th.min_family_games or _claim_kind(retest, th) != t.kind:
+                    t.kind = None
+                    continue
+            accepted.append(t)
     return out
 
 
@@ -446,7 +469,7 @@ def claimed_families(games: Sequence[Game], th: Thresholds) -> list[tuple[Color,
     """
     by_colour, families = _families(games, th)
     tests = family_tests([f for fs in families.values() for f in fs.values()], by_colour, th)
-    return [(t.group.color, t.group.label, kind) for t in tests if (kind := _claim_kind(t, th)) is not None]
+    return [(t.group.color, t.group.label, t.kind) for t in tests if t.kind is not None]
 
 
 def _claim_kind(t: FamilyTest, th: Thresholds) -> Optional[InsightKind]:
@@ -477,7 +500,7 @@ def score_insights(
         grp, s, rest, test = t.group, t.group.summary, t.rest, t.test
         n_eff = min(s.n_rated, rest.n_rated)
         significant, confidence = significance(test, th.min_family_games, t.p_adjusted, alpha=th.alpha, n=n_eff)
-        kind = _claim_kind(t, th)
+        kind = t.kind
         stats[f"{grp.color}:{grp.label}"] = {
             "p_value": test.p_value,
             "p_adjusted": t.p_adjusted,
@@ -486,6 +509,8 @@ def score_insights(
             "gap": test.mean,
             "rest_delta": rest.test.mean,
             "rest_n": rest.n_rated,
+            "gap_without_other_claims": t.retest_gap,
+            "claimed": kind,
         }
         if kind is None:
             continue

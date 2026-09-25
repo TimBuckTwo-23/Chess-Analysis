@@ -48,12 +48,14 @@ _ORDERED = re.compile(r"^(\d{1,9})([.)])(?=\s|$)")  # "1. e4": escape the dot, n
 # A web address where GitHub would autolink one: at the start, after a space or after ( * _ ~.
 # Escaping it character by character would leave the backslashes in the link, so it is written
 # as an explicit link instead.
-_BARE_URL = re.compile(r"(?:(?<=[\s(*_~])|^)(?:https?://|www\.(?=[A-Za-z0-9]))[^\s<>]+", re.I)
+_BARE_URL = re.compile(r"(?:(?<=[\s(*_~])|^)(?:(?i:https?://)|www\.(?=[A-Za-z0-9]))[^\s<>]+")
 _URL_TRAILING = ".,:;!?*_~'\""  # punctuation that ends a sentence rather than the address (as GitHub)
+_FTP = re.compile(r"(?<![A-Za-z0-9])((?i:ftp)):(?=//)")  # GitHub autolinks ftp:// too; only http(s) may link
 
 
 def _escape(text: str) -> str:
     text = _SPECIAL.sub(r"\\\1", text)
+    text = _FTP.sub(r"\1\\:", text)
     text = _UNDERSCORE.sub(r"\\_", text)
     text = _ENTITY.sub("&amp;", text)
     text = _HASH.sub(r"\\#", text)
@@ -109,6 +111,7 @@ def md_link(url: Any, label: str) -> str:
     # "|" would split a table cell even inside a link; the rest could end the destination early
     for char, code in (("\\", "%5C"), ("(", "%28"), (")", "%29"), ("<", "%3C"), (">", "%3E"), ("|", "%7C"), ("`", "%60")):
         target = target.replace(char, code)
+    target = _ENTITY.sub("&amp;", target)  # "&amp;" in a destination is decoded: keep the address as it is
     return f"[{_escape(' '.join(text_or_empty(label).split()))}]({target})"
 
 

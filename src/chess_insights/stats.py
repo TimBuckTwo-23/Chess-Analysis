@@ -176,11 +176,13 @@ ATTENUATION_RANGE = (RATING_NOISE_ATTENUATION, 1.0)
 # White-minus-Black gap of about 0.04 points per game is normal (the value shown in the
 # report and used by the synthetic demo player).
 WHITE_EDGE = 0.04
-# The edge is not known exactly: it is smaller in bullet and at lower ratings (about 0.03)
-# and larger in slower games and at higher ratings (0.05-0.06+). A colour claim must hold
-# for every edge in this range: "worse with Black" against the largest, "worse with White"
-# against the smallest (the same both-ends rule as ATTENUATION_RANGE).
-WHITE_EDGE_RANGE = (0.03, 0.06)
+# The edge is not known exactly: in club blitz and rapid it is about 0.03-0.05 (smaller in
+# bullet, larger in daily chess and for players rated 2000+, up to 0.06-0.08). A colour claim
+# must hold for every edge in this range: "worse with Black" against the largest, "worse with
+# White" against the smallest (the same both-ends rule as ATTENUATION_RANGE). A wider range
+# costs a lot of power: against 0.06, a real 8-point Black deficit is found in 28% of 600-game
+# reports instead of 50% (docs/METHODOLOGY.md, section 2).
+WHITE_EDGE_RANGE = (0.03, 0.05)
 
 
 def attenuated_expected(expected: float, attenuation: float = RATING_NOISE_ATTENUATION) -> float:
@@ -242,28 +244,41 @@ def combined_confidence(test: MeanTest, min_n: int) -> float:
 #   enough data (n >= min_n)  AND  (multiple-testing adjusted) p <= alpha  AND  a big enough effect
 #
 # The effect-size bar stays with each module (it is domain knowledge); this is the statistical
-# part. What is tested matters as much: a claim about a subset of games (an opening, a time of
-# day, a game-length band, an opponent-strength group) compares that subset with the player's
-# *other* games (``difference_test``), never with the rating's expectation alone, because a
-# rating that lags the player's current strength (an improving or declining player) shifts
-# every game and would otherwise turn into a list of specific "strengths" or "weaknesses".
+# part. What is tested matters as much:
+#
+# * a claim about a subset of games (an opening, a time of day, an opponent-strength group, a
+#   time control) compares that subset with the player's *other* games (``difference_test``),
+#   never with the rating's expectation alone: a rating that lags the player's current strength
+#   (an improving or declining player) shifts every game alike and would otherwise turn into a
+#   list of specific "strengths" or "weaknesses";
+# * a benchmark that is uncertain is bracketed, and the claim must hold at both ends
+#   (``ATTENUATION_RANGE`` for opponent strength, ``WHITE_EDGE_RANGE`` for colour);
+# * one fact is reported once: a colour gap that one opening accounts for, time trouble that is
+#   only the games lost on time, a session-length effect that is only playing on after losses,
+#   and the other family members of a claimed opening are re-tested without it;
+# * patterns that follow from the result or from resignation habits as much as from skill (how
+#   losses end, game length) are observations, never strengths or weaknesses.
+#
 # A report runs a few dozen tests. Each family of tests (every opening family, every
 # time class...) is Benjamini-Hochberg adjusted, so under pure noise a family makes a false
 # claim with probability about alpha when it can claim either direction, and alpha / 2 when
 # it only ever claims one (a two-sided p-value). The expected number of false claims per
 # report is roughly the sum over families, so the families are split into two tiers that keep
-# it near 0.2 on data with no real effects (tests/test_null_calibration.py) while still
+# it well under 0.3 on data with no real effects (tests/test_null_calibration.py) while still
 # finding realistic effects (tests/test_power.py):
 #
 # * ALPHA (0.05): the four claims that are both most useful and hardest to detect, because
 #   the effects are modest (5-15 points per 100 games) and only part of the games carry them:
 #   colour, opening families, playing on straight after a loss and late-night play. The last
 #   two are fixed in advance with their direction, so they use a one-sided p-value
-#   (``one_sided``).
-# * STRICT_ALPHA (0.01): everything else. Exploratory scans (other times of day, game length,
-#   time controls, opponent strength, session length), claims with a less direct reading (how
-#   losses end), and clock habits and quick losses in one opening, whose effects are large when
-#   they are real (paired or mirror tests with plenty of power).
+#   (``one_sided``); late night only when the player's time zone is known.
+# * STRICT_ALPHA (0.01): everything else. Exploratory scans (other times of day, time controls,
+#   opponent strength, session length), clock habits and quick losses in one opening, whose
+#   effects are large when they are real (paired or mirror tests with plenty of power), and the
+#   observations that must pass a test before they are shown at all (game length, how losses end).
+#
+# Confidence (``claim_confidence``) is not 1 - p: it is the most a p-value can support on even
+# prior odds (``evidence_confidence``), scaled down on small samples.
 ALPHA = 0.05
 STRICT_ALPHA = 0.01
 

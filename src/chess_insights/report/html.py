@@ -676,7 +676,8 @@ def _shorten(text: str, max_w: float, size: float = LABEL_PX) -> str:
 
 
 def _wrap(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 2) -> list[str]:
-    """Greedy word wrap into at most ``max_lines`` lines; the last line is ellipsized if needed."""
+    """Greedy word wrap into at most ``max_lines`` lines; if needed, the last line is cut in the
+    middle so it keeps the label's last words (see :func:`_shorten`)."""
     lines: list[str] = []
     cur = ""
     for word in text.split():

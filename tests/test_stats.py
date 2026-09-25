@@ -92,8 +92,12 @@ def test_significance_needs_min_n_finite_se_and_adjusted_p():
     assert ok and conf > 0.99
     assert stats.significance(strong, min_n=100) == (False, 0.0)  # too few samples
     ok, conf = stats.significance(strong, min_n=20, p_adjusted=0.03)
-    assert ok and conf == pytest.approx(0.97)
+    assert ok and conf == pytest.approx(stats.evidence_confidence(0.03)) and 0.75 < conf < 0.8  # not 1 - p = 0.97
     assert not stats.significance(strong, min_n=20, p_adjusted=0.03, alpha=stats.STRICT_ALPHA)[0]
+    # n: the effective sample size of a comparison (its smaller group), for the minimum and the confidence
+    assert stats.significance(strong, min_n=20, n=15) == (False, 0.0)
+    ok, small = stats.significance(strong, min_n=20, p_adjusted=0.03, n=20)
+    assert ok and small == pytest.approx(stats.evidence_confidence(0.03) * math.sqrt(0.5))
     assert not stats.significance(strong, min_n=20, p_adjusted=0.06)[0]
     assert not stats.is_significant(stats.MeanTest(30, -0.5, float("inf"), 0.0, 0.0), min_n=10)
     assert stats.STRICT_ALPHA < stats.ALPHA == 0.05
@@ -105,6 +109,31 @@ def test_significant_claims_always_clear_the_ranking_floor():
     borderline = stats.MeanTest(20, -0.2, 0.1, -1.97, 0.049)  # just significant at the minimum sample size
     ok, conf = stats.significance(borderline, min_n=20)
     assert ok and conf >= MIN_CONFIDENCE
+
+
+def test_evidence_confidence_is_the_sellke_bayarri_berger_bound():
+    # the most a p-value can support on even prior odds: 1 / (1 + (-e p ln p))
+    assert stats.evidence_confidence(0.05) == pytest.approx(0.711, abs=1e-3)
+    assert stats.evidence_confidence(0.01) == pytest.approx(0.889, abs=1e-3)
+    assert stats.evidence_confidence(0.001) == pytest.approx(0.982, abs=1e-3)
+    assert stats.evidence_confidence(0.5) == stats.evidence_confidence(1.0) == 0.5  # no evidence either way
+    assert stats.evidence_confidence(0.0) == 1.0
+    assert stats.claim_confidence(0.001, n=10, min_n=20) == 0.0
+
+
+def test_shrink_effect_pulls_noisy_effects_hardest():
+    assert stats.shrink_effect(-0.2, 0.09) == pytest.approx(-0.2 * 0.01 / (0.01 + 0.0081))
+    assert abs(stats.shrink_effect(-0.2, 0.03)) > abs(stats.shrink_effect(-0.2, 0.09))
+    assert stats.shrink_effect(0.2, float("inf")) == 0.0
+
+
+def test_proportion_gap_test_is_a_difference_of_differences():
+    # 6/8 quick losses vs 0/16 quick wins in one opening; 0/20 and 0/20 elsewhere
+    t = stats.proportion_gap_test(6, 8, 0, 16, 0, 20, 0, 20)
+    assert t.mean == pytest.approx(0.75) and t.p_value < 0.001
+    same_gap = stats.proportion_gap_test(12, 12, 0, 12, 40, 40, 0, 40)  # a quick resigner everywhere
+    assert same_gap.mean == 0.0 and same_gap.p_value == 1.0
+    assert stats.proportion_gap_test(1, 0, 1, 1, 1, 1, 1, 1).p_value == 1.0
 
 
 def test_weighted_bh_gives_big_groups_more_of_the_budget():
@@ -143,6 +172,8 @@ def test_colour_expected_and_colour_adjusted_summaries():
     assert raw.expected == pytest.approx(stats.expected_score(1500, 1700))
     assert att.expected == pytest.approx(stats.attenuated_expected(raw.expected))
     assert stats.ATTENUATION_RANGE == (stats.RATING_NOISE_ATTENUATION, 1.0)
+    lo, hi = stats.WHITE_EDGE_RANGE
+    assert lo < stats.WHITE_EDGE < hi
 
 
 def test_group_helpers_are_still_importable_from_results():

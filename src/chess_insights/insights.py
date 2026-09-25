@@ -131,8 +131,9 @@ def _diverse_top(insights: list[Insight], top_n: int, per_category: int) -> list
 
 # Every strength/weakness a module emits has passed the project-wide rule (stats.significance:
 # enough games and an adjusted p-value at or below stats.ALPHA / STRICT_ALPHA), which always gives
-# a confidence of at least 0.55. The floor below is a safety net: anything under it cannot have
-# passed the rule (e.g. a module still using a looser threshold) and stays out of the headline lists.
+# a confidence of at least 0.50 (stats.claim_confidence). The floor below is a safety net: anything
+# under it cannot have passed the rule (e.g. a module still using a looser threshold) and stays out
+# of the headline lists.
 MIN_CONFIDENCE = 0.5
 
 
