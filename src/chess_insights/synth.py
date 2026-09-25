@@ -28,6 +28,8 @@ import multiprocessing.util
 import os
 import random
 import shutil
+import sys
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -894,8 +896,8 @@ class _Director:
         role = self.role(side)
         if self.plan.finish == "flag" and self.swing_phase == 2:
             if role == "winner":
-                return 0.45
-            return 2.0 if score >= 150 else 0.9  # the side that will flag keeps the board level
+                return 0.35
+            return 2.0 if score >= 150 else 0.6  # the side that will flag keeps the board level
         if role == "winner":
             return 0.5 if score < 150 else 0.3
         if role == "loser":
@@ -965,12 +967,14 @@ class _GamePlayer:
                     if plan.time_class == "blitz"
                     else _PLAYER_OPENING_FACTOR.get(plan.time_class, 1.0)
                 )
+            if flagger:
+                factor = max(factor, 1.6)
             frac = _OPENING_TIME_FRACTION.get(plan.time_class, 0.2) * factor
             mean = frac * base * (0.35 if in_book else 1.0) / 10.0 + 0.7 * inc
         else:
             mean = seconds_left / max(8.0, 40.0 - move_no) + 0.8 * inc
             if flagger:  # does not speed up: keeps thinking as if there were time to spare
-                mean = max(1.6 * mean, 0.012 * base + 1.1 * inc)
+                mean = max(2.2 * mean, 0.02 * base + 1.1 * inc)
             elif seconds_left < 0.15 * base:  # time scramble: move fast
                 mean = min(mean, max(0.3, seconds_left / 20.0 + 0.6 * inc))
         sigma = 0.55
@@ -1037,6 +1041,8 @@ class _GamePlayer:
         return cands[0][0], 0.0
 
     def _resigns(self, side: chess.Color, score: int, prev: Optional[int], move_no: int) -> bool:
+        if self.plan.finish == "flag" and self.director.swing_phase == 2:
+            return False  # a time scramble: both sides play on, one of them hoping for the flag
         mated_soon = score <= -(MATE_CP - 100)
         lost = mated_soon or (score <= -500 and prev is not None and prev <= -500)
         p = _RESIGN_P[self.plan.time_class]
@@ -1197,6 +1203,13 @@ def _play_in_worker(plan: _Plan) -> _Played:
     return _play_with(_WORKER_MOVER, plan, _WORKER_PERSONA)
 
 
+def _mp_context() -> Any:
+    """fork where it is safe (Linux, single-threaded caller): fast and no re-import of ``__main__``."""
+    if sys.platform.startswith("linux") and threading.active_count() == 1:
+        return multiprocessing.get_context("fork")
+    return multiprocessing.get_context("spawn")
+
+
 def _play_all(
     plans: list[_Plan],
     persona: Persona,
@@ -1216,7 +1229,7 @@ def _play_all(
         finally:
             mover.close()
         return results
-    ctx = multiprocessing.get_context("spawn")
+    ctx = _mp_context()
     pool = ctx.Pool(min(workers, total), initializer=_init_worker, initargs=(engine_path, persona))
     try:
         # longest-running (rapid) games first keeps the workers evenly loaded
