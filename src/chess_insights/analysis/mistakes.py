@@ -220,15 +220,21 @@ def find_repeated(
     return sorted(out, key=lambda r: (-r.weight, r.epd))
 
 
+def _arrow(board: chess.Board, move: chess.Move) -> tuple[chess.Square, chess.Square]:
+    """(from, to) for a move's arrow; castling points to the king's destination (Chess960 moves encode the rook)."""
+    if board.is_castling(move):
+        rank = chess.square_rank(move.from_square)
+        return move.from_square, chess.square(2 if board.is_queenside_castling(move) else 6, rank)
+    return move.from_square, move.to_square
+
+
 def _svg(event: MistakeEvent) -> str:
     board = chess.Board(event.fen, chess960=event.game.rules == "chess960")
     arrows = []
     try:
-        played = board.parse_san(event.san)
-        arrows.append(chess.svg.Arrow(played.from_square, played.to_square, color="red"))
+        arrows.append(chess.svg.Arrow(*_arrow(board, board.parse_san(event.san)), color="red"))
         if event.best_san:
-            best = board.parse_san(event.best_san)
-            arrows.append(chess.svg.Arrow(best.from_square, best.to_square, color="green"))
+            arrows.append(chess.svg.Arrow(*_arrow(board, board.parse_san(event.best_san)), color="green"))
     except ValueError:
         pass
     return chess.svg.board(
@@ -285,7 +291,10 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         tables.append(
             Table(
                 title="Repeated mistakes",
-                columns=["Moves to reach it", "Opening", "Reached", "Errors", "You played", "Engine move", "Avg win chance lost", "Game"],
+                columns=[
+                    "Moves to reach it", "Opening", "Reached", "Errors", "You played", "Engine move",
+                    "Avg win chance lost", "Game",
+                ],
                 rows=rows,
                 formats=["text", "text", "int", "int", "text", "text", "pct", "url"],
                 note=f"An error is a move that lost at least {MIN_DROP:.0f} percentage points of winning chances. "
@@ -321,7 +330,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                 kind="weakness",
                 category="openings" if e.ply < 40 else "tactics",
                 title=title,
-                detail=f"After {line} you went wrong in {r.errors} of the {r.reached} games that reached this position, "
+                detail=f"After {line} you went wrong in {r.errors} of the {r.reached} games that reached this "
+                "position, "
                 f"losing about {r.avg_drop:.0f} percentage points of winning chances each time."
                 + (f" Stockfish prefers {best}." if best else ""),
                 severity=clamp(r.weight / 60.0),

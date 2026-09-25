@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Sequence
 
 import pandas as pd
@@ -107,7 +107,7 @@ def filter_games(
     until: Optional[datetime] = None,
     min_plies: int = 0,
 ) -> list[Game]:
-    """Return matching games sorted by end_time.
+    """Return matching games sorted by end_time (``since`` inclusive, ``until`` exclusive).
 
     Defaults keep standard chess only (variants distort every statistic) and
     both rated and casual games.
@@ -128,7 +128,7 @@ def filter_games(
         if g.plies < min_plies:
             continue
         out.append(g)
-    out.sort(key=lambda g: g.end_time)
+    out.sort(key=lambda g: (g.end_time, g.game_id))
     return out
 
 
@@ -147,6 +147,6 @@ def describe_filters(
         parts.append("standard chess" if list(rules) == ["chess"] else "/".join(rules))
     if since:
         parts.append(f"since {since:%Y-%m-%d}")
-    if until:
-        parts.append(f"until {until:%Y-%m-%d}")
+    if until:  # ``until`` is exclusive: show the last day that is included
+        parts.append(f"until {until - timedelta(microseconds=1):%Y-%m-%d}")
     return ", ".join(parts)

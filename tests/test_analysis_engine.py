@@ -193,7 +193,8 @@ def test_phase_strength_and_minimum_moves():
 
 # --------------------------------------------------------------------------- time pressure
 def pressure_game(low_blunders: int, ok_blunder: bool, opp_low_blunders=None):
-    """You spend 25 s a move from a 300 s clock: short of time (< 45 s) from ply 22 on.
+    """You spend 25 s a move from a 300 s clock: short of time (< 45 s) from ply 22 on. With ``ok_blunder`` you
+    and your opponent both blunder once with plenty of time left.
 
     With ``opp_low_blunders`` set, your opponent burns the clock the same way (short of time from ply 23)
     and blunders on their first ``opp_low_blunders`` moves when short of time; otherwise they keep 290 s.
@@ -210,6 +211,8 @@ def pressure_game(low_blunders: int, ok_blunder: bool, opp_low_blunders=None):
         if user and ok_blunder and i == 4:
             return {"judgement": "blunder"}
         if not user and opp_low_blunders and i >= 23 and (i - 23) // 2 < opp_low_blunders:
+            return {"judgement": "blunder"}
+        if not user and ok_blunder and i == 5:  # with time on the clock your opponents blunder as often as you
             return {"judgement": "blunder"}
         return {}
 
@@ -296,9 +299,11 @@ def test_missed_tactics_and_costliest_examples():
             if user and i in (8, 16):
                 return {"tags": ["missed_tactic"], "judgement": "blunder", "win_before": 60.0 + k, "win_after": 30.0}
             if not user and i == 9 and k % 2 == 0:
-                return {"tags": ["missed_tactic"], "win_before": 60.0, "win_after": 40.0}
+                return {"tags": ["missed_tactic"], "judgement": "blunder", "win_before": 60.0, "win_after": 40.0}
             if user and i == 20 and k < 3:
                 return {"tags": ["missed_mate"]}
+            if i in (30, 31):  # one ordinary mistake each: missed tactics are most of YOUR errors, not theirs
+                return {"judgement": "mistake"}
             return {}
 
         pairs.append(analysed(spec))
@@ -447,7 +452,9 @@ def test_clustered_errors_still_detect_a_real_difference():
     runs = 12
     for seed in range(runs):
         pairs = clustered_world(1000 + seed, n_games=150, my_factor=2.0, shape=1.0)
-        mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs}))
+        mr = engine_stats.analyze(
+            AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs})
+        )
         found += insight(mr, "engine.weakness.blunder-rate") is not None
     assert found >= 0.75 * runs
 
@@ -482,3 +489,19 @@ def test_opening_evals_are_measured_from_the_start_position():
     assert rows[("Italian Game", "White")][3] == pytest.approx(35.0)
     assert rows[("Sicilian Defense", "Black")][3] == pytest.approx(-35.0)
     assert [i.id for i in mr.insights if i.category == "openings"] == []
+
+
+def test_a_general_excess_of_errors_is_not_blamed_on_one_phase_or_error_type():
+    """Twice your opponents' error rate everywhere is one finding (you blunder more), not four (more in the
+    opening, more missed tactics, more hung pieces ...): a phase or error type is only singled out when it
+    stands out from the rest of your play."""
+    specific = 0
+    for seed in range(6):
+        pairs = clustered_world(2000 + seed, n_games=150, my_factor=2.0, shape=1.0)
+        mr = engine_stats.analyze(
+            AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs})
+        )
+        assert insight(mr, "engine.weakness.blunder-rate") is not None
+        specific += len([i for i in claims(mr) if i != "engine.weakness.blunder-rate"])
+        assert "Key finding: You blunder more often" in mr.summary
+    assert specific <= 1

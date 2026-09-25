@@ -32,7 +32,10 @@ def run_modules(ctx: AnalysisContext, modules: Optional[list[tuple[str, str]]] =
     for name, title in modules or MODULES:
         try:
             mod = importlib.import_module(f"chess_insights.analysis.{name}")
-            results.append(mod.analyze(ctx))
+            result = mod.analyze(ctx)
+            if not isinstance(result, ModuleResult):
+                raise TypeError(f"analyze() returned {type(result).__name__}, not ModuleResult")
+            results.append(result)
         except Exception as exc:  # noqa: BLE001 — isolate module bugs
             log.warning("analysis module %s failed: %s", name, exc)
             log.debug("%s", traceback.format_exc())
@@ -86,7 +89,7 @@ def run_analysis(
     """Games (already filtered) -> Report."""
     ctx = AnalysisContext(
         username=username,
-        games=sorted(games, key=lambda g: g.end_time),
+        games=sorted(games, key=lambda g: (g.end_time, g.game_id)),  # ties: same order whatever the source order
         evals=evals or {},
         options=options or {},
     )

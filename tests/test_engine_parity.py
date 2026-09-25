@@ -240,7 +240,8 @@ DIVIDER_GAMES = [
         (50, 65),
     ),
     (
-        "1. f3 g6 2. e4 Bg7 3. d4 d5 4. Qe2 Bxd4 5. c3 Bg7 6. Nd2 Nc6 7. exd5 Qxd5 8. Ne4 Nf6 9. Nxf6+ Bxf6 10. Be3 O-O "
+        "1. f3 g6 2. e4 Bg7 3. d4 d5 4. Qe2 Bxd4 5. c3 Bg7 6. Nd2 Nc6 7. exd5 Qxd5 8. Ne4 Nf6 9. Nxf6+ Bxf6 "
+        "10. Be3 O-O "
         "11. Rd1 Qxa2 12. Qd2 Rd8 13. Qc2 Rxd1+ 14. Kxd1 Bf5 15. Qc1 Rd8+ 16. Ke1 Ne5 17. Kf2 Bd3 18. Ne2 Ba6 "
         "19. Nd4 Bxf1 20. Kxf1 Nd3 21. Qc2 Qa1+ 22. Ke2 Qxh1 23. Qxd3 c5 24. Qb5 Qxg2+ 25. Kd3 Qf1+ 26. Kc2 Qxb5 "
         "27. Nxb5 a6 28. Na3 Rc8 29. Nc4 b5 30. Nd2 h5 31. Ne4 Be5 32. f4 Bd6 33. b3 f5 34. Ng5 e5 35. fxe5 Bxe5 "

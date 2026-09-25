@@ -7,12 +7,16 @@ checked later, by the engine module, which has to replay positions anyway.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
 from .models import DRAW_CODES, LOSS_CODES, WIN_CODES, Game
+
+log = logging.getLogger(__name__)
 
 STANDARD_START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -82,9 +86,15 @@ _TERMINATION_BY_CODE = {
 }
 
 
+_KNOWN_CODES = WIN_CODES | DRAW_CODES | LOSS_CODES
+_FINAL_RESULTS = ("1-0", "0-1", "1/2-1/2")
+# /game/live/123 (current form), /live/game/123 (before ~2021), /game/daily/123, /daily/game/123
+_GAME_URL_RE = re.compile(r"/(?:game/(live|daily)|(live|daily)/game)/(\d+)")
+
+
 # --------------------------------------------------------------------------- small parsers
 def parse_pgn_headers(pgn: str) -> dict[str, str]:
-    return {k: v.replace('\\"', '"') for k, v in _HEADER_RE.findall(pgn or "")}
+    return {k: v.replace('\\"', '"') for k, v in _HEADER_RE.findall((pgn or "").lstrip("\ufeff"))}
 
 
 def parse_clock(text: str) -> Optional[float]:
@@ -98,7 +108,7 @@ def parse_clock(text: str) -> Optional[float]:
 
 def _movetext(pgn: str) -> str:
     """Strip the header block."""
-    lines = (pgn or "").splitlines()
+    lines = (pgn or "").lstrip("\ufeff").splitlines()
     i = 0
     while i < len(lines) and (lines[i].startswith("[") or not lines[i].strip()):
         i += 1
@@ -283,9 +293,42 @@ def _header_datetime(date: Optional[str], time_: Optional[str]) -> Optional[date
 
 
 # --------------------------------------------------------------------------- chess.com JSON
+def _player(value: Any) -> dict[str, Any]:
+    """Archive games have a player object; the current-games endpoint has only the player's API URL."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        return {"username": value.rstrip("/").rsplit("/", 1)[-1]}
+    return {}
+
+
+def game_url_key(url: Optional[str]) -> Optional[str]:
+    """'https://www.chess.com/live/game/123' and '.../game/live/123' -> 'live:123' (None if not a game URL).
+
+    chess.com changed the URL form of old games, so this is the era-independent identity of a game.
+    Live and daily games have separate id spaces.
+    """
+    m = _GAME_URL_RE.search(url or "")
+    if not m:
+        return None
+    return f"{m.group(1) or m.group(2)}:{m.group(3)}"
+
+
+def _fallback_id(raw: dict[str, Any], white: dict[str, Any], black: dict[str, Any], pgn: str) -> str:
+    """A stable id for a game without uuid or URL (hand-made JSON, some exports)."""
+    basis = "|".join(
+        str(x) for x in (raw.get("end_time"), white.get("username"), black.get("username"), raw.get("time_control"), pgn)
+    )
+    return "game:" + hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
-    """One raw chess.com game object -> Game, or None if ``username`` didn't play in it."""
-    white, black = raw.get("white") or {}, raw.get("black") or {}
+    """One raw chess.com game object -> Game.
+
+    None if ``username`` didn't play in it, or if it has no result yet (an unfinished game, e.g.
+    from the current-games endpoint).
+    """
+    white, black = _player(raw.get("white")), _player(raw.get("black"))
     user = username.lower()
     if str(white.get("username", "")).lower() == user:
         color, me, opp = "white", white, black
@@ -294,10 +337,13 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     else:
         return None
 
-    pgn = raw.get("pgn") or ""
+    pgn = raw.get("pgn")
+    pgn = pgn if isinstance(pgn, str) else ""
     headers = parse_pgn_headers(pgn)
+    my_code, opp_code = str(me.get("result") or ""), str(opp.get("result") or "")
+    if my_code not in _KNOWN_CODES and opp_code not in _KNOWN_CODES and headers.get("Result") not in _FINAL_RESULTS:
+        return None  # no outcome: never count an unfinished game as a draw
     moves, clocks = parse_movetext(pgn)
-    my_code, opp_code = str(me.get("result", "")), str(opp.get("result", ""))
 
     tc = raw.get("time_control") or headers.get("TimeControl")
     base, inc = parse_time_control(tc)
@@ -324,7 +370,8 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
 
     eco_url = raw.get("eco") or headers.get("ECOUrl")
     opening, family = opening_from_eco_url(eco_url)
-    accuracies = raw.get("accuracies") or {}
+    accuracies = raw.get("accuracies")
+    accuracies = accuracies if isinstance(accuracies, dict) else {}
     other = "black" if color == "white" else "white"
 
     # Prefer the PGN FEN: for chess960 it carries the real castling files, while
@@ -333,9 +380,9 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     if initial and _same_position(initial, STANDARD_START_FEN):
         initial = None
 
-    url = raw.get("url") or headers.get("Link") or ""
+    url = str(raw.get("url") or headers.get("Link") or "")
     return Game(
-        game_id=str(raw.get("uuid") or url),
+        game_id=str(raw.get("uuid") or url or _fallback_id(raw, white, black, pgn)),
         url=url,
         username=str(me.get("username", username)),
         color=color,
@@ -366,22 +413,41 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     )
 
 
-def parse_games(raws: Iterable[dict[str, Any]], username: str) -> list[Game]:
-    """Parse, drop games the player wasn't in, de-duplicate, sort by end time."""
+def _game_order(g: Game) -> tuple[datetime, str]:
+    return g.end_time, g.game_id
+
+
+def merge_games(games: Iterable[Game]) -> list[Game]:
+    """Drop repeats (same uuid, or the same game URL in any era's form), sort by (end time, id) and
+    reconstruct pre-game ratings. Use it to combine games parsed from several sources."""
     seen: set[str] = set()
     out: list[Game] = []
+    for g in games:
+        keys = {g.game_id, game_url_key(g.url)} - {None, ""}
+        if keys & seen:
+            continue
+        seen |= keys
+        out.append(g)
+    out.sort(key=_game_order)
+    fill_pregame_ratings(out)
+    return out
+
+
+def parse_games(raws: Iterable[dict[str, Any]], username: str) -> list[Game]:
+    """Parse, drop games the player wasn't in (or that are unfinished), de-duplicate, sort by end time."""
+    parsed: list[Game] = []
+    bad = 0
     for raw in raws:
         try:
             g = parse_game(raw, username)
-        except (KeyError, TypeError, ValueError):
-            continue  # one malformed record must not sink a 5,000-game history
-        if g is None or g.game_id in seen:
+        except Exception:  # noqa: BLE001 — one malformed record must not sink a 5,000-game history
+            bad += 1
             continue
-        seen.add(g.game_id)
-        out.append(g)
-    out.sort(key=lambda g: g.end_time)
-    fill_pregame_ratings(out)
-    return out
+        if g is not None:
+            parsed.append(g)
+    if bad:
+        log.warning("skipped %d malformed game record(s)", bad)
+    return merge_games(parsed)
 
 
 # --------------------------------------------------------------------------- plain PGN import
@@ -399,9 +465,39 @@ _TERMINATION_TEXT = [
 ]
 
 
+_VARIANT_RULES = {
+    "chess960": "chess960",
+    "fischerandom": "chess960",
+    "crazyhouse": "crazyhouse",
+    "bughouse": "bughouse",
+    "kingofthehill": "kingofthehill",
+    "threecheck": "threecheck",
+    "3check": "threecheck",
+    "oddschess": "oddschess",
+}
+
+
+def rules_from_headers(headers: dict[str, str]) -> str:
+    """chess.com ``rules`` for a PGN without the JSON wrapper: from ``Variant``, else the ``Event`` suffix.
+
+    chess.com writes e.g. ``[Variant "Crazyhouse"]`` and ``[Event "Live Chess - Odds Chess"]`` (odds
+    games have no Variant header). Unknown variants keep their own name so they are never taken
+    for standard chess.
+    """
+    variant = re.sub(r"[^a-z0-9]", "", headers.get("Variant", "").lower())
+    if variant and variant not in ("standard", "chess", "normal", "fromposition"):
+        return _VARIANT_RULES.get(variant, variant)
+    event = headers.get("Event", "")
+    if " - " in event:
+        suffix = re.sub(r"[^a-z0-9]", "", event.rsplit(" - ", 1)[1].lower())
+        if suffix in _VARIANT_RULES:
+            return _VARIANT_RULES[suffix]
+    return "chess"
+
+
 def split_pgn(text: str) -> list[str]:
     """Split a multi-game PGN file into single-game strings."""
-    chunks = re.split(r"(?m)^(?=\[Event\s)", text or "")
+    chunks = re.split(r"(?m)^(?=\[Event\s)", (text or "").lstrip("\ufeff"))
     return [c.strip() + "\n" for c in chunks if c.strip()]
 
 
@@ -422,7 +518,7 @@ def game_from_pgn(pgn: str, username: str) -> Optional[Game]:
         "url": h.get("Link", ""),
         "pgn": pgn,
         "time_control": h.get("TimeControl"),
-        "rules": "chess960" if "960" in h.get("Variant", "") else "chess",
+        "rules": rules_from_headers(h),
         "rated": True,  # not recorded in PGN exports
         "white": {"username": h.get("White", ""), "rating": h.get("WhiteElo"), "result": w_code},
         "black": {"username": h.get("Black", ""), "rating": h.get("BlackElo"), "result": b_code},
@@ -437,14 +533,13 @@ def games_from_pgn(text: str, username: str) -> list[Game]:
 
 
 def parse_games_from_pgns(pgns: Iterable[str], username: str) -> list[Game]:
-    seen: set[str] = set()
-    out = []
+    parsed: list[Game] = []
     for pgn in pgns:
-        g = game_from_pgn(pgn, username)
-        if g is None or g.game_id in seen:
+        try:
+            g = game_from_pgn(pgn, username)
+        except Exception:  # noqa: BLE001 — skip a broken game, keep the file
+            log.warning("skipped a PGN game that could not be read")
             continue
-        seen.add(g.game_id)
-        out.append(g)
-    out.sort(key=lambda g: g.end_time)
-    fill_pregame_ratings(out)
-    return out
+        if g is not None:
+            parsed.append(g)
+    return merge_games(parsed)

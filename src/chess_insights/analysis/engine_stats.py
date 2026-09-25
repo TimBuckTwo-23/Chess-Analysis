@@ -199,7 +199,12 @@ def clustered_rate_test(a: Sequence[Tally], b: Sequence[Tally], count: Callable[
     itself contributes to both. It is never taken below the plain binomial variance. The result's ``n``
     is the number of games with moves on either side.
     """
-    games = [(count(x), x.moves, count(y), y.moves) for x, y in zip(a, b) if x.moves or y.moves]
+    return clustered_share_test([(count(x), x.moves) for x in a], [(count(y), y.moves) for y in b])
+
+
+def clustered_share_test(a: Sequence[tuple[int, int]], b: Sequence[tuple[int, int]]) -> MeanTest:
+    """:func:`clustered_rate_test` on per-game ``(events, out of)`` pairs, e.g. (missed tactics, errors)."""
+    games = [(x1, m1, x2, m2) for (x1, m1), (x2, m2) in zip(a, b) if m1 or m2]
     n = len(games)
     x1, n1 = sum(g[0] for g in games), sum(g[1] for g in games)
     x2, n2 = sum(g[2] for g in games), sum(g[3] for g in games)
@@ -227,6 +232,26 @@ def _claim(test: MeanTest, th: "Thresholds", p_adjusted: Optional[float] = None,
 def _clearly_higher(a: Optional[float], b: Optional[float], ratio: float) -> bool:
     """a is at least ``ratio`` times b (and strictly above it; any positive a beats b = 0)."""
     return a is not None and b is not None and a > b and a >= ratio * b
+
+
+def _rate_ratio(x1: int, n1: int, x2: int, n2: int) -> Optional[float]:
+    """(x1 / n1) / (x2 / n2) with half an event added to each count, so a zero doesn't make it 0 or infinite."""
+    if n1 <= 0 or n2 <= 0:
+        return None
+    return ((x1 + 0.5) / n1) / ((x2 + 0.5) / n2)
+
+
+def _stands_out(ratio: Optional[float], rest: Optional[float], needed: float) -> float:
+    """How much a specific you-vs-opponents ratio (one phase, one error type ...) exceeds the same ratio for the
+    rest of your play: ``ratio / max(1, rest)``, or 0 unless that is at least ``needed``.
+
+    Twice your opponents' error rate everywhere is one finding (you make more errors), not one per phase:
+    a part of your game is only singled out when it is clearly worse (or better) than the rest.
+    """
+    if ratio is None:
+        return 0.0
+    excess = ratio / max(1.0, rest if rest is not None else 1.0)
+    return excess if excess >= needed else 0.0
 
 
 def _avg(values: Iterable[Optional[float]]) -> Optional[float]:
@@ -472,39 +497,74 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
     judged = [ph for ph in PHASES if me[ph].moves >= th.min_phase_moves and opp[ph].moves >= th.min_phase_moves]
     tests = {ph: clustered_rate_test(me_games[ph], opp_games[ph], lambda t: t.errors) for ph in judged}
     adjusted = dict(zip(judged, bh_adjust([tests[ph].p_value for ph in judged])))
+    # A phase is singled out only if it also holds a larger (smaller) share of your errors than of your
+    # opponents': making more errors everywhere is the blunder-rate finding, not a phase one.
+    my_errors, opp_errors = per_game(records, True), per_game(records, False)
+    shares = {
+        ph: clustered_share_test(
+            [(t.errors, e.errors) for t, e in zip(me_games[ph], my_errors)],
+            [(t.errors, e.errors) for t, e in zip(opp_games[ph], opp_errors)],
+        )
+        for ph in judged
+    }
+    share_adjusted = dict(zip(judged, bh_adjust([shares[ph].p_value for ph in judged])))
     weak, strong = [], []
     for ph in judged:
-        mine, theirs = me[ph].per100(me[ph].errors), opp[ph].per100(opp[ph].errors)
+        m, o = me[ph], opp[ph]
+        m_rest = total(me[q] for q in PHASES if q != ph)
+        o_rest = total(opp[q] for q in PHASES if q != ph)
         significant, confidence = _claim(tests[ph], th, adjusted[ph])
-        stats[ph].update(p_value=tests[ph].p_value, p_adjusted=adjusted[ph], games=tests[ph].n)
-        if not significant:
+        stands_out, share_confidence = _claim(shares[ph], th, share_adjusted[ph])
+        stats[ph].update(p_value=tests[ph].p_value, p_adjusted=adjusted[ph], games=tests[ph].n,
+                         share_p_adjusted=share_adjusted[ph])
+        if not (significant and stands_out):
             continue
-        if _clearly_higher(mine, theirs, th.phase_ratio):
-            weak.append((mine - theirs, ph, confidence))
-        elif _clearly_higher(theirs, mine, th.phase_ratio):
-            strong.append((theirs - mine, ph, confidence))
+        confidence = min(confidence, share_confidence)
+        ratio, rest = _rate_ratio(m.errors, m.moves, o.errors, o.moves), _rate_ratio(
+            m_rest.errors, m_rest.moves, o_rest.errors, o_rest.moves
+        )
+        inverse = None if ratio is None else 1.0 / ratio
+        inverse_rest = None if rest is None else 1.0 / rest
+        more = m.per100(m.errors) > o.per100(o.errors) and shares[ph].mean > 0
+        fewer = o.per100(o.errors) > m.per100(m.errors) and shares[ph].mean < 0
+        if more and (excess := _stands_out(ratio, rest, th.phase_ratio)):
+            weak.append((excess, ph, confidence))
+        elif fewer and (excess := _stands_out(inverse, inverse_rest, th.phase_ratio)):
+            strong.append((excess, ph, confidence))
     insights = []
     if weak:
-        _, ph, confidence = max(weak)
-        insights.append(_phase_insight(records, ph, me[ph], opp[ph], confidence, adjusted[ph], "weakness"))
+        excess, ph, confidence = max(weak)
+        insights.append(_phase_insight(records, ph, me, opp, confidence, adjusted[ph], "weakness", excess))
     if strong:
-        _, ph, confidence = max(strong)
-        insights.append(_phase_insight(records, ph, me[ph], opp[ph], confidence, adjusted[ph], "strength"))
+        excess, ph, confidence = max(strong)
+        insights.append(_phase_insight(records, ph, me, opp, confidence, adjusted[ph], "strength", excess))
     return table, chart, insights, stats
 
 
 def _phase_insight(
-    records: Sequence[Analysed], ph: str, m: Tally, o: Tally, confidence: float, p_adj: float, kind: str
+    records: Sequence[Analysed],
+    ph: str,
+    me: dict[str, Tally],
+    opp: dict[str, Tally],
+    confidence: float,
+    p_adj: float,
+    kind: str,
+    excess: float,
 ) -> Insight:
+    m, o = me[ph], opp[ph]
+    m_rest, o_rest = total(me[q] for q in PHASES if q != ph), total(opp[q] for q in PHASES if q != ph)
     mine, theirs = m.per100(m.errors) or 0.0, o.per100(o.errors) or 0.0
+    rest_mine, rest_theirs = m_rest.per100(m_rest.errors), o_rest.per100(o_rest.errors)
     detail = (
         f"In the {ph} you made {m.errors} mistakes and blunders in {m.moves} moves ({mine:.1f} per 100 moves); "
-        f"your opponents made {theirs:.1f} per 100 moves in the same games. Average centipawn loss there: "
+        f"your opponents made {theirs:.1f} per 100 moves in the same games. In the rest of the game: "
+        f"{_f1(rest_mine)} for you vs {_f1(rest_theirs)} for them. Average centipawn loss in the {ph}: "
         f"{m.acpl or 0:.0f} for you vs {o.acpl or 0:.0f} for them."
     )
     evidence = {
         "phase": ph, "moves": m.moves, "errors": m.errors, "per100": mine, "acpl": m.acpl,
         "opp_moves": o.moves, "opp_errors": o.errors, "opp_per100": theirs, "opp_acpl": o.acpl, "p_adjusted": p_adj,
+        "rest_per100": rest_mine, "opp_rest_per100": rest_theirs, "relative_to_rest": excess,
     }
 
     def errors_in_phase(r: Analysed) -> int:
@@ -517,7 +577,7 @@ def _phase_insight(
             category="phases",
             title=f"You make more mistakes than your opponents in the {ph}",
             detail=detail,
-            severity=clamp(mine / theirs - 1.0 if theirs else 1.0),
+            severity=clamp(excess - 1.0),
             confidence=confidence,
             evidence=evidence,
             study=PHASE_STUDY[ph],
@@ -532,7 +592,7 @@ def _phase_insight(
         category="phases",
         title=f"You play the {ph} better than your opponents",
         detail=detail,
-        severity=clamp(theirs / mine - 1.0 if mine else 1.0),
+        severity=clamp(excess - 1.0),
         confidence=confidence,
         evidence=evidence,
         study=[
@@ -627,11 +687,16 @@ def pressure_section(
             continue
         if not _clearly_higher(low, ok, th.pressure_ratio):
             continue
-        worse_than_peers = False
+        worse_than_peers, excess = False, 0.0
         if tc in bench:
             bench_significant, bench_conf = _claim(bench[tc], th, bench_adj[tc])
             stats[tc].update(benchmark_p_value=bench[tc].p_value, benchmark_p_adjusted=bench_adj[tc])
-            worse_than_peers = bench_significant and _clearly_higher(low, opp_low, th.pressure_peer_ratio)
+            # Short of time you must be worse off against your opponents than you are with time on the clock:
+            # blundering twice as often as them in every situation is the blunder-rate finding, not a clock one.
+            low_ratio = _rate_ratio(t["me_low"].blunders, t["me_low"].moves, t["opp_low"].blunders, t["opp_low"].moves)
+            ok_ratio = _rate_ratio(t["me_ok"].blunders, t["me_ok"].moves, t["opp_ok"].blunders, t["opp_ok"].moves)
+            excess = _stands_out(low_ratio, ok_ratio, th.pressure_peer_ratio)
+            worse_than_peers = bench_significant and (low or 0) > (opp_low or 0) and excess > 0
             confidence = min(confidence, bench_conf)
         detail = (
             f"In {tc}, with less than {share} of your starting clock left you blundered {_f1(low)} times per 100 "
@@ -659,7 +724,7 @@ def pressure_section(
                     category="time",
                     title=f"You blunder much more than your opponents when short of time in {tc}",
                     detail=detail,
-                    severity=clamp((low / opp_low - 1.0) if opp_low else 1.0),
+                    severity=clamp(excess - 1.0),
                     confidence=confidence,
                     evidence=evidence | {"benchmark_p_adjusted": bench_adj[tc]},
                     study=[
@@ -856,6 +921,25 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
 
 
 # --------------------------------------------------------------------------- tactics
+def _tag_shares(records: Sequence[Analysed], mine: bool, tag: str) -> list[tuple[int, int]]:
+    """Per game: (mistakes and blunders carrying ``tag``, all mistakes and blunders) by you or your opponents."""
+    out = []
+    for r in records:
+        errors = [p for p in r.plies if p.is_user == mine and p.judgement in ("mistake", "blunder")]
+        out.append((sum(1 for p in errors if tag in (p.tags or ())), len(errors)))
+    return out
+
+
+def _errors_without(records: Sequence[Analysed], mine: bool, tag: str) -> int:
+    """Mistakes and blunders by you (``mine``) or your opponents that don't carry ``tag``."""
+    return sum(
+        1
+        for r in records
+        for p in r.plies
+        if p.is_user == mine and p.judgement in ("mistake", "blunder") and tag not in (p.tags or ())
+    )
+
+
 def _costliest(records: Sequence[Analysed], tag: str) -> list[str]:
     """Games with your costliest move carrying ``tag`` (largest win-% drop) first."""
 
@@ -930,21 +1014,38 @@ def tactics_section(
             for tag in tags
         }
         adjusted = dict(zip(tags, bh_adjust([tests[t].p_value for t in tags])))
+        # ... and the error type must make up a larger (smaller) share of your errors than of your opponents'.
+        shares = {tag: clustered_share_test(_tag_shares(records, True, tag), _tag_shares(records, False, tag))
+                  for tag in tags}
+        share_adjusted = dict(zip(tags, bh_adjust([shares[t].p_value for t in tags])))
         for tag in tags:
             text = TACTIC_TEXT[tag]
             mine_n, theirs_n = getattr(me, text["attr"]), getattr(opp, text["attr"])
             mine, theirs = me.per100(mine_n), opp.per100(theirs_n)
             significant, confidence = _claim(tests[tag], th, adjusted[tag])
+            stands_out, share_confidence = _claim(shares[tag], th, share_adjusted[tag])
             stats[f"{tag}_p_adjusted"] = adjusted[tag]
-            if not significant:
+            stats[f"{tag}_share_p_adjusted"] = share_adjusted[tag]
+            if not (significant and stands_out):
                 continue
+            confidence = min(confidence, share_confidence)
+            # Compared with your other mistakes and blunders: more errors of every kind is the blunder-rate finding.
+            other, opp_other = _errors_without(records, True, tag), _errors_without(records, False, tag)
+            ratio = _rate_ratio(mine_n, me.moves, theirs_n, opp.moves)
+            rest = _rate_ratio(other, me.moves, opp_other, opp.moves)
+            more = shares[tag].mean > 0 and (mine or 0) > (theirs or 0)
+            fewer = shares[tag].mean < 0 and (theirs or 0) > (mine or 0)
+            weak_excess = _stands_out(ratio, rest, th.tactic_ratio) if more else 0.0
+            strong_excess = _stands_out(1.0 / ratio, 1.0 / rest, th.tactic_ratio) if fewer and ratio and rest else 0.0
             detail = (
                 f"In {len(records)} analysed games you {text['what']} {mine_n} times ({_f1(mine)} per 100 moves); "
-                f"your opponents did so {_f1(theirs)} times per 100 moves in the same games."
+                f"your opponents did so {_f1(theirs)} times per 100 moves in the same games. Your other mistakes "
+                f"and blunders: {_f1(me.per100(other))} per 100 moves vs {_f1(opp.per100(opp_other))} for them."
             )
             evidence = {"count": mine_n, "per100": mine, "opp_count": theirs_n, "opp_per100": theirs,
-                        "p_adjusted": adjusted[tag]}
-            if _clearly_higher(mine, theirs, th.tactic_ratio):
+                        "p_adjusted": adjusted[tag], "other_errors_per100": me.per100(other),
+                        "opp_other_errors_per100": opp.per100(opp_other)}
+            if weak_excess:
                 insights.append(
                     Insight(
                         id=f"{KEY}.weakness.{text['slug']}",
@@ -952,14 +1053,14 @@ def tactics_section(
                         category="tactics",
                         title=text["weak_title"],
                         detail=detail,
-                        severity=clamp(mine / theirs - 1.0 if theirs else 1.0),
+                        severity=clamp(weak_excess - 1.0),
                         confidence=confidence,
                         evidence=evidence,
                         study=text["study"],
                         example_games=_costliest(records, tag),
                     )
                 )
-            elif _clearly_higher(theirs, mine, th.tactic_ratio):
+            elif strong_excess:
                 insights.append(
                     Insight(
                         id=f"{KEY}.strength.{text['slug']}",
@@ -967,7 +1068,7 @@ def tactics_section(
                         category="tactics",
                         title=text["strong_title"],
                         detail=detail,
-                        severity=clamp(theirs / mine - 1.0 if mine else 1.0),
+                        severity=clamp(strong_excess - 1.0),
                         confidence=confidence,
                         evidence=evidence,
                         study=[

@@ -444,7 +444,9 @@ def test_in_process_run_isolates_failures_restarts_and_always_closes(fake_engine
 
     monkeypatch.setattr(engine, "evaluate_game", flaky)
     progress = []
-    res = analyze_games([good1, bad, good2], cfg_fake(), cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)))
+    res = analyze_games(
+        [good1, bad, good2], cfg_fake(), cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t))
+    )
     assert set(res) == {good1.game_id, good2.game_id} and res[good1.game_id].engine == "Fake 1"
     assert progress == [(1, 3), (2, 3), (3, 3)]
     assert log == ["opened", "closed", "opened", "closed"]
@@ -790,7 +792,8 @@ def test_ctrl_c_during_a_parallel_run_is_quiet_and_leaves_nothing_running(stockf
         "def stop(done, total):\n"
         "    raise KeyboardInterrupt\n"
         "try:\n"
-        f"    analyze_games(games, EngineConfig(path={stockfish_path!r}, depth=10, hash_mb=16, workers=3), progress=stop)\n"
+        f"    cfg = EngineConfig(path={stockfish_path!r}, depth=10, hash_mb=16, workers=3)\n"
+        "    analyze_games(games, cfg, progress=stop)\n"
         "except KeyboardInterrupt:\n"
         "    print('INTERRUPTED')\n"
     )

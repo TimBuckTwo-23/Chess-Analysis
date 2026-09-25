@@ -107,7 +107,7 @@ def test_puzzles_pgn_round_trips():
 def test_diagrams_render_in_html_and_markdown():
     from datetime import datetime, timezone
 
-    from chess_insights.models import Diagram, ModuleResult, Report
+    from chess_insights.models import Diagram, Report
     from chess_insights.report import render_html, render_markdown
     from chess_insights.report.html import lichess_analysis_url
 
@@ -230,3 +230,12 @@ def test_chess960_puzzles_carry_the_variant_and_castle_correctly():
     assert board.king(chess.WHITE) == chess.C1 and board.piece_at(chess.D1) == chess.Piece.from_symbol("R")
     svg = mistakes._svg(puzzle)
     assert svg.startswith("<svg")
+
+
+def test_diagram_arrows_show_where_the_king_goes_when_castling():
+    standard = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
+    assert mistakes._arrow(standard, standard.parse_san("O-O")) == (chess.E1, chess.G1)
+    c960 = chess.Board("rk5r/pppppppp/8/8/8/8/PPPPPPPP/RK5R w HAha - 0 1", chess960=True)
+    assert mistakes._arrow(c960, c960.parse_san("O-O-O")) == (chess.B1, chess.C1)  # not b1 -> a1 (the rook)
+    assert mistakes._arrow(c960, c960.parse_san("O-O")) == (chess.B1, chess.G1)
+    assert mistakes._arrow(c960, c960.parse_san("a3")) == (chess.A2, chess.A3)

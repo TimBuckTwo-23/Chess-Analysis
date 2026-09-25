@@ -88,11 +88,12 @@ def test_retries_on_429_honouring_retry_after_then_succeeds():
     assert sleeps == [7.0, 1.0]  # Retry-After, then backoff 0.5 * 2**1
 
 
-def test_gives_up_after_max_retries():
+def test_gives_up_after_max_retries_without_a_pointless_last_sleep():
     client, sleeps = make_client({f"{BASE}": [FakeResponse(429)]}, max_retries=2, backoff_base=0.1)
     with pytest.raises(api.RateLimited):
         client.profile("tester")
-    assert len(sleeps) == 3
+    assert len(client.session.calls) == 3
+    assert len(sleeps) == 2  # between attempts only, not after the last one
 
 
 def test_connection_errors_are_retried():
@@ -231,3 +232,233 @@ def test_parse_month():
     assert fetch.parse_month("2024/11") == (2024, 11)
     with pytest.raises(ValueError):
         fetch.parse_month("2024-13")
+
+
+# --------------------------------------------------------------------------- HTTP details
+def test_retry_after_as_http_date():
+    from email.utils import format_datetime
+    from datetime import timedelta
+
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=30), usegmt=True)
+    client, sleeps = make_client({f"{BASE}": [FakeResponse(429, headers={"Retry-After": when}), FakeResponse(200, {})]})
+    client.profile("tester")
+    assert 20 <= sleeps[0] <= 31
+
+
+@pytest.mark.parametrize("value", ["inf", "1e12", "86400", "-5", "nan", "soon"])
+def test_retry_after_is_sane_and_capped(value):
+    client, sleeps = make_client({f"{BASE}": [FakeResponse(429, headers={"Retry-After": value}), FakeResponse(200, {})]})
+    client.profile("tester")
+    assert 0 <= sleeps[0] <= client.max_retry_after
+
+
+def test_invalid_json_body_is_retried():
+    client, _ = make_client({f"{BASE}": [FakeResponse(200, None), FakeResponse(200, {"username": "tester"})]})
+    assert client.profile("tester") == {"username": "tester"}
+
+
+def test_tls_errors_are_not_retried_and_mention_proxies():
+    client, sleeps = make_client({f"{BASE}": [requests.exceptions.SSLError("CERTIFICATE_VERIFY_FAILED")]})
+    with pytest.raises(api.ChessComError, match="(?i)certificate.*proxy|proxy.*certificate"):
+        client.profile("tester")
+    assert len(client.session.calls) == 1 and sleeps == []
+
+
+def test_offline_network_error_message_is_actionable():
+    client, _ = make_client({f"{BASE}": [requests.ConnectionError("Name or service not known")]}, max_retries=1)
+    with pytest.raises(api.ChessComError, match="api.chess.com"):
+        client.profile("tester")
+
+
+@pytest.mark.parametrize(
+    "text", ["Tester", " tester ", "@Tester", "https://www.chess.com/member/Tester", "chess.com/member/tester/",
+             "https://www.chess.com/stats/live/blitz/Tester"],
+)
+def test_username_accepts_handles_and_profile_urls(text):
+    assert api.normalize_username(text) == "tester"
+
+
+def test_default_session_keeps_gzip_and_sets_user_agent():
+    client = api.ChessComClient()
+    assert "gzip" in client.session.headers.get("Accept-Encoding", "")
+    assert client.session.headers["User-Agent"].startswith("chess-insights/")
+
+
+def test_real_http_stack_redirect_gzip_and_weak_etag():
+    """Against a local server: requests follows chess.com's 301 to the lowercase URL, un-gzips the body,
+    and a weak ETag round-trips to a 304."""
+    import gzip
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # keep test output clean
+            pass
+
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("User-Agent"), self.headers.get("If-None-Match")))
+            if self.path != self.path.lower():
+                self.send_response(301)
+                self.send_header("Location", self.path.lower())
+                self.end_headers()
+                return
+            if self.headers.get("If-None-Match") == 'W/"v1"':
+                self.send_response(304)
+                self.send_header("ETag", 'W/"v1"')
+                self.end_headers()
+                return
+            body = gzip.compress(b'{"games": [{"uuid": "a"}]}')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("ETag", 'W/"v1"')
+            self.send_header("Last-Modified", "Friday, 25-Oct-2024 02:32:13 GMT+0000")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        session = requests.Session()
+        session.trust_env = False  # never route 127.0.0.1 through a proxy
+        base = f"http://127.0.0.1:{server.server_port}/pub"
+        client = api.ChessComClient(session=session, base_url=base, min_interval=0, contact="me@example.com")
+        data, resp = client.request("player/Tester/games/2024/03")
+        assert data == {"games": [{"uuid": "a"}]} and resp.headers["etag"] == 'W/"v1"'
+        assert [p for p, _, _ in seen] == ["/pub/player/Tester/games/2024/03", "/pub/player/tester/games/2024/03"]
+        assert all("me@example.com" in ua for _, ua, _ in seen)  # the UA survives the redirect
+        month = client.month("tester", 2024, 3, etag=resp.headers["etag"])
+        assert month.not_modified and seen[-1][2] == 'W/"v1"'
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# --------------------------------------------------------------------------- sync edge cases
+def test_304_without_etag_keeps_the_cached_etag(tmp_path):
+    payloads = {(2024, 2): [{"uuid": "c"}]}
+    now = lambda: datetime(2024, 2, 20, tzinfo=timezone.utc)  # noqa: E731
+    client, _ = make_client(_routes_for_sync(payloads))
+    fetch.sync("tester", client, tmp_path, now=now, snapshots=False)
+    routes = _routes_for_sync(payloads)
+    routes[f"{BASE}/games/2024/02"] = [FakeResponse(304)]  # no ETag header on the 304
+    client2, _ = make_client(routes)
+    s = fetch.sync("tester", client2, tmp_path, now=now, snapshots=False)
+    assert s.months_not_modified == 1
+    store = fetch.GameStore(tmp_path, "tester")
+    assert store.load_month((2024, 2))["etag"] == '"20242"'
+    assert len(store.load_month((2024, 2))["games"]) == 1
+
+
+def test_if_modified_since_is_used_when_there_is_no_etag(tmp_path):
+    lm = "Friday, 25-Oct-2024 02:32:13 GMT+0000"
+    routes = _routes_for_sync({(2024, 10): [{"uuid": "a"}]})
+    routes[f"{BASE}/games/2024/10"] = [FakeResponse(200, {"games": [{"uuid": "a"}]}, headers={"Last-Modified": lm})]
+    now = lambda: datetime(2024, 10, 25, tzinfo=timezone.utc)  # noqa: E731
+    client, _ = make_client(routes)
+    fetch.sync("tester", client, tmp_path, now=now, snapshots=False)
+    client2, _ = make_client(routes)
+    fetch.sync("tester", client2, tmp_path, now=now, snapshots=False)
+    assert client2.session.calls[-1] == (f"{BASE}/games/2024/10", {"If-Modified-Since": lm})
+
+
+def test_a_410_month_is_not_requested_again(tmp_path):
+    routes = _routes_for_sync({(2024, 1): []})
+    routes[f"{BASE}/games/2024/01"] = [FakeResponse(410)]
+    client, _ = make_client(routes)
+    s = fetch.sync("tester", client, tmp_path, snapshots=False)
+    assert s.months_missing == 0
+    client2, _ = make_client(routes)
+    fetch.sync("tester", client2, tmp_path, snapshots=False)
+    assert f"{BASE}/games/2024/01" not in [u for u, _ in client2.session.calls]
+
+
+def test_closed_account_is_reported(tmp_path):
+    routes = _routes_for_sync({(2024, 1): [{"uuid": "a"}]})
+    routes[f"{BASE}"] = [FakeResponse(200, {"username": "tester", "status": "closed:fair_play_violations"})]
+    client, _ = make_client(routes)
+    said = []
+    s = fetch.sync("tester", client, tmp_path, snapshots=False, progress=said.append)
+    assert s.games_total == 1 and s.account_status == "closed:fair_play_violations"
+    assert any("closed" in m for m in said)
+
+
+def test_closed_account_without_archives_does_not_scan_every_month(tmp_path):
+    joined = int(datetime(2015, 1, 1, tzinfo=timezone.utc).timestamp())
+    routes = {f"{BASE}": [FakeResponse(200, {"username": "tester", "status": "closed", "joined": joined})]}
+    client, _ = make_client(routes)
+    with pytest.raises(api.PlayerNotFound, match="closed"):
+        fetch.sync("tester", client, tmp_path, snapshots=False)
+    assert len(client.session.calls) <= 3
+
+
+def test_load_games_dedupes_across_url_forms(tmp_path):
+    store = fetch.GameStore(tmp_path, "tester")
+    t = datetime(2024, 5, 1, tzinfo=timezone.utc)
+    store.save_month((2020, 3), [{"url": "https://www.chess.com/live/game/42"}], etag=None, fetched_at=t, complete=True)
+    store.save_month((2020, 4), [{"uuid": "u", "url": "https://www.chess.com/game/live/42"},
+                                 {"url": "https://www.chess.com/game/daily/42"}], etag=None, fetched_at=t, complete=True)
+    assert len(fetch.load_games("tester", tmp_path)) == 2
+
+
+def test_corrupt_snapshot_is_treated_as_missing(tmp_path):
+    store = fetch.GameStore(tmp_path, "tester")
+    store.root.mkdir(parents=True)
+    (store.root / "profile.json").write_text("{oops", encoding="utf-8")
+    assert store.load_snapshot("profile") is None
+
+
+def test_atomic_write_retries_a_transient_windows_lock(tmp_path, monkeypatch):
+    real_replace = fetch.os.replace
+    calls = []
+
+    def flaky_replace(src, dst):
+        calls.append(dst)
+        if len(calls) == 1:
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fetch.os, "replace", flaky_replace)
+    monkeypatch.setattr(fetch.time, "sleep", lambda s: None)
+    fetch._atomic_write_json(tmp_path / "x.json", {"a": 1})
+    assert len(calls) == 2 and fetch.json.loads((tmp_path / "x.json").read_text(encoding="utf-8")) == {"a": 1}
+    assert not list(tmp_path.glob(".tmp-*"))
+
+
+# --------------------------------------------------------------------------- reading user files
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Réti Opening – “quoted” …".encode("utf-8"),
+        "\ufeffRéti Opening – “quoted” …".encode("utf-8"),  # Notepad
+        "Réti Opening – “quoted” …".encode("utf-16"),  # Windows PowerShell 5 `Out-File` / `>`
+        "Réti Opening – “quoted” …".encode("cp1252"),  # legacy Windows tools
+    ],
+    ids=["utf-8", "utf-8-bom", "utf-16", "cp1252"],
+)
+def test_read_text_handles_windows_encodings(tmp_path, raw):
+    path = tmp_path / "f.txt"
+    path.write_bytes(raw)
+    assert fetch.read_text(path) == "Réti Opening – “quoted” …"
+
+
+def test_load_json_files_accepts_every_shape(tmp_path):
+    game = {"uuid": "g1", "white": {"username": "a"}, "black": {"username": "b"}}
+    shapes = {
+        "archive.json": {"games": [game]},
+        "bom.json": "\ufeff" + fetch.json.dumps({"games": [dict(game, uuid="g2")]}),
+        "single.json": dict(game, uuid="g3"),
+        "list.json": [dict(game, uuid="g4")],
+        "list_of_archives.json": [{"games": [dict(game, uuid="g5")]}, {"games": [dict(game, uuid="g6")]}],
+        "by_url.json": {"https://api.chess.com/pub/player/a/games/2024/01": {"games": [dict(game, uuid="g7")]}},
+    }
+    paths = []
+    for name, data in shapes.items():
+        p = tmp_path / name
+        p.write_text(data if isinstance(data, str) else fetch.json.dumps(data), encoding="utf-8")
+        paths.append(p)
+    assert [g["uuid"] for g in fetch.load_json_files(paths)] == [f"g{i}" for i in range(1, 8)]

@@ -125,3 +125,53 @@ def test_check_planted_traits_matches_by_kind_category_keywords():
     ]
     hits = check_planted_traits(report, traits)
     assert hits[0][1] is found and hits[1][1] is None
+
+
+def _capture_module(monkeypatch, seen, returns=None):
+    fake = types.ModuleType("chess_insights.analysis.fake_capture")
+
+    def analyze(ctx):
+        seen.append(ctx)
+        return returns if returns is not None else mod("fake_capture")
+
+    fake.analyze = analyze
+    monkeypatch.setitem(sys.modules, "chess_insights.analysis.fake_capture", fake)
+    return [("fake_capture", "Capture")]
+
+
+def test_pipeline_isolates_a_module_that_returns_garbage(monkeypatch):
+    modules = _install_fake_modules(monkeypatch)
+    garbage = _capture_module(monkeypatch, [], returns="not a ModuleResult")
+    report = pipeline.run_analysis([make_game()], "tester", modules=modules + garbage)
+    assert [m.key for m in report.modules] == ["fake_good", "fake_bad", "fake_capture"]
+    assert "could not be computed" in report.modules[2].summary
+    assert [i.id for i in report.weaknesses] == ["fake.weakness.x"]
+
+
+def test_pipeline_passes_options_and_sorts_ties_deterministically(monkeypatch):
+    from datetime import datetime, timezone
+
+    seen = []
+    modules = _capture_module(monkeypatch, seen)
+    t = datetime(2024, 5, 1, 12, tzinfo=timezone.utc)
+    games = [make_game(game_id=f"g{i}", end_time=t) for i in (3, 1, 2)]
+    pipeline.run_analysis(games, "tester", modules=modules, options={"tz": "Europe/Berlin"})
+    pipeline.run_analysis(list(reversed(games)), "tester", modules=modules, options={"tz": "Europe/Berlin"})
+    assert [g.game_id for g in seen[0].games] == [g.game_id for g in seen[1].games] == ["g1", "g2", "g3"]
+    assert seen[0].options["tz"] == "Europe/Berlin"
+
+
+def test_report_generated_at_is_timezone_aware_utc(monkeypatch):
+    from datetime import timedelta
+
+    report = pipeline.run_analysis([make_game()], "tester", modules=_capture_module(monkeypatch, []))
+    assert report.generated_at.utcoffset() == timedelta(0)
+
+
+def test_describe_filters_shows_the_last_included_day():
+    from datetime import datetime, timezone
+
+    from chess_insights.dataset import describe_filters
+
+    text = describe_filters(since=datetime(2024, 1, 1, tzinfo=timezone.utc), until=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    assert "since 2024-01-01" in text and "until 2024-12-31" in text

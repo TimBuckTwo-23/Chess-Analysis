@@ -1,0 +1,249 @@
+{
+ "source": "Real chess.com PubAPI game objects from public GitHub archive dumps and VCR cassettes (erik 2009 archives, MREKOO/DSA210 dumps, danrod, raph, chrismaltais 2020 cassette, sarartur 2024 cassette). Parser edge cases; 'archive_month' is the monthly archive the game was listed in (null when unknown).",
+ "games": [
+  {
+   "case": "crazyhouse",
+   "archive_month": null,
+   "game": {
+    "url": "https://www.chess.com/game/live/27104516821",
+    "pgn": "[Event \"Live Chess - Crazyhouse\"]\n[Site \"Chess.com\"]\n[Date \"2021.10.04\"]\n[Round \"-\"]\n[White \"vladalekic\"]\n[Black \"DiegitON\"]\n[Result \"1-0\"]\n[Variant \"Crazyhouse\"]\n[SetUp \"1\"]\n[FEN \"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR/ w KQkq - 0 1\"]\n[Tournament \"https://www.chess.com/tournament/live/10-crazyhouse-2639913\"]\n[CurrentPosition \"rn2kbnr/ppp3pp/3ppq2/4p3/4P3/2N2N1P/PPPP1PP1/R1BQK2R b KQkq -\"]\n[Timezone \"UTC\"]\n[ECO \"C41\"]\n[ECOUrl \"https://www.chess.com/openings/Philidor-Defense-3.Bc4\"]\n[UTCDate \"2021.10.04\"]\n[UTCTime \"16:40:03\"]\n[WhiteElo \"1939\"]\n[BlackElo \"799\"]\n[TimeControl \"60\"]\n[Termination \"vladalekic won on time\"]\n[StartTime \"16:40:03\"]\n[EndDate \"2021.10.04\"]\n[EndTime \"16:41:13\"]\n[Link \"https://www.chess.com/game/live/27104516821\"]\n\n1. e4 {[%clk 0:00:59.9]} 1... e5 {[%clk 0:00:53]} 2. Nf3 {[%clk 0:00:58.6]} 2... d6 {[%clk 0:00:45.4]} 3. Bc4 {[%clk 0:00:55.5]} 3... Be6 {[%clk 0:00:29.9]} 4. Bxe6 {[%clk 0:00:53.5]} 4... fxe6 {[%clk 0:00:25]} 5. Nc3 {[%clk 0:00:53.4]} 5... Qf6 {[%clk 0:00:03.7]} 6. h3 {[%clk 0:00:53.3]} 1-0\n",
+    "time_control": "60",
+    "end_time": 1633365673,
+    "rated": true,
+    "tcn": "mC0KgvZRfA6SAS1Sbs7Tpx",
+    "uuid": "b7e02d26-2531-11ec-b743-09ff3c010001",
+    "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "fen": "rn2kbnr/ppp3pp/3ppq2/4p3/4P3/2N2N1P/PPPP1PP1/R1BQK2R b KQkq -",
+    "time_class": "bullet",
+    "rules": "crazyhouse",
+    "white": {
+     "rating": 1939,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/vladalekic",
+     "username": "vladalekic",
+     "uuid": "699ff658-0893-11e7-8022-000000000000"
+    },
+    "black": {
+     "rating": 799,
+     "result": "timeout",
+     "@id": "https://api.chess.com/pub/player/diegiton",
+     "username": "DiegitON",
+     "uuid": "505848b2-2526-11ec-8ee5-eb36116abf2b"
+    },
+    "tournament": "https://api.chess.com/pub/tournament/10-crazyhouse-2639913"
+   }
+  },
+  {
+   "case": "zero_move_2009",
+   "archive_month": "2009-11",
+   "game": {
+    "url": "https://www.chess.com/game/daily/29724754",
+    "pgn": "[Event \"100 Years of Chemotherapy - Remembrance Tournament - Round 2\"]\n[Site \"Chess.com\"]\n[Date \"2009.11.27\"]\n[Round \"-\"]\n[White \"pachi\"]\n[Black \"erik\"]\n[Result \"0-1\"]\n[Tournament \"https://www.chess.com/tournament/100-years-of-chemotherapy---remembrance-tournament\"]\n[CurrentPosition \"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\"]\n[Timezone \"UTC\"]\n[UTCDate \"2009.11.27\"]\n[UTCTime \"17:47:27\"]\n[WhiteElo \"1360\"]\n[BlackElo \"1977\"]\n[TimeControl \"1/259200\"]\n[Termination \"erik won on time\"]\n[StartTime \"17:47:27\"]\n[EndDate \"2009.11.30\"]\n[EndTime \"18:02:31\"]\n[Link \"https://www.chess.com/game/daily/29724754\"]\n\n0-1\n",
+    "time_control": "1/259200",
+    "end_time": 1259604151,
+    "rated": true,
+    "uuid": "ed3caa98-db7c-11de-82f2-00000001000b",
+    "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "start_time": 1259344047,
+    "time_class": "daily",
+    "rules": "chess",
+    "white": {
+     "rating": 1360,
+     "result": "timeout",
+     "@id": "https://api.chess.com/pub/player/pachi",
+     "username": "pachi",
+     "uuid": "4ac0ed34-bf1b-11dd-8008-000000000000"
+    },
+    "black": {
+     "rating": 1977,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/erik",
+     "username": "erik",
+     "uuid": "fe696c00-fcba-11db-8029-000000000000"
+    },
+    "tournament": "https://api.chess.com/pub/tournament/100-years-of-chemotherapy---remembrance-tournament"
+   }
+  },
+  {
+   "case": "month_boundary_2009",
+   "archive_month": "2009-11",
+   "game": {
+    "url": "https://www.chess.com/game/daily/29733020",
+    "pgn": "[Event \"Massive Premium Tourney - Round 1\"]\n[Site \"Chess.com\"]\n[Date \"2009.11.28\"]\n[Round \"-\"]\n[White \"RandomJSDev\"]\n[Black \"erik\"]\n[Result \"0-1\"]\n[Tournament \"https://www.chess.com/tournament/massive-premium-tourney\"]\n[CurrentPosition \"4r1k1/1pp3q1/3p4/3npQ2/1P6/8/2P2PPP/R5K1 w - - 1 25\"]\n[Timezone \"UTC\"]\n[ECO \"B08\"]\n[ECOUrl \"https://www.chess.com/openings/Pirc-Defense-Classical-Variation-4...Bg7\"]\n[UTCDate \"2009.11.28\"]\n[UTCTime \"16:09:52\"]\n[WhiteElo \"1309\"]\n[BlackElo \"1978\"]\n[TimeControl \"1/259200\"]\n[Termination \"erik won by resignation\"]\n[StartTime \"16:09:52\"]\n[EndDate \"2009.12.01\"]\n[EndTime \"00:25:08\"]\n[Link \"https://www.chess.com/game/daily/29733020\"]\n\n1. e4 d6 2. d4 Nf6 3. Nc3 g6 4. Nf3 Bg7 5. Bg5 h6 6. Be3 O-O 7. Bd3 Nbd7 8. O-O e5 9. Qd2 Kh7 10. b4 a5 11. a3 axb4 12. axb4 Rxa1 13. Rxa1 Ng4 14. d5 Nxe3 15. Qxe3 f5 16. exf5 gxf5 17. Ne4 Nf6 18. Neg5+ hxg5 19. Nxg5+ Kg8 20. Qh3 Re8 21. Bxf5 Bxf5 22. Qxf5 Qd7 23. Ne6 Nxd5 24. Nxg7 Qxg7 0-1\n",
+    "time_control": "1/259200",
+    "end_time": 1259627108,
+    "rated": true,
+    "tcn": "mCZRlB!Tbs2Ugv92cM3VMu8!ft5Zeg0Kdl!3jzWGiqGzqz4afaTEBJEulu1LCLULsCZTCMVMvM3!ux98tL6LxL7ZMSTJS2Z2",
+    "uuid": "75cc5172-dc38-11de-8014-00000001000b",
+    "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "fen": "4r1k1/1pp3q1/3p4/3npQ2/1P6/8/2P2PPP/R5K1 w - - 1 25",
+    "start_time": 1259424592,
+    "time_class": "daily",
+    "rules": "chess",
+    "white": {
+     "rating": 1309,
+     "result": "resigned",
+     "@id": "https://api.chess.com/pub/player/randomjsdev",
+     "username": "RandomJSDev",
+     "uuid": "6d01f5a4-cd99-11de-805f-000000000000"
+    },
+    "black": {
+     "rating": 1978,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/erik",
+     "username": "erik",
+     "uuid": "fe696c00-fcba-11db-8029-000000000000"
+    },
+    "tournament": "https://api.chess.com/pub/tournament/massive-premium-tourney"
+   }
+  },
+  {
+   "case": "thematic_2009",
+   "archive_month": "2009-12",
+   "game": {
+    "url": "https://www.chess.com/game/daily/29737402",
+    "pgn": "[Event \"Kings Gambit Thematic Tournament - Round 3\"]\n[Site \"Chess.com\"]\n[Date \"2009.11.29\"]\n[Round \"-\"]\n[White \"erik\"]\n[Black \"Gileslewey\"]\n[Result \"0-1\"]\n[SetUp \"1\"]\n[FEN \"rnbqkbnr/pppp1ppp/8/4p3/4PP2/8/PPPP2PP/RNBQKBNR b KQkq f3 1 2\"]\n[Tournament \"https://www.chess.com/tournament/kings-gambit-thematic-tournament\"]\n[CurrentPosition \"rnbqk2r/ppp2p2/8/3pPnbp/3P1pp1/3Q4/PPPNB1P1/R1B2KNR w kq - 7 12\"]\n[Timezone \"UTC\"]\n[ECO \"C30\"]\n[ECOUrl \"https://www.chess.com/openings/Kings-Gambit\"]\n[UTCDate \"2009.11.29\"]\n[UTCTime \"01:34:38\"]\n[WhiteElo \"1924\"]\n[BlackElo \"1921\"]\n[TimeControl \"1/259200\"]\n[Termination \"Gileslewey won by resignation\"]\n[StartTime \"01:34:38\"]\n[EndDate \"2009.12.03\"]\n[EndTime \"07:21:30\"]\n[Link \"https://www.chess.com/game/daily/29737402\"]\n\n2... exf4 3. Nf3 g5 4. h4 g4 5. Ng1 d5 6. Be2 h5 7. e5 Be7 8. d4 Bxh4+ 9. Kf1 Bg5 10. Qd3 Ne7 11. Nd2 Nf5 0-1\n",
+    "time_control": "1/259200",
+    "end_time": 1259824890,
+    "rated": true,
+    "tcn": "KDgv2MpFMEvgZJfm3NCK90lB0FefFMdt!0bl0L",
+    "uuid": "5b6d949a-dc87-11de-8192-00000001000b",
+    "initial_setup": "rnbqkbnr/pppp1ppp/8/4p3/4PP2/8/PPPP2PP/RNBQKBNR b KQkq f3 1 2",
+    "fen": "rnbqk2r/ppp2p2/8/3pPnbp/3P1pp1/3Q4/PPPNB1P1/R1B2KNR w kq - 7 12",
+    "start_time": 1259458478,
+    "time_class": "daily",
+    "rules": "chess",
+    "white": {
+     "rating": 1924,
+     "result": "resigned",
+     "@id": "https://api.chess.com/pub/player/erik",
+     "username": "erik",
+     "uuid": "fe696c00-fcba-11db-8029-000000000000"
+    },
+    "black": {
+     "rating": 1921,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/gileslewey",
+     "username": "Gileslewey",
+     "uuid": "799b6e9c-e6a6-11dd-8050-000000000000"
+    },
+    "tournament": "https://api.chess.com/pub/tournament/kings-gambit-thematic-tournament"
+   }
+  },
+  {
+   "case": "month_boundary_2024",
+   "archive_month": "2024-04",
+   "game": {
+    "url": "https://www.chess.com/game/daily/639092605",
+    "pgn": "[Event \"Let's Play!\"]\n[Site \"Chess.com\"]\n[Date \"2024.03.27\"]\n[Round \"-\"]\n[White \"MrxWade\"]\n[Black \"MrEKO0\"]\n[Result \"0-1\"]\n[CurrentPosition \"rnbqkbnr/ppp2ppp/4p3/3p4/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq d6 0 3\"]\n[Timezone \"UTC\"]\n[ECO \"C00\"]\n[ECOUrl \"https://www.chess.com/openings/French-Defense-Knight-Variation-2...d5\"]\n[UTCDate \"2024.03.27\"]\n[UTCTime \"10:47:12\"]\n[WhiteElo \"400\"]\n[BlackElo \"1265\"]\n[TimeControl \"1/604800\"]\n[Termination \"MrEKO0 won on time\"]\n[StartTime \"10:47:12\"]\n[EndDate \"2024.05.01\"]\n[EndTime \"05:14:18\"]\n[Link \"https://www.chess.com/game/daily/639092605\"]\n\n1. e4 {[%clk 0:00:01.6]} 1... e6 {[%clk 4:23:05]} 2. Nf3 {[%clk 62:05:43.1]} 2... d5 {[%clk 0:09:49.2]} 0-1\n",
+    "time_control": "1/604800",
+    "end_time": 1714540458,
+    "rated": false,
+    "tcn": "mC0SgvZJ",
+    "uuid": "5e091ed0-ec27-11ee-948b-de465e01000b",
+    "initial_setup": "",
+    "fen": "rnbqkbnr/ppp2ppp/4p3/3p4/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq d6 0 3",
+    "start_time": 1711536432,
+    "time_class": "daily",
+    "rules": "chess",
+    "white": {
+     "rating": 400,
+     "result": "timeout",
+     "@id": "https://api.chess.com/pub/player/mrxwade",
+     "username": "MrxWade",
+     "uuid": "2e4e16a0-a36c-11ed-81cb-357d628da5b6"
+    },
+    "black": {
+     "rating": 1265,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/mreko0",
+     "username": "MrEKO0",
+     "uuid": "8008d55a-a521-11ed-adc8-f9403c3e5715"
+    },
+    "eco": "https://www.chess.com/openings/French-Defense-Knight-Variation-2...d5"
+   }
+  },
+  {
+   "case": "one_ply_2026",
+   "archive_month": null,
+   "game": {
+    "url": "https://www.chess.com/game/live/167005529374",
+    "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2026.04.07\"]\n[Round \"-\"]\n[White \"pigor1\"]\n[Black \"NandoPro1\"]\n[Result \"1/2-1/2\"]\n[CurrentPosition \"rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1\"]\n[Timezone \"UTC\"]\n[ECO \"B00\"]\n[ECOUrl \"https://www.chess.com/openings/Kings-Pawn-Opening\"]\n[UTCDate \"2026.04.07\"]\n[UTCTime \"22:59:47\"]\n[WhiteElo \"1699\"]\n[BlackElo \"1780\"]\n[TimeControl \"600\"]\n[Termination \"Game drawn by agreement\"]\n[StartTime \"22:59:47\"]\n[EndDate \"2026.04.07\"]\n[EndTime \"23:00:21\"]\n[Link \"https://www.chess.com/game/live/167005529374\"]\n\n1. e4 {[%clk 0:09:59.9]} 1/2-1/2\n",
+    "time_control": "600",
+    "end_time": 1775602821,
+    "rated": true,
+    "accuracies": {
+     "white": 100,
+     "black": 0
+    },
+    "tcn": "mC",
+    "uuid": "79d87e28-32d5-11f1-b755-ca11e201000f",
+    "initial_setup": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+    "time_class": "rapid",
+    "rules": "chess",
+    "white": {
+     "rating": 1699,
+     "result": "agreed",
+     "@id": "https://api.chess.com/pub/player/pigor1",
+     "username": "pigor1",
+     "uuid": "87e2e49a-accd-11ea-99fb-5318f231855e"
+    },
+    "black": {
+     "rating": 1780,
+     "result": "agreed",
+     "@id": "https://api.chess.com/pub/player/nandopro1",
+     "username": "NandoPro1",
+     "uuid": "0aac8764-641b-11f0-a556-db35216248c2"
+    },
+    "eco": "https://www.chess.com/openings/Kings-Pawn-Opening"
+   }
+  },
+  {
+   "case": "schema_2020",
+   "archive_month": "2020-11",
+   "game": {
+    "url": "https://www.chess.com/live/game/5770821419",
+    "pgn": "[Event \"Live Chess\"]\n[Site \"Chess.com\"]\n[Date \"2020.11.18\"]\n[Round \"-\"]\n[White \"cromat18\"]\n[Black \"steezymalteezy\"]\n[Result \"1-0\"]\n[CurrentPosition \"rnbqk1nr/pp3Q1p/3b2p1/3pN3/8/8/PPPP1PPP/RNB1KB1R b KQkq -\"]\n[Timezone \"UTC\"]\n[ECO \"C40\"]\n[ECOUrl \"https://www.chess.com/openings/Kings-Pawn-Opening-Kings-Knight-Elephant-Gambit-3.exd5\"]\n[UTCDate \"2020.11.18\"]\n[UTCTime \"16:38:19\"]\n[WhiteElo \"1199\"]\n[BlackElo \"984\"]\n[TimeControl \"600\"]\n[Termination \"cromat18 won by checkmate\"]\n[StartTime \"16:38:19\"]\n[EndDate \"2020.11.18\"]\n[EndTime \"16:40:35\"]\n[Link \"https://www.chess.com/live/game/5770821419\"]\n\n1. e4 {[%clk 0:09:59.9]} 1... e5 {[%clk 0:09:54.8]} 2. Nf3 {[%clk 0:09:58.5]} 2... d5 {[%clk 0:09:43.4]} 3. exd5 {[%clk 0:09:49.2]} 3... c6 {[%clk 0:09:27.5]} 4. Nxe5 {[%clk 0:09:31]} 4... cxd5 {[%clk 0:09:09.5]} 5. Qh5 {[%clk 0:09:08]} 5... g6 {[%clk 0:09:02.9]} 6. Qf3 {[%clk 0:09:03.5]} 6... Bd6 {[%clk 0:08:46.3]} 7. Qxf7# {[%clk 0:09:01.3]} 1-0",
+    "time_control": "600",
+    "end_time": 1605717635,
+    "rated": true,
+    "fen": "rnbqk1nr/pp3Q1p/3b2p1/3pN3/8/8/PPPP1PPP/RNB1KB1R b KQkq -",
+    "time_class": "rapid",
+    "rules": "chess",
+    "white": {
+     "rating": 1199,
+     "result": "win",
+     "@id": "https://api.chess.com/pub/player/cromat18",
+     "username": "cromat18"
+    },
+    "black": {
+     "rating": 984,
+     "result": "checkmated",
+     "@id": "https://api.chess.com/pub/player/steezymalteezy",
+     "username": "steezymalteezy"
+    }
+   }
+  },
+  {
+   "case": "current_games_endpoint",
+   "archive_month": null,
+   "game": {
+    "url": "https://www.chess.com/game/daily/692238445",
+    "move_by": 1729443378,
+    "pgn": "[Event \"Let's Play!\"]\n[Site \"Chess.com\"]\n[Date \"2024.08.18\"]\n[Round \"1\"]\n[White \"afgano29\"]\n[Black \"Mireiaaa25\"]\n[Result \"*\"]\n[CurrentPosition \"rn1qkb1r/pb3ppp/1p2pn2/2pp4/2P5/1P3NP1/P2PPPBP/RNBQ1RK1 w kq c6 0 7\"]\n[Timezone \"UTC\"]\n[ECO \"A13\"]\n[ECOUrl \"https://www.chess.com/openings/English-Opening-Agincourt-Defense...3.g3-b6-4.Bg2-Bb7\"]\n[UTCDate \"2024.08.18\"]\n[UTCTime \"22:13:51\"]\n[WhiteElo \"1944\"]\n[BlackElo \"1082\"]\n[TimeControl \"1/1209600\"]\n[StartTime \"22:13:51\"]\n[Link \"https://www.chess.com/game/daily/692238445\"]\n\n1. c4 {[%clk 335:59:52]} 1... e6 {[%clk 323:24:18]} 2. Nf3 {[%clk 248:43:54]} 2... d5 {[%clk 322:06:23]} 3. g3 {[%clk 133:34:39]} 3... b6 {[%clk 318:53:27]} 4. Bg2 {[%clk 103:04:25]} 4... Bb7 {[%clk 261:40:22]} 5. O-O {[%clk 335:08:02]} 5... Nf6 {[%clk 263:07:46]} 6. b3 {[%clk 85:42:31]} 6... c5 {[%clk 129:51:54]} *\n",
+    "time_control": "1/1209600",
+    "last_activity": 1728233778,
+    "rated": false,
+    "turn": "white",
+    "fen": "rn1qkb1r/pb3ppp/1p2pn2/2pp4/2P5/1P3NP1/P2PPPBP/RNBQ1RK1 w kq c6 0 7",
+    "start_time": 1724019231,
+    "time_class": "daily",
+    "rules": "chess",
+    "white": "https://api.chess.com/pub/player/afgano29",
+    "black": "https://api.chess.com/pub/player/mireiaaa25"
+   }
+  }
+ ]
+}

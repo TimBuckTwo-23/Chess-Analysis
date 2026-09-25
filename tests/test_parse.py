@@ -200,8 +200,50 @@ def test_parsing_is_fast(raw_games):
     for i in range(3000):
         g = dict(raw_games[i % 3])
         g["uuid"] = f"u{i}"
+        g["url"] = f"https://www.chess.com/game/live/{900000000 + i}"  # distinct games have distinct URLs
         many.append(g)
     t0 = time.perf_counter()
     parsed = parse.parse_games(many, "testerbob")
     assert len(parsed) == 3000
     assert time.perf_counter() - t0 < 6.0
+
+
+def test_pgn_with_bom_and_windows_line_endings(fixtures_dir):
+    text = (fixtures_dir / "sample_games.pgn").read_text(encoding="utf-8")
+    plain = parse.games_from_pgn(text, "testerbob")
+    windows = parse.games_from_pgn("\ufeff" + text.replace("\n", "\r\n"), "testerbob")
+    assert [(g.game_id, g.moves_san, g.clocks, g.outcome, g.opening) for g in windows] == [
+        (g.game_id, g.moves_san, g.clocks, g.outcome, g.opening) for g in plain
+    ]
+    first = parse.split_pgn("\ufeff" + text)[0]
+    assert parse.parse_pgn_headers(first)["Event"] == "Live Chess"
+
+
+def test_pgn_import_recognises_variants_and_odds_games():
+    def pgn(extra, event="Live Chess"):
+        return (
+            f'[Event "{event}"]\n[Site "Chess.com"]\n[White "me"]\n[Black "you"]\n[Result "1-0"]\n{extra}'
+            '[TimeControl "180"]\n[Termination "me won by resignation"]\n[Link "https://www.chess.com/game/live/9"]\n\n1. e4 e5 1-0\n'
+        )
+
+    odds = pgn('[SetUp "1"]\n[FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/R2QKB1R w KQkq - 0 1"]\n', "Live Chess - Odds Chess")
+    assert parse.games_from_pgn(odds, "me")[0].rules == "oddschess"
+    koth = pgn('[Variant "King of the Hill"]\n', "Live Chess - King of the Hill")
+    assert parse.games_from_pgn(koth, "me")[0].rules == "kingofthehill"
+    c960 = pgn('[Variant "Chess960"]\n[SetUp "1"]\n[FEN "bqnbrknr/pppppppp/8/8/8/8/PPPPPPPP/BQNBRKNR w HEhe - 0 1"]\n')
+    assert parse.games_from_pgn(c960, "me")[0].rules == "chess960"
+    assert parse.games_from_pgn(pgn(""), "me")[0].rules == "chess"
+
+
+def test_parse_games_survives_any_malformed_record():
+    raws = [
+        {"white": "https://api.chess.com/pub/player/tester", "black": "https://api.chess.com/pub/player/x"},
+        {"white": {"username": "tester", "result": "win"}, "black": {"username": "x", "result": "resigned"},
+         "end_time": 1700000000, "accuracies": "n/a"},
+        {"white": {"username": "tester", "result": "win"}, "black": {"username": "x", "result": "resigned"},
+         "end_time": 1700000000, "pgn": 12345},
+        None,
+        "not a game",
+    ]
+    games = parse.parse_games(raws, "tester")
+    assert all(g.outcome == "win" for g in games)
