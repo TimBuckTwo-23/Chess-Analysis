@@ -1,8 +1,8 @@
 """Machine-readable JSON export of a Report.
 
-The output is strict JSON: datetimes become ISO-8601 strings, dataclasses become
-dicts (``Insight`` gains its computed ``priority``), NaN/inf become null, and
-numpy / pandas values are converted to plain Python.
+The output is strict JSON: datetimes become ISO-8601 strings, durations become
+seconds, dataclasses become dicts (``Insight`` gains its computed ``priority``),
+NaN/inf/NaT become null, and numpy / pandas values are converted to plain Python.
 """
 
 from __future__ import annotations
@@ -20,7 +20,33 @@ from typing import Any
 
 from ..models import Insight, Report
 
+try:  # numpy comes with pandas; it is only needed to recognise its time scalars
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
+
 _MAX_DEPTH = 64
+
+
+def _np_time(obj: Any) -> Any:
+    """numpy timedelta64 -> seconds, datetime64 -> ISO text, NaT -> None (``...`` for anything else).
+
+    timedelta64 subclasses numpy's integer type, so this must run before the Integral branch.
+    """
+    if _np is None or not isinstance(obj, (_np.timedelta64, _np.datetime64)):
+        return ...
+    if _np.isnat(obj):
+        return None
+    if isinstance(obj, _np.timedelta64):
+        try:
+            return _finite(float(obj / _np.timedelta64(1, "s")))
+        except (TypeError, ValueError, OverflowError):  # months / years have no fixed length
+            return str(obj)
+    try:
+        value = obj.astype("datetime64[us]").item()
+    except (ValueError, OverflowError, TypeError):
+        value = None
+    return value.isoformat() if isinstance(value, datetime) else str(_np.datetime_as_string(obj))
 
 
 def _finite(x: float) -> float | None:
@@ -45,6 +71,9 @@ def jsonable(obj: Any, _depth: int = 0) -> Any:
         return obj
     if type(obj).__name__ in ("NAType", "NaTType"):
         return None
+    converted = _np_time(obj)
+    if converted is not ...:
+        return converted
     if isinstance(obj, int):
         return int(obj)
     if isinstance(obj, float):

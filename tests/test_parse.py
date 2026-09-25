@@ -247,3 +247,42 @@ def test_parse_games_survives_any_malformed_record():
     ]
     games = parse.parse_games(raws, "tester")
     assert all(g.outcome == "win" for g in games)
+
+
+# --------------------------------------------------------------------------- PGNs from outside chess.com
+def _club_pgn(rounds=((1, "1-0", "1. e4 e5"), (2, "0-1", "1. d4 d5"), (3, "1/2-1/2", "1. c4 c5")), date="2024.05.04"):
+    """A same-day match between the same two players: no Link, no UTCDate/UTCTime (over-the-board, ChessBase ...)."""
+    return "".join(
+        f'[Event "Club match"]\n[Site "Club"]\n[Date "{date}"]\n[Round "{rnd}"]\n[White "Me"]\n[Black "Friend"]\n'
+        f'[Result "{res}"]\n\n{moves} {res}\n\n'
+        for rnd, res, moves in rounds
+    )
+
+
+def test_pgn_without_link_keeps_same_day_games_between_the_same_players_apart():
+    """The id used to be date+time+players, so rounds 2 and 3 were silently dropped as 'repeats'."""
+    games = parse.games_from_pgn(_club_pgn(), "Me")
+    assert [(g.outcome, g.moves_san) for g in games] == [("win", ["e4", "e5"]), ("loss", ["d4", "d5"]), ("draw", ["c4", "c5"])]
+    assert len({g.game_id for g in games}) == 3
+
+
+def test_pgn_without_link_still_drops_the_same_game_saved_twice():
+    text = _club_pgn()
+    again = "﻿" + text.replace("\n", "\r\n").replace("1. e4 e5", "1. e4 {best by test} e5")
+    games = parse.merge_games(parse.games_from_pgn(text, "Me") + parse.games_from_pgn(again, "Me"))
+    assert len(games) == 3
+
+
+def test_same_day_pgn_games_keep_their_round_order():
+    games = parse.games_from_pgn(_club_pgn(rounds=[(10, "1-0", "1. e4 e5"), (2, "0-1", "1. d4 d5"), (1, "1-0", "1. c4 c5")]), "Me")
+    assert [g.moves_san[0] for g in games] == ["c4", "d4", "e4"]  # rounds 1, 2, 10
+
+
+def test_pgn_with_only_a_date_header_is_dated_by_it(caplog):
+    """It used to get end_time 1970-01-01, so --since dropped it and reports said 'played 1970'."""
+    games = parse.games_from_pgn(_club_pgn(), "Me")
+    assert {g.end_time for g in games} == {datetime(2024, 5, 4, tzinfo=timezone.utc)}
+    with caplog.at_level("WARNING", logger="chess_insights.parse"):
+        undated = parse.games_from_pgn(_club_pgn(date="????.??.??"), "Me")
+    assert [g.end_time for g in undated] == [parse.UNDATED] * 3
+    assert "3 game(s) have no date" in caplog.text

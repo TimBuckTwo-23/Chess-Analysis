@@ -45,17 +45,49 @@ _HASH = re.compile(r"(?:(?<=\s)|^)#")  # headings, and the optional closing #s o
 # a list bullet ("- x", "+ x"), or a line of only - / = (thematic break "---", setext underline "===")
 _LEADING_MARK = re.compile(r"^(?:[-+](?=\s|$)|[-=](?=[-=\s]*$))")
 _ORDERED = re.compile(r"^(\d{1,9})([.)])(?=\s|$)")  # "1. e4": escape the dot, not the digit
+# A web address where GitHub would autolink one: at the start, after a space or after ( * _ ~.
+# Escaping it character by character would leave the backslashes in the link, so it is written
+# as an explicit link instead.
+_BARE_URL = re.compile(r"(?:(?<=[\s(*_~])|^)(?:https?://|www\.(?=[A-Za-z0-9]))[^\s<>]+", re.I)
+_URL_TRAILING = ".,:;!?*_~'\""  # punctuation that ends a sentence rather than the address (as GitHub)
 
 
-def md_text(value: Any) -> str:
-    """Escape one line of inline text: collapses newlines, neutralises markup, HTML and pipes."""
-    text = " ".join(text_or_empty(value).split())
+def _escape(text: str) -> str:
     text = _SPECIAL.sub(r"\\\1", text)
     text = _UNDERSCORE.sub(r"\\_", text)
     text = _ENTITY.sub("&amp;", text)
     text = _HASH.sub(r"\\#", text)
     text = _LEADING_MARK.sub(lambda m: "\\" + m.group(0), text)
     return _ORDERED.sub(r"\1\\\2", text)
+
+
+def _url_end(run: str) -> int:
+    """Length of the address in ``run``: trailing punctuation and unbalanced ")" are not part of it."""
+    end = len(run)
+    while end:
+        ch = run[end - 1]
+        if ch in _URL_TRAILING or (ch == ")" and run[:end].count("(") < run[:end].count(")")):
+            end -= 1
+        else:
+            break
+    return end
+
+
+def md_text(value: Any) -> str:
+    """Escape one line of inline text: collapses newlines, neutralises markup, HTML and pipes.
+    Bare http(s) / www addresses become plain links whose text and target are the address itself."""
+    text = " ".join(text_or_empty(value).split())
+    out, pos = [], 0
+    for m in _BARE_URL.finditer(text):
+        run = m.group(0)[: _url_end(m.group(0))]
+        target = run if run.lower().startswith("http") else "http://" + run  # www. links are http, as on GitHub
+        if not run or not safe_url(target):
+            continue
+        # escaping a piece on its own may add a backslash more than needed, never one fewer
+        out += [_escape(text[pos : m.start()]), md_link(target, run)]
+        pos = m.start() + len(run)
+    out.append(_escape(text[pos:]))
+    return "".join(out)
 
 
 def md_code(value: Any) -> str:
@@ -74,9 +106,10 @@ def md_link(url: Any, label: str) -> str:
     if not safe:
         return md_text(url)
     target = safe
-    for char, code in (("\\", "%5C"), ("(", "%28"), (")", "%29"), ("<", "%3C"), (">", "%3E")):
+    # "|" would split a table cell even inside a link; the rest could end the destination early
+    for char, code in (("\\", "%5C"), ("(", "%28"), (")", "%29"), ("<", "%3C"), (">", "%3E"), ("|", "%7C"), ("`", "%60")):
         target = target.replace(char, code)
-    return f"[{md_text(label)}]({target})"
+    return f"[{_escape(' '.join(text_or_empty(label).split()))}]({target})"
 
 
 def _games_line(urls: Iterable[Any], label: str) -> str:

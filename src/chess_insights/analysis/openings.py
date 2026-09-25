@@ -10,20 +10,32 @@ Groups:
 
 Each group's score-vs-expected is shrunk toward 0 (``stats.shrink``) before it is
 ranked or charted. A family is only called a strength/weakness under the project-wide
-rule (``stats.significance`` at ``stats.ALPHA``):
+rule (``stats.significance`` at ``stats.ALPHA``), and what is tested is how it compares
+with *your other openings with the same colour* (a difference test of score minus
+expected):
 
-* it is judged against the *colour-adjusted* expectation (``stats.colour_expected``):
-  White normally scores ~2 points per 100 games above the Elo formula and Black ~2
-  below, so without the adjustment every White opening drifts toward "strength" and
-  every Black one toward "weakness";
+* not with the rating's expectation alone: a rating that lags your current strength
+  (an improving or declining player) shifts every game, which would make every opening
+  you play often look like a "strength" (or "weakness");
+* not with your games of the other colour: how you do with Black as a whole is the
+  results module's colour question, so a weak Black makes no Black opening a weakness,
+  and White's first-move edge (whose exact size is uncertain) cancels out;
 * the per-family tests are weighted-Benjamini-Hochberg adjusted
-  (``stats.weighted_bh_adjust``, weights = games played) because every family is
-  tested at once, and the openings you play most get most of the error budget.
+  (``stats.weighted_bh_adjust``, weights = games played) because every family is tested
+  at once, and the openings you play most get most of the error budget. A family is
+  only claimed when its own score against the rating points the same way (so of two
+  openings that differ, only the one that is off your rating is named).
+
+If one opening is almost all of your games with a colour, it cannot be told apart from
+that colour, and it is not claimed here.
 
 "You often lose quickly in X" compares, within the same family, how often your losses
 are quick collapses with how often your *wins* are (your opponents' quick collapses in
-the same kind of positions): a sharp opening produces short games for both sides and is
-not a weakness. Two-proportion test, weighted BH over families, ``stats.STRICT_ALPHA``.
+the same kind of positions: a sharp opening produces short games for both sides), and
+then with the same gap in your other openings (your resignation habits: a player who
+resigns early has quick losses in every opening). Difference-in-differences of
+proportions (``stats.proportion_gap_test``), weighted BH over families,
+``stats.STRICT_ALPHA``.
 """
 
 from __future__ import annotations
@@ -38,17 +50,18 @@ from ..models import Chart, Color, Game, Insight, InsightKind, Kpi, ModuleResult
 from ..stats import (
     ALPHA,
     STRICT_ALPHA,
-    WHITE_EDGE,
+    MeanTest,
     ScoreSummary,
     clamp,
+    difference_test,
     pct,
+    proportion_gap_test,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
     shrink,
     significance,
     summarize,
-    two_proportion_test,
     weighted_bh_adjust,
 )
 from .results import MAX_EXAMPLES, fmt_points, recent_urls, slugify
@@ -117,7 +130,6 @@ class OpeningGroup:
     summary: ScoreSummary  # against the Elo expectation (tables, charts, KPIs)
     shrunk: Optional[float]
     short_losses: list[Game]
-    adjusted: ScoreSummary  # against the colour-adjusted expectation (the claim test)
     short_wins: list[Game]
 
     @property
@@ -166,7 +178,6 @@ def build_group(label: str, color: Color, games: Sequence[Game], colour_total: i
         summary=s,
         shrunk=s.shrunk(th.prior_n),
         short_losses=[g for g in games if is_short_loss(g, th.short_loss_moves)],
-        adjusted=summarize(games, colour_adjust=True),
         short_wins=[g for g in games if is_short_decisive(g, th.short_loss_moves, "win")],
     )
 
@@ -383,44 +394,114 @@ def _score_study(grp: OpeningGroup, kind: InsightKind, own: bool, th: Thresholds
     return study
 
 
-def score_insights(families: list[OpeningGroup], th: Thresholds) -> tuple[list[Insight], dict[str, Any]]:
-    """Strength/weakness per (colour, family) against the colour-adjusted expectation.
+@dataclass
+class FamilyTest:
+    """One family compared with the player's other games of the same colour."""
 
-    Weighted BH over every family tested (weights = rated games), at ``th.alpha``; the effect
-    that must clear ``min_effect`` is the colour-adjusted difference shrunk toward 0.
+    group: OpeningGroup
+    rest: ScoreSummary  # the other games with that colour
+    test: MeanTest  # difference_test(family, rest): points per game, both against the Elo expectation
+    prior_n: float = 10.0  # Thresholds.prior_n
+    p_adjusted: float = 1.0  # weighted BH over every family tested
+
+    @property
+    def effect(self) -> float:
+        """The gap shrunk toward 0 by the family's sample size (what must clear ``min_effect``)."""
+        return shrink(self.test.mean, self.group.summary.n_rated, 0.0, self.prior_n)
+
+
+def family_tests(families: list[OpeningGroup], by_colour: dict[Color, list[Game]], th: Thresholds) -> list[FamilyTest]:
+    """Each named family with enough rated games vs the rest of that colour's games, weighted-BH adjusted.
+
+    When a colour's games are exactly two groups (two families, or one family and some unnamed
+    games), both comparisons are the same test; it is kept once, for the group whose own score
+    is further from its rating.
     """
-    tested = [f for f in families if f.label != UNNAMED and f.summary.n_rated >= th.min_family_games]
-    adjusted = weighted_bh_adjust([f.adjusted.test.p_value for f in tested], [f.adjusted.n_rated for f in tested])
+    out: list[FamilyTest] = []
+    for grp in families:
+        if grp.label == UNNAMED or grp.summary.n_rated < th.min_family_games:
+            continue
+        ids = {id(g) for g in grp.games}
+        rest = summarize([g for g in by_colour[grp.color] if id(g) not in ids])
+        if rest.n_rated < th.min_family_games:
+            continue
+        out.append(FamilyTest(grp, rest, difference_test(grp.summary.test, rest.test), th.prior_n))
+    for color in ("white", "black"):
+        mine = [t for t in out if t.group.color == color]
+        others = [f for f in families if f.color == color and f.summary.n_rated]
+        if len(mine) == 2 and len(others) == 2:  # a mirrored pair: one test
+            drop = min(mine, key=lambda t: abs(t.group.summary.test.mean))
+            out.remove(drop)
+    adjusted = weighted_bh_adjust([t.test.p_value for t in out], [t.group.summary.n_rated for t in out])
+    for t, p in zip(out, adjusted, strict=True):
+        t.p_adjusted = p
+    return out
+
+
+def claimed_families(games: Sequence[Game], th: Thresholds) -> list[tuple[Color, str, InsightKind]]:
+    """(colour, family, kind) of every family this module calls a strength or weakness in ``games``.
+
+    The results module uses it to tell a colour gap that comes from one opening apart from a
+    colour-wide one (the same finding should not be reported twice).
+    """
+    by_colour, families = _families(games, th)
+    tests = family_tests([f for fs in families.values() for f in fs.values()], by_colour, th)
+    return [(t.group.color, t.group.label, kind) for t in tests if (kind := _claim_kind(t, th)) is not None]
+
+
+def _claim_kind(t: FamilyTest, th: Thresholds) -> Optional[InsightKind]:
+    """strength / weakness if ``t`` passes the claim rule, else None."""
+    own = t.group.summary.test.mean  # the family against its own rating expectation
+    significant, _ = significance(
+        t.test, th.min_family_games, t.p_adjusted, alpha=th.alpha, n=min(t.group.summary.n_rated, t.rest.n_rated)
+    )
+    if not significant or abs(t.effect) < th.min_effect:
+        return None
+    # the family must itself be off its rating in the same direction, not merely differ from the rest
+    if own * t.test.mean <= 0 or abs(own) < th.min_effect / 2:
+        return None
+    return "weakness" if t.test.mean < 0 else "strength"
+
+
+def score_insights(
+    families: list[OpeningGroup], by_colour: dict[Color, list[Game]], th: Thresholds
+) -> tuple[list[Insight], dict[str, Any]]:
+    """Strength/weakness per (colour, family): the family vs your other games with that colour.
+
+    Weighted BH over every family tested (weights = rated games), at ``th.alpha``; the gap that
+    must clear ``min_effect`` is shrunk toward 0 by the family's sample size.
+    """
     out: list[Insight] = []
     stats: dict[str, Any] = {}
-    for grp, p_adj in zip(tested, adjusted, strict=True):
-        s, a = grp.summary, grp.adjusted
-        significant, confidence = significance(a.test, th.min_family_games, p_adj, alpha=th.alpha)
-        effect = shrink(a.test.mean, a.n_rated, 0.0, th.prior_n)
+    for t in family_tests(families, by_colour, th):
+        grp, s, rest, test = t.group, t.group.summary, t.rest, t.test
+        n_eff = min(s.n_rated, rest.n_rated)
+        significant, confidence = significance(test, th.min_family_games, t.p_adjusted, alpha=th.alpha, n=n_eff)
+        kind = _claim_kind(t, th)
         stats[f"{grp.color}:{grp.label}"] = {
-            "p_value": a.test.p_value,
-            "p_adjusted": p_adj,
+            "p_value": test.p_value,
+            "p_adjusted": t.p_adjusted,
             "confidence": confidence,
             "significant": significant,
-            "colour_adjusted_delta": a.test.mean,
+            "gap": test.mean,
+            "rest_delta": rest.test.mean,
+            "rest_n": rest.n_rated,
         }
-        if abs(effect) < th.min_effect or not significant:
+        if kind is None:
             continue
-        kind: InsightKind = "weakness" if effect < 0 else "strength"
         own = chosen_by(grp.label) == grp.color
         fam, colour = grp.label, _colour(grp.color)
+        more = "more" if kind == "strength" else "less"
         if own:
-            title = f"The {fam} is {'costing you points' if kind == 'weakness' else 'working for you'} as {colour}"
+            title = f"You score {more} with the {fam} than with your other {colour} openings"
         else:
-            title = f"You {'struggle' if kind == 'weakness' else 'do well'} against the {fam} as {colour}"
-        elo = abs(score_to_elo_diff(s.test.mean, s.expected if s.expected is not None else 0.5))
-        edge = "above" if grp.color == "white" else "below"
+            title = f"You score {more} against the {fam} than against other openings as {colour}"
+        elo = abs(score_to_elo_diff(test.mean, s.expected if s.expected is not None else 0.5))
         detail = (
             f"You score {pct(s.rated_score)} in {s.n_rated} games where {pct(s.expected)} was expected "
-            f"({fmt_points(s.test.mean)} points per game, like playing about {elo:.0f} Elo "
-            f"{'below' if s.test.mean < 0 else 'above'} your rating). {colour} normally scores about "
-            f"{WHITE_EDGE * 50:.0f} points per 100 games {edge} the Elo expectation; allowing for that, the difference "
-            f"is {fmt_points(a.test.mean)}. It makes up {pct(grp.share)} of your games as {colour}."
+            f"({fmt_points(s.test.mean)} points per game against your rating); in your other {rest.n_rated} games as "
+            f"{colour}, {fmt_points(rest.test.mean)}. The gap is {fmt_points(test.mean)} points per game (about "
+            f"{elo:.0f} Elo). It makes up {pct(grp.share)} of your games as {colour}."
         )
         if kind == "weakness" and grp.short_losses:
             detail += (
@@ -434,7 +515,7 @@ def score_insights(families: list[OpeningGroup], th: Thresholds) -> tuple[list[I
                 category="openings",
                 title=title,
                 detail=detail,
-                severity=severity_from_points(effect),
+                severity=severity_from_points(t.effect),
                 confidence=confidence,
                 evidence={
                     "color": grp.color,
@@ -445,11 +526,13 @@ def score_insights(families: list[OpeningGroup], th: Thresholds) -> tuple[list[I
                     "expected": s.expected,
                     "delta": s.test.mean,
                     "shrunk_delta": grp.shrunk,
-                    "colour_adjusted_delta": a.test.mean,
-                    "effect": effect,
+                    "rest_delta": rest.test.mean,
+                    "rest_n": rest.n_rated,
+                    "gap": test.mean,
+                    "effect": t.effect,
                     "half_width": s.half_width,
-                    "p_value": a.test.p_value,
-                    "p_adjusted": p_adj,
+                    "p_value": test.p_value,
+                    "p_adjusted": t.p_adjusted,
                     "share": grp.share,
                     "short_losses": len(grp.short_losses),
                 },
@@ -461,52 +544,75 @@ def score_insights(families: list[OpeningGroup], th: Thresholds) -> tuple[list[I
 
 
 def early_loss_insights(
-    families: list[OpeningGroup], weak_keys: set[tuple[str, str]], th: Thresholds
+    families: list[OpeningGroup], eligible: Sequence[Game], weak_keys: set[tuple[str, str]], th: Thresholds
 ) -> tuple[list[Insight], dict[str, Any]]:
-    """Families where your losses are quick collapses much more often than your wins are.
+    """Families where your losses are quick collapses much more often than your wins are, beyond your usual gap.
 
-    Mirror baseline: in the same family, the share of your losses that ended by mate or
-    resignation within ``short_loss_moves`` moves vs the share of your wins that did (your
-    opponents' quick collapses in the same openings). The tested set depends only on how many
-    losses and wins a family has; tests are weighted-BH adjusted (weights = decisive games)
-    and a weakness needs ``th.strict_alpha``. Families that already carry a score weakness are
-    skipped: that insight reports their short losses.
+    In the same family, the share of your losses that ended by mate or resignation within
+    ``short_loss_moves`` moves minus the share of your wins that did (your opponents' quick
+    collapses in the same openings: a sharp opening is short for both sides); minus the same
+    gap over all your other games (your own resignation habits). The tested set depends only
+    on how many losses and wins a family has; tests are weighted-BH adjusted (weights =
+    decisive games) and a weakness needs ``th.strict_alpha``. Families that already carry a
+    score weakness are skipped: that insight reports their short losses.
     """
     tested = [
         f
         for f in families
         if f.label != UNNAMED and len(f.losses) >= th.min_decisive and len(f.wins) >= th.min_decisive
     ]
-    tests = [two_proportion_test(len(f.short_losses), len(f.losses), len(f.short_wins), len(f.wins)) for f in tested]
+    all_losses = sum(1 for g in eligible if g.outcome == "loss")
+    all_wins = sum(1 for g in eligible if g.outcome == "win")
+    all_short_losses = sum(1 for g in eligible if is_short_loss(g, th.short_loss_moves))
+    all_short_wins = sum(1 for g in eligible if is_short_decisive(g, th.short_loss_moves, "win"))
+    tests: list[MeanTest] = []
+    for f in tested:
+        n_l, n_s, n_w, n_ws = len(f.losses), len(f.short_losses), len(f.wins), len(f.short_wins)
+        tests.append(
+            proportion_gap_test(
+                n_s, n_l, n_ws, n_w, all_short_losses - n_s, all_losses - n_l, all_short_wins - n_ws, all_wins - n_w
+            )
+        )
     adjusted = weighted_bh_adjust([t.p_value for t in tests], [len(f.losses) + len(f.wins) for f in tested])
     out: list[Insight] = []
     stats: dict[str, Any] = {}
     for f, t, p_adj in zip(tested, tests, adjusted, strict=True):
         n_l, n_s, n_w, n_ws = len(f.losses), len(f.short_losses), len(f.wins), len(f.short_wins)
         loss_share, win_share = n_s / n_l, n_ws / n_w
-        significant, confidence = significance(t, 2 * th.min_decisive, p_adj, alpha=th.strict_alpha)
+        rest_l, rest_w = all_losses - n_l, all_wins - n_w
+        rest_gap = (
+            (all_short_losses - n_s) / rest_l - (all_short_wins - n_ws) / rest_w if rest_l and rest_w else None
+        )
+        significant, confidence = significance(t, th.min_decisive, p_adj, alpha=th.strict_alpha, n=min(n_l, n_w))
         stats[f"{f.color}:{f.label}"] = {
             "short_loss_share": loss_share,
             "short_win_share": win_share,
+            "rest_gap": rest_gap,
+            "gap": t.mean,
             "p_value": t.p_value,
             "p_adjusted": p_adj,
             "significant": significant,
         }
-        if (f.color, f.label) in weak_keys:
+        if (f.color, f.label) in weak_keys or not significant:
             continue
         if n_s < th.min_short_losses or loss_share < th.short_loss_share or t.mean < th.min_short_share_gap:
-            continue  # quick losses are not a pattern here
-        kind: InsightKind = "weakness" if significant else "observation"
+            continue  # quick losses are not a pattern worth a finding here
+        rest_text = (
+            f" In your other openings the two shares differ by {abs(rest_gap) * 100:.0f} points"
+            f"{' (losses quicker)' if rest_gap > 0 else ' (wins quicker)' if rest_gap < 0 else ''}."
+            if rest_gap is not None
+            else ""
+        )
         detail = (
             f"{n_s} of your {n_l} losses in the {f.label} as {_colour(f.color)} ({pct(loss_share)}) ended by checkmate "
             f"or resignation within {th.short_loss_moves} moves, while {n_ws} of your {n_w} wins in it "
-            f"({pct(win_share)}) were over that quickly."
+            f"({pct(win_share)}) were over that quickly.{rest_text}"
         )
         shortest = sorted(f.short_losses, key=lambda g: (g.plies, -g.end_time.timestamp()))
         out.append(
             Insight(
-                id=f"{KEY}.{kind}.early-losses.{f.color}.{slugify(f.label)}",
-                kind=kind,
+                id=f"{KEY}.weakness.early-losses.{f.color}.{slugify(f.label)}",
+                kind="weakness",
                 category="openings",
                 title=f"You often lose quickly in the {f.label} as {_colour(f.color)}",
                 detail=detail,
@@ -519,6 +625,7 @@ def early_loss_insights(
                     "short_losses": n_s,
                     "wins": n_w,
                     "short_wins": n_ws,
+                    "rest_gap": rest_gap,
                     "gap": t.mean,
                     "p_value": t.p_value,
                     "p_adjusted": p_adj,
@@ -592,6 +699,24 @@ def breadth_insight(color: Color, games: Sequence[Game], th: Thresholds) -> tupl
 
 
 # --------------------------------------------------------------------------- module entry point
+def _families(
+    games: Sequence[Game], th: Thresholds
+) -> tuple[dict[Color, list[Game]], dict[Color, dict[str, OpeningGroup]]]:
+    """Eligible games by colour, and their opening families (unnamed games in one ``UNNAMED`` group)."""
+    by_colour: dict[Color, list[Game]] = {"white": [], "black": []}
+    for g in games:
+        if is_eligible(g):
+            by_colour[g.color].append(g)
+    families = {
+        color: {
+            fam: build_group(fam, color, fgs, len(gs), th)
+            for fam, fgs in _group_by(gs, lambda g: g.opening_family or UNNAMED).items()
+        }
+        for color, gs in by_colour.items()
+    }
+    return by_colour, families
+
+
 def _most_played(families: dict[str, OpeningGroup]) -> Optional[OpeningGroup]:
     named = [f for f in families.values() if f.label != UNNAMED]
     return max(named, key=lambda f: (f.n, f.label)) if named else None
@@ -621,21 +746,15 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             summary += f" {excluded_note}"
         return ModuleResult(key=KEY, title=TITLE, summary=summary, stats=base_stats)
 
-    by_colour: dict[Color, list[Game]] = {"white": [], "black": []}
-    for g in eligible:
-        by_colour[g.color].append(g)
+    by_colour, families = _families(eligible, th)
     totals: dict[Color, int] = {c: len(gs) for c, gs in by_colour.items()}
-    families: dict[Color, dict[str, OpeningGroup]] = {}
-    first_moves: dict[Color, dict[str, OpeningGroup]] = {}
-    for color, gs in by_colour.items():
-        families[color] = {
-            fam: build_group(fam, color, fgs, totals[color], th)
-            for fam, fgs in _group_by(gs, lambda g: g.opening_family or UNNAMED).items()
-        }
-        first_moves[color] = {
+    first_moves: dict[Color, dict[str, OpeningGroup]] = {
+        color: {
             label: build_group(label, color, mgs, totals[color], th)
             for label, mgs in _group_by(gs, first_move_label).items()
         }
+        for color, gs in by_colour.items()
+    }
     all_families = [f for color in ("white", "black") for f in families[color].values()]
 
     table_note = (
@@ -656,9 +775,9 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         tables.append(lines)
     chart = family_chart(all_families, th)
 
-    insights, test_stats = score_insights(all_families, th)
+    insights, test_stats = score_insights(all_families, by_colour, th)
     weak_keys = {(i.evidence["color"], i.evidence["family"]) for i in insights if i.kind == "weakness"}
-    early, early_stats = early_loss_insights(all_families, weak_keys, th)
+    early, early_stats = early_loss_insights(all_families, eligible, weak_keys, th)
     insights += early
     breadth: dict[str, Optional[int]] = {}
     for color in ("white", "black"):

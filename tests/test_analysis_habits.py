@@ -214,6 +214,26 @@ def test_fatigue_buckets_and_late_session_weakness():
     assert chart.labels == ["1st game", "2nd–3rd", "4th–6th", "7th+"]
 
 
+def test_session_length_is_not_a_second_tilt_finding():
+    # Games straight after a loss are worse (tilt) and, since a session's first game never follows a
+    # loss, later games follow losses more often. Leaving the after-loss games out, later games are as
+    # good as earlier ones: no separate "long sessions" finding.
+    rng = random.Random(3)
+    games = []
+    for s in range(60):
+        outcomes, prev = [], None
+        for _ in range(8):
+            prev = "loss" if rng.random() < (0.8 if prev == "loss" else 0.4) else "win"
+            outcomes.append(prev)
+        games += sequence(T0 + timedelta(days=s), outcomes, gap_min=3)
+    mr = run(games)
+    assert claims(mr) == ["habits.weakness.after-a-loss"]
+    split = mr.stats["fatigue_tests"]["from_game_4"]
+    assert split["p_adjusted"] < 0.001 and abs(split["without_after_loss_gap"]) < 0.06
+    scored = [t for t in habits.build_timeline(games) if t.scored]
+    assert habits.fatigue_insight(scored, habits.Thresholds())[0] is not None  # what it would say on its own
+
+
 def test_losing_streak_observation():
     outcomes = ["win", "loss", "loss", "loss", "loss", "draw", "loss", "loss", "win", "loss"]
     games = sequence(T0, outcomes) + sequence(T0 + timedelta(days=1), ["win", "draw"] * 6)
@@ -233,8 +253,9 @@ def test_late_night_block_is_found_in_the_players_time_zone():
         games.append(game_at(day.replace(hour=5, minute=30), outcome="loss" if rng.random() < 0.8 else "win"))
         for hour in (14, 18, 22):  # UTC
             games.append(game_at(day.replace(hour=hour), outcome=rng.choice(["win", "loss"])))
-    utc = run(games)
-    assert insight(utc, "habits.weakness.time-of-day-04-08")
+    utc = run(games)  # no time zone given: the blocks are UTC hours, not named times of day
+    ins = insight(utc, "habits.weakness.time-of-day-04-08")
+    assert ins and ins.title == "You score below your rating in games started 04:00–08:00 UTC"
     ny = run(games, tz="America/New_York")  # 05:30 UTC = 00:30 / 01:30 in New York
     ins = insight(ny, "habits.weakness.time-of-day-00-04")
     assert ins and ins.title == "Your late-night games (00:00–04:00) are your worst"
@@ -283,11 +304,17 @@ def test_late_night_window_spanning_two_blocks_is_one_finding():
             games.append(game_at(day.replace(hour=hour), outcome=rng.choice(["win", "loss"])))
         games.append(game_at(day.replace(hour=23, minute=30), outcome="loss" if rng.random() < 0.72 else "win"))
         games.append(game_at(day.replace(hour=1, minute=30) + timedelta(days=1), outcome="loss" if rng.random() < 0.72 else "win"))
-    mr = run(games)
+    mr = run(games, tz="Etc/UTC")  # the player lives in UTC
     ins = insight(mr, "habits.weakness.late-night")
     assert ins and ins.title == "You score below your rating in late-night games (23:00–03:00)"
-    assert "In 120 games started between 23:00 and 03:00 (UTC)" in ins.detail
+    assert "In 120 games started between 23:00 and 03:00 (Etc/UTC)" in ins.detail
     assert claims(mr) == ["habits.weakness.late-night"]
-    assert mr.stats["late_night"]["n"] == 120
+    assert mr.stats["late_night"]["n"] == 120 and mr.stats["late_night"]["local_time"]
+    # without a time zone (the command line's default "UTC") 23:00-03:00 UTC is just another window
+    # of the day for most players: tested at the strict level and titled by its UTC hours
+    default = run(games, tz="UTC")
+    ins = insight(default, "habits.weakness.late-night")
+    assert ins and ins.title == "You score below your rating in games started 23:00–03:00 UTC"
+    assert not default.stats["late_night"]["local_time"] and not default.stats["local_time"]
     # in a time zone where those games fall in the afternoon there is no late-night finding
     assert insight(run(games, tz="Asia/Tokyo"), "habits.weakness.late-night") is None

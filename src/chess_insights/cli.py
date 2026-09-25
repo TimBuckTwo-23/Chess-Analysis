@@ -1,15 +1,17 @@
 """Command line entry point: ``chess-insights fetch | report | demo``.
 
 Exit codes: 0 success; 1 nothing to analyse (no games, no games in the filter window) or the
-report could not be written; 2 usage error (bad option, unknown chess.com player, missing
-input file or Stockfish); 3 chess.com could not be reached or refused the request; 130 Ctrl+C.
+report / game cache could not be written; 2 usage error (bad option, unknown chess.com player,
+missing input file or Stockfish); 3 chess.com could not be reached or refused the request; 130 Ctrl+C.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import multiprocessing
+import os
 import re
 import shutil
 import sys
@@ -23,9 +25,19 @@ from typing import Iterable, Optional, Sequence
 
 from . import __version__
 from .dataset import describe_filters, filter_games
-from .fetch import DEFAULT_CACHE_DIR, expand_path, load_games, load_json_files, read_text, safe_file_stem, sync
+from .fetch import (
+    DEFAULT_CACHE_DIR,
+    GameStore,
+    expand_path,
+    load_games,
+    load_json_files,
+    month_key,
+    read_text,
+    safe_file_stem,
+    sync,
+)
 from .models import TIME_CLASSES, Game, Report
-from .parse import games_from_pgn, merge_games, parse_games, parse_pgn_headers, split_pgn
+from .parse import parse_games, parse_games_from_pgns, parse_pgn_headers, split_pgn
 
 EXIT_NO_GAMES = 1
 EXIT_USAGE = 2
@@ -40,6 +52,16 @@ class UserError(Exception):
     def __init__(self, message: str, code: int = EXIT_USAGE) -> None:
         super().__init__(message)
         self.code = code
+
+
+class CacheWriteError(UserError):
+    """The game cache folder could not be written (not a folder, read-only, disk full, locked ...)."""
+
+    def __init__(self, cache_dir: Path, exc: OSError) -> None:
+        super().__init__(
+            f"could not write to the game cache {cache_dir}: {exc}. Choose another folder with --cache-dir.",
+            EXIT_NO_GAMES,
+        )
 
 
 def _say(msg: str) -> None:
@@ -135,6 +157,8 @@ def _period(text: str) -> Period:
     if not m:
         raise bad
     year, month, day = (int(g) if g else None for g in m.groups())
+    if not 1000 <= year <= 9998:  # Period.end() of 9999 would be year 10000, which datetime can't hold
+        raise argparse.ArgumentTypeError(f"year out of range in {text!r} (1000 to 9998)")
     try:
         datetime(year, month or 1, day or 1)
     except ValueError:
@@ -170,9 +194,12 @@ def _formats(text: str) -> tuple[str, ...]:
     from .report import _normalise_formats
 
     try:
-        return tuple(_normalise_formats([f for f in text.split(",") if f.strip()]))
+        formats = tuple(_normalise_formats([f for f in text.split(",") if f.strip()]))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+    if not formats:  # --formats "" would run the whole analysis and write nothing
+        raise argparse.ArgumentTypeError("no report format given; choose from html, md, json")
+    return formats
 
 
 def _rules(text: str) -> Optional[list[str]]:
@@ -238,7 +265,11 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
     sp.add_argument("--engine-games", type=_positive_int, default=150, help="analyse the N most recent games (default 150)")
     sp.add_argument("--workers", type=_non_negative_int, default=0, help="parallel engine processes (default: CPUs - 1)")
     sp.add_argument("--puzzles", action="store_true", help="with --engine: export your mistakes as a PGN puzzle file")
-    sp.add_argument("--out", default=default_out, help="output path stem (default reports/<username>)")
+    sp.add_argument(
+        "--out", default=default_out,
+        help="output path stem, e.g. reports/me writes reports/me.html ...; an existing folder (or a path "
+        "ending in / or \\) gets <username>.html inside it (default reports/<username>)",
+    )
     sp.add_argument("--formats", type=_formats, default=("html", "md", "json"), help="comma list of html, md, json")
 
 
@@ -276,15 +307,27 @@ def _check_period(args: argparse.Namespace) -> None:
 def _client(args: argparse.Namespace):
     from . import api
 
-    return api.ChessComClient(contact=args.contact)
+    return api.ChessComClient(contact=args.contact, notify=lambda msg: _say(f"  {msg}"))
+
+
+_WILDCARD = re.compile(r"[*?[]")
 
 
 def _expand_inputs(paths: Iterable[str], suffix: str) -> list[Path]:
-    """Files as given; a folder means every ``*<suffix>`` file in it. Missing paths are a usage error."""
+    """Files as given; a folder means every ``*<suffix>`` file in it; a wildcard (``C:\\games\\*.pgn``:
+    cmd.exe and PowerShell pass it unexpanded) is expanded here. Missing paths are a usage error."""
     out: list[Path] = []
     for raw in paths:
         path = expand_path(raw)
-        if path.is_dir():
+        if not path.exists() and _WILDCARD.search(str(path)):
+            matches = [Path(m) for m in sorted(glob.glob(str(path)))]
+            files = [m for m in matches if m.is_file()]
+            for folder in (m for m in matches if m.is_dir()):
+                files.extend(sorted(p for p in folder.iterdir() if p.suffix.lower() == suffix and p.is_file()))
+            if not files:
+                raise UserError(f"no files match {raw}")
+            out.extend(files)
+        elif path.is_dir():
             found = sorted(p for p in path.iterdir() if p.suffix.lower() == suffix and p.is_file())
             if not found:
                 raise UserError(f"no {suffix} files in folder {raw}")
@@ -292,7 +335,7 @@ def _expand_inputs(paths: Iterable[str], suffix: str) -> list[Path]:
         elif path.is_file():
             out.append(path)
         else:
-            raise UserError(f"file not found: {raw}")
+            raise UserError(f"file not found: {raw} (give a {suffix} file, a folder of them, or a wildcard like *{suffix})")
     return out
 
 
@@ -321,10 +364,18 @@ def _not_in_file(username: str, names: Counter, what: str) -> UserError:
     return UserError(f"none of the games in the {what} were played by {username!r}; players found: {top}", EXIT_NO_GAMES)
 
 
+_SEPARATORS = tuple(sep for sep in (os.sep, os.altsep) if sep)  # "\\" and "/" on Windows, "/" elsewhere
+
+
 def _out_stem(args: argparse.Namespace, username: str) -> Path:
+    """--out as a path stem; an existing folder, or a path ending in a slash, gets ``<username>.*`` inside it."""
+    default_name = safe_file_stem(username.lower())
     if args.out:
-        return expand_path(args.out)
-    return Path("reports") / safe_file_stem(username.lower())
+        out = expand_path(args.out)
+        if str(args.out).rstrip('"').endswith(_SEPARATORS) or out.is_dir():
+            return out / default_name
+        return out
+    return Path("reports") / default_name
 
 
 def resolve_stockfish_arg(value: Optional[str]) -> Optional[str]:
@@ -372,15 +423,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     since, until = _archive_window(args)
     client = _client(args)
     cache_dir = expand_path(args.cache_dir)
-    s = sync(
-        username,
-        client,
-        cache_dir,
-        since=since,
-        until=until,
-        refresh_all=getattr(args, "refresh_all", False),
-        progress=_say,
-    )
+    try:
+        s = sync(
+            username,
+            client,
+            cache_dir,
+            since=since,
+            until=until,
+            refresh_all=getattr(args, "refresh_all", False),
+            progress=_say,
+        )
+    except OSError as exc:
+        raise CacheWriteError(cache_dir, exc) from None
     extra = f", {s.months_not_modified} unchanged" if s.months_not_modified else ""
     _say(
         f"done: {s.games_total} games in {s.months_listed} months "
@@ -412,10 +466,11 @@ def _load_raw_games(args: argparse.Namespace) -> list[Game]:
     if args.pgn:
         files = _expand_inputs(args.pgn, ".pgn")
         texts = [read_text(p) for p in files]
-        games = [g for text in texts for g in games_from_pgn(text, name)]
+        # one pass over all files: repeats across files dropped, chronological
+        games = parse_games_from_pgns([chunk for text in texts for chunk in split_pgn(text)], name)
         if not games:
             raise _not_in_file(args.username, _players(texts), "PGN file(s)")
-        return merge_games(games)  # repeats across files dropped, chronological
+        return games
     if args.json_files:
         raws = []
         for path in _expand_inputs(args.json_files, ".json"):
@@ -436,13 +491,17 @@ def _load_raw_games(args: argparse.Namespace) -> list[Game]:
 
         try:
             cmd_fetch(args)
-        except PlayerNotFound:
-            raise
-        except ChessComError as exc:
+        except (ChessComError, CacheWriteError) as exc:
+            # a closed or renamed account, no internet, an unwritable cache: games downloaded earlier still count
             cached = load_games(username, cache_dir, since=since, until=until)
             if not cached:
                 raise
-            _say(f"warning: could not update from chess.com ({exc})")
+            if isinstance(exc, CacheWriteError):
+                _say(f"warning: {exc}")
+            else:
+                if isinstance(exc, PlayerNotFound) and "closed" not in str(exc):
+                    exc = f"chess.com no longer has a player {username!r}"
+                _say(f"warning: could not update from chess.com ({exc})")
             _say(f"continuing with the {len(cached)} games already downloaded to {cache_dir}")
     games = parse_games(load_games(username, cache_dir, since=since, until=until), username)
     if not games and (since or until):
@@ -590,7 +649,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
     _prepare_engine(args)
     args.since = args.until = None
     temp = args.cache_dir is None
-    cache_dir = Path(tempfile.mkdtemp(prefix="chess-insights-demo-")) if temp else expand_path(args.cache_dir)
+    try:
+        cache_dir = Path(tempfile.mkdtemp(prefix="chess-insights-demo-")) if temp else expand_path(args.cache_dir)
+    except OSError as exc:
+        raise CacheWriteError(Path(tempfile.gettempdir()), exc) from None
     try:
         persona = DEFAULT_PERSONA
         _say(f"generating {args.games} synthetic games for {persona.username!r} (seed {args.seed}) ...")
@@ -603,10 +665,17 @@ def cmd_demo(args: argparse.Namespace) -> int:
             workers=args.workers,
             progress=lambda done, total: (done == total or done % 50 == 0) and _say(f"  {done}/{total} games"),
         )
-        write_archives(archives, cache_dir, persona.username)
+        store = GameStore(cache_dir, persona.username)
+        try:
+            for ym in store.months():  # months left in this folder by an earlier demo run
+                if month_key(ym) not in archives:
+                    store.month_path(ym).unlink()
+            write_archives(archives, cache_dir, persona.username)
+        except OSError as exc:
+            raise CacheWriteError(cache_dir, exc) from None
         _say(f"generated in {time.time() - t0:.0f}s" + ("" if temp else f" -> {cache_dir}"))
 
-        games = parse_games(load_games(persona.username, cache_dir), persona.username)
+        games = parse_games([g for key in sorted(archives) for g in archives[key]], persona.username)
         report = analyse_and_write(games, persona.username, args, cache_dir)
     finally:
         if temp:
@@ -667,6 +736,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             name = getattr(args, "username", "")
             if "closed" in str(exc):
                 _say(f"error: {exc}")
+                if args.command == "report":
+                    _say("(no games of it were downloaded before; --pgn / --json analyse files you saved yourself)")
+                else:
+                    _say(f"(games downloaded earlier stay in the cache: `chess-insights report {name} --offline`)")
             else:
                 _say(
                     f"error: chess.com has no player {name!r}. Check the spelling: use the name from your "
@@ -677,6 +750,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _say(f"error: chess.com request failed: {exc}")
             _say("(see Troubleshooting in the README; --offline uses games downloaded earlier)")
             return EXIT_NETWORK
+        if isinstance(exc, OSError):  # a file or folder problem is the user's to fix, not a crash
+            logging.getLogger(__name__).debug("file error", exc_info=True)
+            _say(f"error: {exc}")
+            return EXIT_NO_GAMES
         raise
 
 

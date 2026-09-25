@@ -15,7 +15,9 @@ same games* (rating-matched players on the same clock):
 Each claim is one test per time class, BH-adjusted over the time classes, under the
 project-wide rule ``stats.significance`` at ``stats.STRICT_ALPHA``: the paired tests
 against your opponents in the same games have plenty of power for clock habits that
-matter, so the strict level costs little.
+matter, so the strict level costs little. Every flag is also time trouble, so when losing
+on time is a finding, time trouble is only a second one if it still holds with the games
+you lost on time left out.
 
 ``time_spent`` is the shared definition of the seconds spent on one ply
 (``engine.py`` computes the same thing independently).
@@ -402,6 +404,18 @@ def trouble_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
     )
 
 
+def trouble_beyond_flags(cs: ClassStats, p_adj: float, th: Thresholds) -> tuple[bool, MeanTest]:
+    """Whether the time-trouble claim still holds with the games you lost on time left out.
+
+    The re-test keeps the original test's multiple-testing factor (adjusted / raw p-value).
+    """
+    kept = [c for c in cs.clocks if not (c.game.outcome == "loss" and c.game.termination == "timeout")]
+    test = paired_rate_test([c.my_trouble for c in kept], [c.opp_trouble for c in kept])
+    factor = p_adj / cs.trouble_test.p_value if cs.trouble_test.p_value > 0 else 1.0
+    significant, _ = significance(test, th.min_games, min(1.0, test.p_value * factor), alpha=th.strict_alpha)
+    return significant and test.mean >= th.min_trouble_gap, test
+
+
 def flag_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
     if cs.losses < th.min_losses:
         return None
@@ -764,10 +778,17 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     p_opening = bh_adjust([cs.opening_test.p_value for cs in classes])
     p_balance = bh_adjust([cs.checkpoints[CHECKPOINTS[0]].test.p_value for cs in classes])
     insights: list[Insight] = []
+    beyond_flags: dict[str, float] = {}
     for i, cs in enumerate(classes):
+        trouble, flags = trouble_insight(cs, p_trouble[i], th), flag_insight(cs, p_flags[i], th)
+        if trouble and flags:  # every flag is time trouble: keep the second finding only if it is more than that
+            holds, retest = trouble_beyond_flags(cs, p_trouble[i], th)
+            beyond_flags[cs.time_class] = retest.mean
+            if not holds:
+                trouble = None
         found = (
-            trouble_insight(cs, p_trouble[i], th),
-            flag_insight(cs, p_flags[i], th),
+            trouble,
+            flags,
             opening_insight(cs, p_opening[i], th),
             clock_strength_insight(cs, p_flags[i], p_balance[i], th),
         )
@@ -803,6 +824,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             "main_time_class": main.time_class,
             "by_time_class": {cs.time_class: _stats(cs) for cs in classes},
             "skipped_time_classes": {tc: len(by_class[tc]) for tc in skipped},
+            "trouble_gap_without_flag_losses": beyond_flags,
             "think_time": [
                 {"moves": label, "you": mine, "opponents": theirs, "your_moves": n_me, "opponent_moves": n_them}
                 for label, mine, theirs, n_me, n_them in profile

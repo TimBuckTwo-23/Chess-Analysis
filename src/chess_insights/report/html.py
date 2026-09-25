@@ -12,12 +12,13 @@ renderer, so both outputs show identical numbers.
 from __future__ import annotations
 
 import html as _html
+import itertools
 import math
 import numbers
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Optional, Sequence
 from urllib.parse import urlsplit
@@ -25,6 +26,11 @@ from xml.etree import ElementTree
 
 from ..insights import STUDY_LIBRARY
 from ..models import VALUE_FORMATS, Chart, Diagram, Insight, Kpi, ModuleResult, Report, StudyItem, Table
+
+try:  # numpy comes with pandas; it is only needed to recognise its time scalars
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None
 
 # =========================================================================== value formatting
 MISSING = "—"  # em dash for None / NaN
@@ -36,14 +42,49 @@ _URL_RE = re.compile(r"^https?://", re.I)
 HUGE = 1e15  # beyond this, numbers are shown in scientific notation (1.5e+18) instead of 19 grouped digits
 
 
+def _np_time(value: Any) -> Optional[str]:
+    """"timedelta64" / "datetime64" for numpy time scalars (timedelta64 even passes as an integer), else None."""
+    if _np is None:
+        return None
+    if isinstance(value, _np.timedelta64):
+        return "timedelta64"
+    if isinstance(value, _np.datetime64):
+        return "datetime64"
+    return None
+
+
+def _duration_seconds(value: Any) -> Optional[float]:
+    """Seconds in a timedelta / numpy timedelta64; None for NaT and calendar units (months, years)."""
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    try:
+        x = float(value / _np.timedelta64(1, "s"))
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _np_datetime(value: Any) -> Any:
+    """A numpy datetime64 as a Python datetime when it is in range, else its ISO text."""
+    try:
+        out = value.astype("datetime64[us]").item()
+    except (ValueError, OverflowError, TypeError):
+        out = None
+    return out if isinstance(out, datetime) else str(_np.datetime_as_string(value))
+
+
 def is_missing(value: Any) -> bool:
-    """None, NaN, +-inf, pandas NA/NaT and blank strings all render as a dash."""
+    """None, NaN, +-inf, pandas NA/NaT, numpy NaT, Decimal NaN/inf and blank strings all render as a dash."""
     if value is None:
         return True
     if type(value).__name__ in ("NAType", "NaTType"):
         return True
     if isinstance(value, str):
         return not value.strip()
+    if isinstance(value, Decimal):
+        return not value.is_finite()
+    if _np_time(value):
+        return bool(_np.isnat(value))
     if isinstance(value, numbers.Real) and not isinstance(value, bool):
         try:
             return not math.isfinite(float(value))
@@ -53,10 +94,20 @@ def is_missing(value: Any) -> bool:
 
 
 def to_number(value: Any) -> Optional[float]:
-    """Finite float for numbers and numeric strings; None otherwise (bools are not numbers here)."""
+    """Finite float for numbers, Decimals, durations (in seconds) and numeric strings; None otherwise
+    (bools and dates are not numbers here)."""
     if isinstance(value, bool) or is_missing(value):
         return None
-    if isinstance(value, numbers.Real):
+    kind = _np_time(value)
+    if kind == "datetime64":
+        return None
+    if kind == "timedelta64" or isinstance(value, timedelta):
+        x = _duration_seconds(value)
+        if x is None:
+            return None
+    elif isinstance(value, Decimal):
+        x = float(value)  # finite: is_missing() rejected NaN / sNaN / inf
+    elif isinstance(value, numbers.Real):
         try:
             x = float(value)
         except (TypeError, ValueError, OverflowError):
@@ -75,9 +126,14 @@ def infer_format(value: Any) -> str:
     """Best-guess VALUE_FORMATS entry for a value whose column has no declared format."""
     if isinstance(value, bool):
         return "text"
+    kind = _np_time(value)
+    if kind == "timedelta64" or isinstance(value, timedelta):
+        return "seconds"
+    if kind == "datetime64":
+        return "text"
     if isinstance(value, numbers.Integral):
         return "int"
-    if isinstance(value, numbers.Real):
+    if isinstance(value, (numbers.Real, Decimal)):
         x = to_number(value)
         return "int" if x is not None and x.is_integer() else "float2"
     if isinstance(value, str) and _URL_RE.match(value.strip()):
@@ -139,20 +195,42 @@ def _seconds(x: float) -> str:
     return _clock(x)
 
 
+def _plain_number(x: float) -> str:
+    """A float as plain text: up to 4 decimals, no trailing zeros, scientific notation when huge,
+    a real minus sign, and never "-0"."""
+    a = abs(x)
+    if a >= HUGE:
+        body = format(a, ".3g")
+    elif a.is_integer():
+        body = str(int(a))
+    else:
+        body = format(round(a, 4), "f").rstrip("0").rstrip(".") or "0"
+    return MINUS + body if x < 0 and body != "0" else body
+
+
 def _plain_text(value: Any) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
+    kind = _np_time(value)
+    if kind == "datetime64":
+        value = MISSING if is_missing(value) else _np_datetime(value)
+    elif kind == "timedelta64" or isinstance(value, timedelta):
+        if is_missing(value):
+            return MISSING
+        seconds = _duration_seconds(value)
+        return str(value) if seconds is None else _seconds(seconds)
     if isinstance(value, datetime):
         if (value.hour, value.minute, value.second) == (0, 0, 0):
             return f"{value:%Y-%m-%d}"
         return f"{value:%Y-%m-%d %H:%M}"
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, numbers.Real) and not isinstance(value, numbers.Integral):
+    if isinstance(value, numbers.Integral):
+        n = int(value)
+        return (MINUS if n < 0 else "") + str(abs(n))  # exact digits: an id stays an id
+    if isinstance(value, (numbers.Real, Decimal)):
         x = to_number(value)
-        if x is None:
-            return MISSING
-        return str(int(x)) if x.is_integer() and abs(x) < 1e15 else format(round(x, 4), "f").rstrip("0").rstrip(".")
+        return MISSING if x is None else _plain_number(x)
     if isinstance(value, (list, tuple, set, frozenset)):
         return ", ".join(_plain_text(v) for v in value)
     return str(value)
@@ -353,9 +431,9 @@ class ChartData:
 def chart_data(chart: Chart) -> ChartData:
     series_in = [s for s in (chart.series or []) if s is not None]
     labels = ["" if is_missing(label) else _plain_text(label) for label in (chart.labels or [])]
-    n = len(labels) or max((len(s.values or []) for s in series_in), default=0)
-    if not labels:
-        labels = [str(i + 1) for i in range(n)]
+    n = max([len(labels)] + [len(s.values or []) for s in series_in])
+    # a series longer than the labels keeps its extra values: they are labelled by position, never dropped
+    labels += [str(i + 1) for i in range(len(labels), n)]
     series = []
     for i, s in enumerate(series_in):
         values = list(s.values or [])[:n]
@@ -375,9 +453,19 @@ def chart_data(chart: Chart) -> ChartData:
 
 # ---- series colours: by identity, never by position -------------------------------------------
 # Results (wins / draws / losses) get a diverging scheme: a green arm, a neutral grey draw and a
-# red arm, strongest at the ends ("Won by checkmate", "Lost by checkmate"), lightest next to the
+# red arm, strongest at the ends ("Won by checkmate", "Lost by checkmate"), lighter towards the
 # draws. Up to RESULT_STEPS series per arm; anything else uses the categorical slots 1-8.
 RESULT_STEPS = 4
+# Result colours from different arms (or an arm and the draw grey) that are too alike to touch:
+# normal-vision OKLab dE < 15 or colour-blind (min protan/deutan, Machado 2009) dE < 6 in the light or
+# dark theme. Steps within one arm are a lightness ramp and may touch. test_report recomputes this.
+_RESULT_CLASH = frozenset(
+    frozenset(pair)
+    for pair in (
+        ("w2", "d"), ("w3", "d"), ("d", "l3"), ("w1", "l2"), ("w2", "l3"),
+        ("w3", "l1"), ("w3", "l3"), ("w3", "l4"), ("w4", "l2"), ("w4", "l4"),
+    )
+)
 _ROLE_ORDER = {"win": 0, "draw": 1, "loss": 2}
 _ROLE_RES = (
     ("win", re.compile(r"^(?:wins?|won|victor(?:y|ies))\b", re.I)),
@@ -385,8 +473,11 @@ _ROLE_RES = (
     ("loss", re.compile(r"^(?:loss(?:es)?|lost|lose|defeats?)\b", re.I)),
 )
 # Well-known series that recur across charts and reports keep one colour wherever they appear,
-# so a filter that removes bullet does not repaint blitz.
-IDENTITY_SLOTS = {"bullet": "1", "blitz": "2", "rapid": "3", "daily": "4"}
+# so a filter that removes bullet does not repaint blitz. Slots 2 (orange) and 4 (yellow) are too
+# alike to share a chart (dE 13.7 light; colour-blind dE 4.8 dark), so they go to the pair least
+# often played together, bullet and daily; every other pair and trio clears the floors.
+IDENTITY_SLOTS = {"blitz": "1", "bullet": "2", "rapid": "3", "daily": "4"}
+_CLASHING_SLOTS = frozenset({frozenset({"2", "4"})})  # among slots 1-4; test_report recomputes this
 
 
 def result_roles(names: Sequence[str]) -> Optional[list[str]]:
@@ -404,26 +495,65 @@ def result_roles(names: Sequence[str]) -> Optional[list[str]]:
     return roles
 
 
-def series_slots(names: Sequence[str]) -> list[str]:
-    """Colour slot per series: "w1".."w4" / "d" / "l1".."l4" for results, fixed slots for known
-    series (time classes), else "1".."8" in order."""
+def _arm_options(k: int) -> list[tuple[int, ...]]:
+    """Increasing colour steps for an arm of ``k`` result series, preferred first: widest spacing, then strongest."""
+    combos = list(itertools.combinations(range(1, RESULT_STEPS + 1), k))
+    return sorted(combos, key=lambda c: (-min((b - a for a, b in zip(c, c[1:])), default=0), c))
+
+
+def _result_slots(roles: Sequence[str], stacks: Optional[Sequence[Sequence[int]]]) -> list[str]:
+    """Result colour per series. The series drawn anywhere share out the arm's steps (strongest
+    first), choosing the most preferred steps for which no two touching marks of different roles
+    clash. Marks touch when they are neighbours in a stack (``stacks``: the series indices of each
+    drawn stack, bottom up) or, without stacks, neighbours in series order."""
+    if stacks is None:
+        stacks = [list(range(len(roles)))]
+    drawn = {j for stack in stacks for j in stack}
+    touching = {(a, b) for stack in stacks for a, b in zip(stack, stack[1:])}
+    win_idx = [j for j, r in enumerate(roles) if r == "win" and j in drawn]
+    loss_idx = [j for j, r in enumerate(roles) if r == "loss" and j in drawn]  # lightest (next to the draws) first
+    wins, losses = _arm_options(len(win_idx)), _arm_options(len(loss_idx))
+
+    def assign(w: tuple[int, ...], lo: tuple[int, ...]) -> list[str]:
+        # a series with nothing to draw (all zero) is left out of the legend: any colour of its role
+        slots = [{"win": "w1", "draw": "d", "loss": "l1"}[r] for r in roles]
+        for j, k in zip(win_idx, w):
+            slots[j] = f"w{k}"
+        for j, k in zip(loss_idx, reversed(lo)):
+            slots[j] = f"l{k}"
+        return slots
+
+    for _, w, lo in sorted(
+        ((wi + li, wi), w, lo) for (wi, w), (li, lo) in itertools.product(enumerate(wins), enumerate(losses))
+    ):
+        slots = assign(w, lo)
+        if not any(slots[a][0] != slots[b][0] and frozenset((slots[a], slots[b])) in _RESULT_CLASH for a, b in touching):
+            return slots
+    # e.g. 4 wins stacked directly on 4 losses: no clash-free choice, keep the full ramps
+    return assign(wins[0], losses[0])
+
+
+def _slots_clash(slots: Sequence[str]) -> bool:
+    return any(frozenset(pair) in _CLASHING_SLOTS for pair in itertools.combinations(slots, 2))
+
+
+def series_slots(names: Sequence[str], stacks: Optional[Sequence[Sequence[int]]] = None) -> list[str]:
+    """Colour slot per series: "w1".."w4" / "d" / "l1".."l4" for results (wins run strongest ->
+    lightest towards the draws, losses lightest -> strongest away from them; ``stacks`` as in
+    :func:`_result_slots`), fixed slots for known series (time classes), else "1".."8" in order."""
     roles = result_roles(names)
     if roles:
-        n_loss = roles.count("loss")
-        slots, seen = [], {"win": 0, "loss": 0}
-        for role in roles:
-            if role == "draw":
-                slots.append("d")
-                continue
-            seen[role] += 1
-            # wins run strongest -> lightest towards the draws; losses lightest -> strongest away from them
-            step = seen["win"] if role == "win" else n_loss - seen["loss"] + 1
-            slots.append(f"{role[0]}{step}")
-        return slots
+        return _result_slots(roles, stacks)
+    # in order, counting only series that are drawn (all-zero stacked series take no colour)
+    drawn = sorted({j for stack in stacks or [] for j in stack}) or list(range(len(names)))
+    positional = ["1"] * len(names)
+    for k, j in enumerate(drawn):
+        positional[j] = str(k % MAX_SERIES + 1)
     known = [IDENTITY_SLOTS.get(str(name).strip().lower()) for name in names]
     if names and all(known) and len(set(known)) == len(known):
-        return [str(k) for k in known]
-    return [str(j % MAX_SERIES + 1) for j in range(len(names))]
+        if not _slots_clash(known) or _slots_clash(positional):  # e.g. bullet + daily alone: in order instead
+            return [str(k) for k in known]
+    return positional
 
 
 def _cls(prefix: str, slot: str) -> str:
@@ -431,15 +561,31 @@ def _cls(prefix: str, slot: str) -> str:
     return f"{prefix}{slot}" if slot.isdigit() else f"{prefix}-{slot}"
 
 
+TABLE_MAX_SERIES_COLUMNS = 4
+
+
 def chart_table(chart: Chart) -> Table:
-    """The chart's numbers as a table: the accessible twin of every chart (also used by Markdown)."""
+    """The chart's numbers as a table: the accessible twin of every chart (also used by Markdown).
+
+    One row per category and one column per series; when there are more than
+    ``TABLE_MAX_SERIES_COLUMNS`` series and fewer categories (9 result types over 3 time
+    controls), rows and columns swap so the table stays narrow enough for a phone.
+    """
     data = chart_data(chart)
     fmt = data.fmt or "auto"
+    names = [name for name, _ in data.series]
+    if len(names) > TABLE_MAX_SERIES_COLUMNS and len(data.labels) < len(names):
+        return Table(
+            title=text_or_empty(chart.title),
+            columns=[""] + list(data.labels),
+            rows=[[name] + list(vals) for name, vals in data.series],
+            formats=["text"] + [fmt] * len(data.labels),
+        )
     return Table(
         title=text_or_empty(chart.title),
-        columns=[""] + [name for name, _ in data.series],
+        columns=[""] + names,
         rows=[[label] + [vals[i] for _, vals in data.series] for i, label in enumerate(data.labels)],
-        formats=["text"] + [fmt] * len(data.series),
+        formats=["text"] + [fmt] * len(names),
     )
 
 
@@ -513,6 +659,22 @@ def _ellipsize(text: str, max_w: float, size: float = LABEL_PX) -> str:
     return _fit(text, max_w - _tw("…", size), size).rstrip() + "…"
 
 
+def _shorten(text: str, max_w: float, size: float = LABEL_PX) -> str:
+    """Cut from the middle, keeping the last words: labels that differ only at the end
+    ("... Attack 3 (Black)" / "... Attack 4 (White)") stay distinguishable. The full label is in the tooltip."""
+    if _tw(text, size) <= max_w:
+        return text
+    words = text.split()
+    tail: list[str] = []
+    while len(tail) < len(words) - 1 and _tw("… " + " ".join([words[-len(tail) - 1]] + tail), size) <= max_w * 0.6:
+        tail.insert(0, words[-len(tail) - 1])
+    if not tail:
+        return _ellipsize(text, max_w, size)
+    end = "… " + " ".join(tail)
+    head = " ".join(words[: len(words) - len(tail)])
+    return _fit(head, max_w - _tw(end, size), size).rstrip() + end
+
+
 def _wrap(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 2) -> list[str]:
     """Greedy word wrap into at most ``max_lines`` lines; the last line is ellipsized if needed."""
     lines: list[str] = []
@@ -537,7 +699,7 @@ def _wrap(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 2) -
     if not lines:
         return [""]
     if len(lines) > max_lines:
-        lines = lines[: max_lines - 1] + [_ellipsize(" ".join(lines[max_lines - 1 :]), max_w, size)]
+        lines = lines[: max_lines - 1] + [_shorten(" ".join(lines[max_lines - 1 :]), max_w, size)]
     return lines
 
 
@@ -626,12 +788,12 @@ def _linear(d0: float, d1: float, r0: float, r1: float) -> Callable[[float], flo
     return lambda v: r0 + (v - d0) * k
 
 
-def _axis_ticks(values: Sequence[float], fmt: Optional[str], *, include_zero: bool, extra: Optional[float]):
+def _axis_ticks(values: Sequence[float], fmt: Optional[str], *, include_zero: bool, extra: Optional[float], target: int = 5):
     pts = list(values) + ([extra] if extra is not None else [])
     lo, hi = (min(pts), max(pts)) if pts else (0.0, 1.0)
     if include_zero:
         lo, hi = min(lo, 0.0), max(hi, 0.0)
-    ticks = nice_ticks(lo, hi, fmt)
+    ticks = nice_ticks(lo, hi, fmt, target=target)
     step = ticks[1] - ticks[0]
     span = max(abs(ticks[0]), abs(ticks[-1]))
     return ticks, [_tick_text(t, fmt, step, span) for t in ticks]
@@ -745,7 +907,7 @@ def _svg_columns(
     if rotate and allow_horizontal:
         return None
     if rotate:
-        shown = [_ellipsize(label, 175) for label in labels]
+        shown = [_shorten(label, 175) for label in labels]
         max_w = max(_tw(t) for t in shown)
         # the first label runs down-left from its band centre; its glyph height adds LABEL_PX * sin
         left = max(left, max_w * math.cos(_ROT) + LABEL_PX * math.sin(_ROT) - band / 2 + 2)
@@ -842,6 +1004,14 @@ def _svg_columns(
     return "".join(out)
 
 
+def _tick_labels_fit(ticks: Sequence[float], texts: Sequence[str], x: Callable[[float], float], pad: float = 6.0) -> bool:
+    """Whether centred x-axis tick labels leave at least ``pad`` between neighbours."""
+    return all(
+        x(b) - x(a) >= (_tw(ta, TICK_PX) + _tw(tb, TICK_PX)) / 2 + pad
+        for (a, ta), (b, tb) in zip(zip(ticks, texts), zip(ticks[1:], texts[1:]))
+    )
+
+
 def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], title: str) -> str:
     """Horizontal bars, labels on the left (long opening names wrap to two lines)."""
     fmt, labels, n, ref = data.fmt, data.labels, len(data.labels), data.reference
@@ -869,9 +1039,14 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         x_from = plot_l + (neg_w if has_neg else 0.0)
         x_to = max(VB_W - pos_w, x_from + 60)
     else:
-        ticks, tick_txt = _axis_ticks(values, fmt, include_zero=True, extra=ref)
-        lo, hi = ticks[0], ticks[-1]
-        x_from, x_to = plot_l + 4, VB_W - max(_tw(tick_txt[-1], TICK_PX) / 2, 4.0)
+        # x-axis tick labels sit side by side: fewer ticks when wide labels ("100,000") would collide
+        for target in (5, 4, 3):
+            ticks, tick_txt = _axis_ticks(values, fmt, include_zero=True, extra=ref, target=target)
+            lo, hi = ticks[0], ticks[-1]
+            x_from = max(plot_l + 4, _tw(tick_txt[0], TICK_PX) / 2 + 2)
+            x_to = VB_W - max(_tw(tick_txt[-1], TICK_PX) / 2, 4.0)
+            if _tick_labels_fit(ticks, tick_txt, _linear(lo, hi, x_from, x_to)):
+                break
     x = _linear(lo, hi, x_from, x_to)
 
     s = len(series)
@@ -884,10 +1059,14 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     height = rows_bottom + (26.0 if not single else 6.0)
 
     out = [_svg_open(height, title)]
-    for t, txt in zip(ticks, tick_txt):
+    every = 1  # still crowded at 3 ticks: label every other one (gridlines stay)
+    while every < len(ticks) and not _tick_labels_fit(ticks[::every], tick_txt[::every], x):
+        every += 1
+    for k, (t, txt) in enumerate(zip(ticks, tick_txt)):
         if t != 0:
             out.append(_vline("grid", x(t), top, rows_bottom))
-        out.append(f'<text class="t-tick" x="{_n(x(t))}" y="{_n(rows_bottom + 17)}" text-anchor="middle">{_esc(txt)}</text>')
+        if k % every == 0:
+            out.append(f'<text class="t-tick" x="{_n(x(t))}" y="{_n(rows_bottom + 17)}" text-anchor="middle">{_esc(txt)}</text>')
 
     for i, label in enumerate(labels):
         row_y = top + i * pitch
@@ -929,6 +1108,9 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
 
 
 _MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+# On a month axis, points up to this many calendar months apart are joined by the solid line (a
+# month or two without games is normal); a longer break is drawn as a dashed bridge.
+MONTH_LINE_MAX_STEP = 3
 
 
 def month_positions(labels: Sequence[str]) -> Optional[list[int]]:
@@ -946,8 +1128,9 @@ def month_positions(labels: Sequence[str]) -> Optional[list[int]]:
 
 def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], title: str) -> str:
     """Lines over a category x-axis. "YYYY-MM" labels get a calendar scale, because monthly series
-    only list months with games. A missing value or month breaks the line; a thin dashed bridge
-    keeps the series readable across the gap."""
+    only list months with games. On a month axis the line runs on across up to two months without
+    games and breaks at longer ones; on other axes a missing value breaks it. A dashed bridge in the
+    series colour keeps the series readable across each break."""
     fmt, labels, n, ref = data.fmt, data.labels, len(data.labels), data.reference
     values = [v for _, vals in series for v in vals if v is not None]
     include_zero = data.emphasise_zero or fmt in _SIGNED_FORMATS or (min(values) < 0 < max(values))
@@ -966,7 +1149,7 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         xs = [x_from + (m - months[0]) * width / (months[-1] - months[0]) for m in months]
     else:
         xs = [x_from + i * width / (n - 1) for i in range(n)]
-    shown_txt = [_ellipsize(label, max(width / 2, 40.0)) for label in labels]
+    shown_txt = [_shorten(label, max(width / 2, 40.0)) for label in labels]
 
     top = 14.0
     height = top + PLOT_H + 28
@@ -992,7 +1175,7 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
             if v is None:
                 continue
             prev = segments[-1][-1] if segments else None
-            if prev == i - 1 and (not months or months[i] == months[prev] + 1):
+            if prev is not None and (months[i] - months[prev] <= MONTH_LINE_MAX_STEP if months else prev == i - 1):
                 segments[-1].append(i)
             else:
                 segments.append([i])
@@ -1115,13 +1298,15 @@ def _table_html(table: Table, *, show_title: bool = True) -> str:
     return "".join(parts)
 
 
-def _legend(series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], kind: str, reference: str) -> str:
-    """Series keys (only when there are 2+ series) plus the dashed reference-line key."""
+def _legend(
+    series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], kind: str, reference: str, *, always: bool = False
+) -> str:
+    """Series keys (when there are 2+ series, or ``always``) plus the dashed reference-line key."""
     key = "key key--line" if kind == "line" else "key"
     items = [
         f'<li><span class="{key} {_cls("sw", slots[j])}" aria-hidden="true"></span>{_esc(name)}</li>'
         for j, (name, _) in enumerate(series)
-    ] if len(series) >= 2 else []
+    ] if len(series) >= 2 or always else []
     if reference:
         items.append(f'<li><span class="key key--ref" aria-hidden="true"></span>{_esc(reference)}</li>')
     return f'<ul class="legend" aria-label="Legend">{"".join(items)}</ul>'
@@ -1154,10 +1339,19 @@ def _chart_html(chart: Chart) -> str:
     if kind == "table":
         parts.append(_table_html(chart_table(chart), show_title=False))
     else:
-        slots = series_slots([name for name, _ in series])
+        stacks: Optional[list[list[int]]] = None
+        keyed = list(range(len(series)))
+        if kind == "stacked_bar":  # which segments touch: zeros are not drawn, so neighbours can be far apart
+            stacks = []
+            for i in range(len(data.labels)):
+                segs = [(j, v) for j, (_, vals) in enumerate(series) if (v := vals[i]) is not None and v != 0]
+                stacks += [[j for j, v in segs if v > 0], [j for j, v in segs if v < 0]]
+            keyed = sorted({j for stack in stacks for j in stack}) or keyed  # nothing drawn: no legend needed
+        slots = series_slots([name for name, _ in series], stacks)
         ref_label = reference_text(data.reference, data.fmt) if data.reference is not None else ""
         if len(series) >= 2 or ref_label:
-            parts.append(_legend(series, slots, kind, ref_label))
+            # a stacked series with nothing to draw is left out of the key (the data table lists it)
+            parts.append(_legend([series[j] for j in keyed], [slots[j] for j in keyed], kind, ref_label, always=len(series) >= 2))
         if kind == "hbar":
             parts.append(_svg_hbar(data, series, slots, title))
         elif kind == "line":
@@ -1313,6 +1507,7 @@ _SVG_NS = "http://www.w3.org/2000/svg"
 _XLINK_NS = "http://www.w3.org/1999/xlink"
 _SVG_MAX_CHARS = 400_000
 _SVG_MAX_DEPTH = 24
+_SVG_MAX_ATTR = 20_000  # the longest python-chess path data is a few thousand characters
 _SVG_TAGS = frozenset(
     {"svg", "defs", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "use",
      "radialGradient", "linearGradient", "stop", "text", "tspan", "title"}
@@ -1321,7 +1516,11 @@ _SVG_TEXT_TAGS = frozenset({"text", "tspan", "title"})
 _SVG_DROP = frozenset({"desc", "metadata"})  # python-chess puts an ASCII board (<pre>) in <desc>
 _SVG_NUMS = re.compile(r"^[\d\s.,eE+\-%]{1,200}$")
 _SVG_PATH = re.compile(r"^[\d\s.,eE+\-MmLlHhVvCcSsQqTtAaZz]{0,20000}$")
-_SVG_TRANSFORM = re.compile(r"^(?:\s*(?:matrix|translate|scale|rotate|skewX|skewY)\s*\([\d\s.,eE+\-]*\)\s*,?)*\s*$")
+# One way to match any input (a function name must follow the separators), with bounded repeats:
+# a nested "(?:\s*...\s*,?)*" backtracked exponentially on "scale(1)  scale(1)  ... !".
+_SVG_TRANSFORM = re.compile(
+    r"^\s*(?:(?:matrix|translate|scale|rotate|skewX|skewY)\s*\([\d\s.,eE+\-]{0,120}\)[\s,]*){0,8}$"
+)
 _SVG_PAINT = re.compile(r"^(?:#[0-9a-fA-F]{3,8}|[a-zA-Z]{1,20}|rgba?\([\d\s.,%]+\)|url\(#[A-Za-z][\w.-]{0,63}\))$")
 _SVG_KEYWORD = re.compile(r"^[a-zA-Z-]{1,24}$")
 _SVG_ID = re.compile(r"^[A-Za-z][\w.-]{0,63}$")
@@ -1364,6 +1563,8 @@ def _svg_attr(name: str, value: str, prefix: str) -> tuple[str, str]:
     else:
         name = local
     value = value.strip()
+    if len(value) > _SVG_MAX_ATTR:
+        raise _UnsafeSvg(f"{name} is {len(value)} characters long")
     if name in ("href", "xlink:href"):
         ref = _SVG_REF.match(value)
         if not ref:
@@ -1502,12 +1703,18 @@ def _module_html(module: ModuleResult, anchor: str) -> str:
     return "".join(parts)
 
 
+# ids the page itself uses: the fixed sections and their headings ("study" / "study-h")
 _RESERVED_IDS = {"study", "strengths", "weaknesses", "top", "main"}
+_RESERVED_IDS |= {f"{i}-h" for i in _RESERVED_IDS}
 
 
 def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
-    """Unique, URL-safe section ids: the module key when possible."""
-    seen: set[str] = set()
+    """Unique, URL-safe section ids: the module key when possible.
+
+    Each module section also uses ``<anchor>-h`` for its heading, so neither id may repeat
+    another section's id, heading id or a reserved page id (compared case-insensitively).
+    """
+    taken = set(_RESERVED_IDS)
     out = []
     for i, m in enumerate(modules, 1):
         base = re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(m.key)).strip("-") or f"module-{i}"
@@ -1516,9 +1723,9 @@ def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
         if base.lower() in _RESERVED_IDS:
             base = f"{base}-section"
         anchor, k = base, 2
-        while anchor in seen:
+        while anchor.lower() in taken or f"{anchor}-h".lower() in taken:
             anchor, k = f"{base}-{k}", k + 1
-        seen.add(anchor)
+        taken |= {anchor.lower(), f"{anchor}-h".lower()}
         out.append(anchor)
     return out
 
@@ -1786,7 +1993,7 @@ details.study[open] summary{margin-bottom:8px}
 .ci-chart .ref{stroke:var(--ink-2);stroke-width:1.5px;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}
 .ci-chart .hit{fill:transparent}
 .ci-chart .ln{fill:none;stroke-width:2px;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
-.ci-chart .ln--gap{stroke-width:1.5px;stroke-dasharray:2 4;opacity:.6}
+.ci-chart .ln--gap{stroke-width:1.5px;stroke-dasharray:5 4;stroke-linecap:butt}
 .ci-chart .ring{fill:var(--surface)}
 .ci-chart .xh{stroke:var(--axis);stroke-width:1px;vector-effect:non-scaling-stroke;opacity:0}
 .ci-chart .hd{opacity:0}

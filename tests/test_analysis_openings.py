@@ -240,21 +240,29 @@ def test_chart_needs_eight_rated_games():
 
 # --------------------------------------------------------------------------- insights
 def test_bad_opening_with_enough_games_is_a_weakness():
-    # 6/30 (20%, p ~ 0.002). The old 8/30 (27%) had a BH-adjusted p of 0.06 over the three families
-    # and was only flagged under the old lax rule, which also flagged openings in pure noise.
+    # 6/30 (20%) against 15/30 in the player's other Black opening: gap -0.30, p ~ 0.02. The old
+    # 8/30 (27%) had a BH-adjusted p of 0.06 and was only flagged under the old lax rule, which
+    # also flagged openings in pure noise.
     caro = play("caro", 6, 24)
     others = play("qgd", 15, 15) + play("italian", 15, 15)
     mr = run(caro + others)
     ins = insight(mr, "openings.weakness.black.caro-kann-defense")
     assert ins is not None and ins.category == "openings"
-    assert ins.title == "The Caro-Kann Defense is costing you points as Black"
-    assert ins.detail.startswith("You score 20% in 30 games where 50% was expected (−0.30 points per game")
+    assert ins.title == "You score less with the Caro-Kann Defense than with your other Black openings"
+    assert ins.detail.startswith(
+        "You score 20% in 30 games where 50% was expected (−0.30 points per game against your rating); "
+        "in your other 30 games as Black, 0.00. The gap is −0.30 points per game"
+    )
     recent_losses = sorted((g for g in caro if g.outcome == "loss"), key=lambda g: g.end_time, reverse=True)
     assert ins.example_games == [g.url for g in recent_losses[:5]]
     assert any("Advance Variation" in s for s in ins.study)
     assert ins.evidence["shrunk_delta"] == pytest.approx(shrink(6 / 30 - 0.5, 30, 0.0, 10.0))
-    assert ins.evidence["colour_adjusted_delta"] == pytest.approx(6 / 30 - 0.48)  # Black normally scores 48%
+    assert ins.evidence["gap"] == pytest.approx(-0.3) and ins.evidence["rest_delta"] == pytest.approx(0.0)
+    assert ins.evidence["effect"] == pytest.approx(shrink(-0.3, 30, 0.0, 10.0))
     assert mr.stats["family_tests"]["black:Caro-Kann Defense"]["p_adjusted"] <= 0.05
+    # two groups with one colour are one comparison: the QGD is not also called a strength
+    assert "black:Queen's Gambit Declined" not in mr.stats["family_tests"]
+    assert not [i for i in mr.insights if i.kind == "strength"]
     assert "Caro-Kann" in mr.summary
     assert any(k.label == "Most costly opening" and k.value == "Caro-Kann Defense (Black)" for k in mr.kpis)
 
@@ -271,9 +279,9 @@ def test_small_or_mild_samples_are_not_flagged():
 
 def test_good_opening_is_a_strength_with_recent_wins():
     italian = play("italian", 24, 6)
-    mr = run(italian + play("caro", 15, 15))
+    mr = run(italian + play("london", 15, 15) + play("caro", 15, 15))
     ins = insight(mr, "openings.strength.white.italian-game")
-    assert ins is not None and ins.title == "The Italian Game is working for you as White"
+    assert ins is not None and ins.title == "You score more with the Italian Game than with your other White openings"
     recent_wins = sorted((g for g in italian if g.outcome == "win"), key=lambda g: g.end_time, reverse=True)
     assert ins.example_games == [g.url for g in recent_wins[:5]]
 
@@ -284,9 +292,9 @@ def test_openings_chosen_by_the_opponent_are_worded_as_against():
     assert openings.chosen_by("Englund Gambit") == "black"
     assert openings.chosen_by("Italian Game") == "white"
     assert openings.chosen_by("Queen's Gambit Declined") == "white"
-    mr = run(play("sicilian_w", 6, 24) + play("caro", 15, 15))
+    mr = run(play("sicilian_w", 6, 24) + play("italian", 15, 15) + play("caro", 15, 15))
     ins = insight(mr, "openings.weakness.white.sicilian-defense")
-    assert ins.title == "You struggle against the Sicilian Defense as White"
+    assert ins.title == "You score less against the Sicilian Defense than against other openings as White"
     assert any("answer to the Sicilian Defense" in s for s in ins.study)
 
 
@@ -309,7 +317,7 @@ def test_early_disasters_flagged_when_quick_losses_stand_out():
 def test_early_losses_not_repeated_for_a_family_already_flagged():
     caro = [make_game(outcome="loss", termination="resignation", **OPENING_KW["caro"]) for _ in range(20)]
     caro += play("caro", 4, 0)
-    others = play("italian", 20, 20, moves_san=ITALIAN * 5)
+    others = play("french", 12, 12, moves_san=FRENCH * 5) + play("italian", 20, 20, moves_san=ITALIAN * 5)
     mr = run(caro + others)
     weak = insight(mr, "openings.weakness.black.caro-kann-defense")
     assert weak is not None and "20 of your 20 losses in it were over within 25 moves" in weak.detail
@@ -330,15 +338,18 @@ def test_repertoire_breadth_observations():
 
 
 def test_bh_adjustment_is_recorded_for_every_tested_family():
-    mr = run(play("caro", 8, 22) + play("french", 5, 5) + play("italian", 15, 15))
+    black = play("caro", 8, 22) + play("french", 5, 5) + play("qgd", 10, 10)
+    white = play("italian", 16, 14) + play("london", 15, 15)  # two White groups: one comparison, kept for the Italian
+    mr = run(black + white)
     tests = mr.stats["family_tests"]
-    assert set(tests) == {"black:Caro-Kann Defense", "black:French Defense", "white:Italian Game"}
+    assert set(tests) == {"black:Caro-Kann Defense", "black:French Defense", "black:Queen's Gambit Declined",
+                          "white:Italian Game"}
     assert all(t["p_adjusted"] >= t["p_value"] for t in tests.values())
 
 
 def test_thresholds_can_be_overridden_through_options():
-    # 7 straight losses (p ~ 0.01); the old 0/5 was not significant after adjusting for the two families.
-    games = play("caro", 0, 7) + play("italian", 10, 10)
+    # 7 straight losses against 10/20 in the other Black opening (p ~ 0.02); the old 0/5 was not significant.
+    games = play("caro", 0, 7) + play("french", 10, 10) + play("italian", 10, 10)
     assert insight(run(games), "openings.weakness.black.caro-kann-defense") is None  # 7 < 8 games
     mr = run(games, **{"openings.min_family_games": 5})
     assert insight(mr, "openings.weakness.black.caro-kann-defense") is not None
@@ -366,12 +377,39 @@ def test_sharp_openings_are_not_early_loss_weaknesses():
     assert tests["short_loss_share"] == 1.0 and tests["short_win_share"] == 1.0 and not tests["significant"]
 
 
-def test_openings_are_judged_against_the_colour_adjusted_expectation():
-    # Black scoring 2 points per 100 games below the Elo formula and White 2 above is simply normal.
-    black = play("caro", 24, 26)  # 48%
-    white = play("italian", 26, 24)  # 52%
-    mr = run(black + white)
+def test_openings_are_compared_with_your_other_openings_of_the_same_colour():
+    # A player who is underrated (scores 70% where 50% is expected in every opening) has no opening
+    # strengths: the old test against the Elo expectation called all five openings strengths.
+    fams = {"black": ("caro", "french", "qgd"), "white": ("italian", "london")}
+    underrated = [g for keys in fams.values() for key in keys for g in play(key, 35, 15)]
+    mr = run(underrated)
+    assert not [i for i in mr.insights if i.kind in ("strength", "weakness")]
     tests = mr.stats["family_tests"]
-    assert tests["black:Caro-Kann Defense"]["colour_adjusted_delta"] == pytest.approx(0.0)
-    assert tests["white:Italian Game"]["colour_adjusted_delta"] == pytest.approx(0.0)
-    assert mr.stats["families"]["black:Caro-Kann Defense"]["delta"] == pytest.approx(-0.02)  # tables stay plain Elo
+    assert tests["black:Caro-Kann Defense"]["gap"] == pytest.approx(0.0)
+    assert tests["black:Caro-Kann Defense"]["rest_delta"] == pytest.approx(0.2)
+    # A weak Black as a whole (44% vs White's 56%) is the results module's colour question, not a
+    # weakness of each Black opening (nor a strength of each White one).
+    colour_gap = [g for key in fams["black"] for g in play(key, 22, 28)]
+    colour_gap += [g for key in fams["white"] for g in play(key, 28, 22)]
+    assert not [i for i in run(colour_gap).insights if i.kind in ("strength", "weakness")]
+
+
+def test_one_opening_that_is_almost_all_of_a_colour_is_not_claimed():
+    # 30 Caro-Kann games at 20% and nothing else as Black: the Caro-Kann can't be told apart from Black.
+    mr = run(play("caro", 6, 24) + play("italian", 15, 15) + play("london", 15, 15))
+    assert "black:Caro-Kann Defense" not in mr.stats["family_tests"]
+    assert insight(mr, "openings.weakness.black.caro-kann-defense") is None
+
+
+def test_quick_resigner_has_no_early_loss_weaknesses():
+    # Every loss is a quick resignation and every win a long game, in every opening: a resignation
+    # habit, not a weakness of one opening (the mirror test alone flagged each of them).
+    long_moves = CARO * 6  # 30 moves
+    games = []
+    for key in ("caro", "french", "qgd", "italian", "london"):
+        games += play(key, 12, 0, moves_san=long_moves) + play(key, 0, 12)  # 10-ply losses by resignation
+    mr = run(games)
+    assert not [i for i in mr.insights if "early-losses" in i.id]
+    tests = mr.stats["early_loss_tests"]
+    assert tests["black:French Defense"]["short_loss_share"] == 1.0 and tests["black:French Defense"]["gap"] == 0.0
+    assert all(not t["significant"] for t in tests.values())

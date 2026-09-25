@@ -30,8 +30,15 @@ from .parse import game_url_key
 
 
 def expand_path(path: Path | str) -> Path:
-    """``~`` and environment variables (``$HOME``, ``%USERPROFILE%``) expanded: Windows shells expand neither."""
-    return Path(os.path.expanduser(os.path.expandvars(str(path))))
+    """``~`` and environment variables (``$HOME``, ``%USERPROFILE%``) expanded: Windows shells expand neither.
+
+    Stray double quotes are dropped: in cmd.exe ``--cache-dir "D:\\chess\\"`` arrives as ``D:\\chess"``
+    (the ``\\"`` is read as an escaped quote), and ``"`` can't be part of a Windows file name anyway.
+    """
+    text = str(path)
+    if '"' in text:
+        text = text.strip().strip('"')
+    return Path(os.path.expanduser(os.path.expandvars(text)))
 
 
 DEFAULT_CACHE_DIR = expand_path(os.environ.get("CHESS_INSIGHTS_CACHE") or "~/.chess-insights-cache")
@@ -341,8 +348,8 @@ def _games_in(data: Any) -> list[dict[str, Any]]:
         return out
     if not isinstance(data, dict):
         return []
-    if isinstance(data.get("games"), list):
-        return [g for g in data["games"] if isinstance(g, dict)]
+    if isinstance(data.get("games"), list):  # items may be games or {"game": {...}} wrappers
+        return _games_in(data["games"])
     if "white" in data and "black" in data:
         return [data]
     if isinstance(data.get("game"), dict) and "white" in data["game"]:

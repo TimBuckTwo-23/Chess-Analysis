@@ -96,13 +96,13 @@ analyses new games (150 cached games load in about a second). Use `--engine-game
 | `--rules all` | Include variants (default: standard chess only; or e.g. `--rules chess,chess960`) |
 | `--tz America/New_York` | Your time zone, for time-of-day stats and the `--since`/`--until` day boundaries (default UTC) |
 | `--offline` | Use the local cache only |
-| `--pgn games.pgn` | Analyse PGN files (or a folder of them) instead of the API |
-| `--json archive.json` | Analyse saved chess.com API responses (files or a folder) |
-| `--out reports/me --formats html,md` | Output location and formats |
+| `--pgn games.pgn` | Analyse PGN files, a folder of them or a wildcard (`C:\games\*.pgn`) instead of the API; PGNs from other sites or over-the-board games work too |
+| `--json archive.json` | Analyse saved chess.com API responses (files, a folder or a wildcard) |
+| `--out reports/me --formats html,md` | Output location and formats: writes `reports/me.html` and `reports/me.md`; an existing folder (or a path ending in a slash) gets `<username>.html` … inside it |
 | `-v` | Debug logging |
 
 `chess-insights report --help` lists everything. Exit codes: `0` done, `1` no games to
-analyse (or the report could not be written), `2` a usage mistake (unknown option value,
+analyse (or the report or the game cache could not be written), `2` a usage mistake (unknown option value,
 unknown player, missing file or Stockfish), `3` chess.com could not be reached.
 
 ### Try it without an account
@@ -125,6 +125,8 @@ then analyses them and reports which planted traits it found.
   Python at your proxy (`set HTTPS_PROXY=http://proxy:port`) and at your company's root
   certificate (`set REQUESTS_CA_BUNDLE=C:\path\to\company-ca.pem`). If the games were
   downloaded before, the report falls back to them; `--offline` skips the network entirely.
+  Every retry is announced (`chess.com: …; retrying in 2s`); with no connection at all it
+  gives up after one retry instead of waiting minutes.
   Without any access, download your games as PGN from the chess.com website (Archive →
   Download) and run `chess-insights report YOUR_USERNAME --pgn "C:\Downloads\games.pgn"`.
 * **"chess.com has no player …".** Use the name from your profile address

@@ -361,7 +361,8 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
         end_time = (
             _header_datetime(headers.get("EndDate"), headers.get("EndTime"))
             or _header_datetime(headers.get("UTCDate"), headers.get("UTCTime"))
-            or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            or _header_datetime(headers.get("Date"), None)  # over-the-board / other sites' PGNs
+            or UNDATED
         )
     if raw.get("start_time") is not None:
         start_time: Optional[datetime] = datetime.fromtimestamp(int(raw["start_time"]), tz=timezone.utc)
@@ -413,6 +414,10 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     )
 
 
+# end_time of a game with no date at all (no end_time, EndDate, UTCDate or Date)
+UNDATED = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 def _game_order(g: Game) -> tuple[datetime, str]:
     return g.end_time, g.game_id
 
@@ -430,6 +435,9 @@ def merge_games(games: Iterable[Game]) -> list[Game]:
         out.append(g)
     out.sort(key=_game_order)
     fill_pregame_ratings(out)
+    undated = sum(1 for g in out if g.end_time == UNDATED)
+    if undated:
+        log.warning("%d game(s) have no date (no Date/UTCDate header); they count as played on 1970-01-01", undated)
     return out
 
 
@@ -523,9 +531,27 @@ def game_from_pgn(pgn: str, username: str) -> Optional[Game]:
         "white": {"username": h.get("White", ""), "rating": h.get("WhiteElo"), "result": w_code},
         "black": {"username": h.get("Black", ""), "rating": h.get("BlackElo"), "result": b_code},
     }
-    if not raw["url"]:
-        raw["uuid"] = f"pgn:{h.get('UTCDate', h.get('Date', ''))}:{h.get('UTCTime', '')}:{h.get('White')}:{h.get('Black')}"
-    return parse_game(raw, username)
+    game = parse_game(raw, username)
+    if game is not None and not game.url:
+        game.game_id = _pgn_id(h, game.moves_san)
+    return game
+
+
+def _pgn_id(headers: dict[str, str], moves: list[str]) -> str:
+    """Identity of a PGN game without a chess.com Link: its headers *and* its moves.
+
+    Games between the same two players on the same day (a club match, a blitz session) differ in
+    Round / time / moves; the same game saved twice (another file, other line endings or comments)
+    gets the same id, so repeats are still dropped.
+    """
+    keys = ("Event", "Site", "Date", "UTCDate", "UTCTime", "Round", "White", "Black", "Result", "TimeControl", "FEN")
+    basis = "|".join([headers.get(k, "") for k in keys] + [" ".join(moves)])
+    digest = hashlib.sha1(basis.encode("utf-8", "replace")).hexdigest()[:16]
+    # Games are ordered by (end time, id): with only a Date header a day's games tie on end time,
+    # so a zero-padded round number keeps them in playing order (round 2 before round 10).
+    parts = headers.get("Round", "").split(".")
+    rnd = "r" + ".".join(f"{int(p):04d}" for p in parts) + ":" if all(p.isdigit() for p in parts) else ""
+    return f"pgn:{rnd}{digest}"
 
 
 def games_from_pgn(text: str, username: str) -> list[Game]:

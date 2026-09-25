@@ -615,9 +615,10 @@ def test_html_charts(report):
     assert html.count('<ul class="legend"') == 6  # multi-series charts + the single-series chart with a reference
     assert "Reference 50%" in html
     assert 'class="zero"' in html  # signed charts emphasise the zero line
-    assert 'class="ln k1"' in html and 'class="ln k2"' in html
     rating_line = next(s for s in svgs if "Rating by month" in s)
-    assert re.search(r'class="ln k2" d="M[^"]* M', rating_line)  # None splits the line (Blitz keeps its own colour)
+    assert 'class="ln k1"' in rating_line and 'class="ln k3"' in rating_line  # Blitz and Rapid keep their own colours
+    # a month or two without games (None) does not break a monthly line
+    assert "ln--gap" not in rating_line and not re.search(r'class="ln k\d" d="M[^"]* M', rating_line)
     situations = next(s for s in svgs if "Score in different situations" in s)
     assert "rotate(" not in situations and "Late-night games (after 23:00)" in situations.replace("</tspan>", " ")  # long labels: bars turn horizontal
     black = next(s for s in svgs if "(Black)" in s)
@@ -632,7 +633,8 @@ def test_chart_table_matches_series():
     chart = Chart(kind="line", title="t", labels=["a", "b", "c"], series=[Series("x", [1, None]), Series("", [3, 4, 5, 6])])
     table = chart_table(chart)
     assert table.columns == ["", "x", "Series 2"]
-    assert table.rows == [["a", 1.0, 3.0], ["b", None, 4.0], ["c", None, 5.0]]
+    # the value beyond the labels is kept, labelled by its position
+    assert table.rows == [["a", 1.0, 3.0], ["b", None, 4.0], ["c", None, 5.0], ["4", None, 6.0]]
 
 
 @pytest.mark.parametrize(
@@ -1158,9 +1160,9 @@ def test_month_axis_is_drawn_to_scale_and_bridges_gaps():
     months = [0, 2, 43, 44, 45]
     step = (xs[-1] - xs[0]) / 45
     assert all(abs(x - (xs[0] + m * step)) < 0.2 for x, m in zip(xs, months)), xs
-    solid = re.search(r'<path class="ln k2" d="([^"]*)"', svg).group(1)
-    assert solid.count("M") == 3  # 2017-12 | 2018-02 | 2021-07..09: no line across missing months
-    assert re.search(r'<path class="ln ln--gap k2" d="M[^"]+"', svg)  # a dashed bridge shows the gap
+    solid = re.search(r'<path class="ln k1" d="([^"]*)"', svg).group(1)
+    assert solid.count("M") == 2  # 2017-12..2018-02 | 2021-07..09: no solid line across the 3-year break
+    assert re.search(r'<path class="ln ln--gap k1" d="M[^"]+"', svg)  # a dashed bridge shows the gap
 
 
 def test_category_line_bridges_missing_values_with_a_dashed_connector():
@@ -1190,3 +1192,406 @@ def test_line_chart_labels_the_first_and_last_point():
     assert shown[0] == "2017-12" and shown[-1] == "2023-10"
     boxes = _x_label_boxes(svg)
     assert all(a[1] + 2 <= b[0] for a, b in zip(boxes, boxes[1:]))
+
+
+# --------------------------------------------------------------------------- second review round (regressions)
+# OKLab distance x100 under normal vision and under protanopia / deuteranopia (Machado, Oliveira &
+# Fernandes 2009, severity 1): the measure and floors the chart palette was validated with.
+_MACHADO = {
+    "protan": ((0.152286, 1.052583, -0.204868), (0.114503, 0.786281, 0.099216), (-0.003882, -0.048116, 1.051998)),
+    "deutan": ((0.367322, 0.860646, -0.227968), (0.280085, 0.672501, 0.047413), (-0.011820, 0.042940, 0.968881)),
+}
+
+
+def _oklab(hex_colour: str, cvd: str | None = None) -> tuple[float, float, float]:
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    rgb = [lin(int(hex_colour[i : i + 2], 16) / 255) for i in (1, 3, 5)]
+    if cvd:
+        rgb = [min(1.0, max(0.0, sum(m * c for m, c in zip(row, rgb)))) for row in _MACHADO[cvd]]
+    r, g, b = rgb
+    l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m_ = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    return (
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    )
+
+
+def _too_alike(a: str, b: str) -> bool:
+    """Below the palette floors: normal-vision dE < 15, or colour-blind dE < 6."""
+    normal = 100 * math.dist(_oklab(a), _oklab(b))
+    cvd = min(100 * math.dist(_oklab(a, k), _oklab(b, k)) for k in _MACHADO)
+    return normal < 15 or cvd < 6
+
+
+@pytest.fixture(scope="module")
+def themes() -> list[dict[str, str]]:
+    style = re.search(r"<style>(.*?)</style>", render_html(empty_report()), re.S).group(1)
+    return [_css_tokens(style, r"^:root\{(.*?)\}"), _css_tokens(style, r':root\[data-theme="dark"\]\{(.*?)\}')]
+
+
+def _slot_colour(theme: dict[str, str], slot: str) -> str:
+    return theme[f"s{slot}" if slot.isdigit() else f"s-{slot}"]
+
+
+def _clash(themes, a: str, b: str) -> bool:
+    return any(_too_alike(_slot_colour(t, a), _slot_colour(t, b)) for t in themes)
+
+
+def test_time_class_colours_clear_the_palette_floors(themes):
+    import itertools
+
+    from chess_insights.report.html import _CLASHING_SLOTS, series_slots
+
+    measured = {frozenset(p) for p in itertools.combinations("1234", 2) if _clash(themes, *p)}
+    assert measured == set(_CLASHING_SLOTS)  # the table the renderer uses matches the palette
+    classes = ["Bullet", "Blitz", "Rapid", "Daily"]
+    for k in (2, 3):
+        for names in itertools.permutations(classes, k):
+            slots = series_slots(list(names))
+            assert not any(_clash(themes, a, b) for a, b in itertools.combinations(slots, 2)), (names, slots)
+    # brengall99's real rating chart: Blitz and Daily were orange and yellow; blitz keeps one colour everywhere
+    assert series_slots(["Blitz", "Daily"]) == ["1", "4"] and series_slots(["Blitz", "Rapid", "Daily"]) == ["1", "3", "4"]
+    assert series_slots(["Bullet", "Blitz", "Rapid", "Daily"]) == ["2", "1", "3", "4"]  # all four: slots 1-4
+
+
+def test_result_colours_never_clash_across_roles(themes):
+    import itertools
+
+    from chess_insights.report.html import _RESULT_CLASH, series_slots
+
+    steps = [f"w{k}" for k in range(1, 5)] + ["d"] + [f"l{k}" for k in range(1, 5)]
+    measured = {frozenset((a, b)) for a, b in itertools.combinations(steps, 2) if a[0] != b[0] and _clash(themes, a, b)}
+    assert measured == set(_RESULT_CLASH)
+    wins = ["Won by checkmate", "Won by resignation", "Won on time", "Won: abandoned / other"]
+    losses = ["Lost: abandoned / other", "Lost on time", "Lost by resignation", "Lost by checkmate"]
+    unavoidable = {(3, False, 4), (4, False, 4)}  # w3/w4 clash with l4, and 4 losses must end on l4
+    for n_win, draw, n_loss in itertools.product(range(5), (True, False), range(5)):
+        names = wins[:n_win] + (["Drawn"] if draw else []) + losses[4 - n_loss :]
+        if len({n_win > 0, draw, n_loss > 0} - {False}) < 2 and not (draw and (n_win or n_loss)):
+            continue
+        slots = series_slots(names)
+        assert len(slots) == len(names)
+        if n_win:
+            assert slots[0] == "w1"  # the most decisive result is always the strongest colour
+        if n_loss:
+            assert slots[-1] == "l1"
+        touching = [(a, b) for a, b in zip(slots, slots[1:]) if a[0] != b[0]]
+        clashes = [(a, b) for a, b in touching if _clash(themes, a, b)]
+        assert not clashes or (n_win, draw, n_loss) in unavoidable, (names, slots, clashes)
+    # the verifier's case: two win types, the draw and two loss types
+    assert series_slots(wins[:1] + wins[2:3] + ["Drawn"] + losses[2:]) == ["w1", "w4", "d", "l4", "l1"]
+
+
+BRENGALL_MONTHS = ["2017-12", "2018-02", "2021-07", "2022-09", "2023-06", "2023-08", "2023-09", "2023-10"]
+
+
+def test_monthly_lines_run_on_across_short_breaks_and_bridges_stay_visible():
+    """brengall99's real rating chart: 8 months with games over six years."""
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(
+            kind="line",
+            title="Rating by month",
+            labels=BRENGALL_MONTHS,
+            series=[
+                Series("Blitz", [762.0, 782.0, 1260.0, 1195.0, 1316.0, 1321.0, 1337.0, 1372.0]),
+                Series("Daily", [1297.0, 946.0, 1016.0, None, 978.0, 985.0, 987.0, 972.0]),
+            ],
+            value_format="rating",
+        )
+    ]
+    html = render_html(rep)
+    svg = re.search(r"<svg .*?</svg>", html, re.S).group(0)
+    blitz = re.search(r'<path class="ln k1" d="([^"]*)"', svg).group(1).split("M")[1:]
+    daily = re.search(r'<path class="ln k4" d="([^"]*)"', svg).group(1).split("M")[1:]
+    # 2017-12..2018-02 and 2023-06..2023-10 are solid; only breaks of 3+ months without games are bridged
+    assert [seg.count("L") + 1 for seg in blitz] == [2, 1, 1, 4]
+    assert [seg.count("L") + 1 for seg in daily] == [2, 1, 4]
+    assert re.search(r'<path class="ln ln--gap k1" d="([^"]*)"', svg).group(1).count("M") == 3
+    assert re.search(r'<path class="ln ln--gap k4" d="([^"]*)"', svg).group(1).count("M") == 2
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    gap = re.search(r"\.ci-chart \.ln--gap\{([^}]*)\}", style).group(1)
+    assert "opacity" not in gap  # full series colour: no faint bridges
+    dash, space = (float(v) for v in re.search(r"stroke-dasharray:([\d.]+) ([\d.]+)", gap).groups())
+    assert dash >= 4 and dash / (dash + space) >= 0.5
+
+
+def test_numpy_and_python_durations_are_seconds_everywhere():
+    import numpy as np
+    from chess_insights.report.html import is_missing
+
+    rep = empty_report()
+    rep.modules[0].stats = {
+        "td": np.timedelta64(5, "s"),
+        "ms": np.timedelta64(1500, "ms"),
+        "nat": np.timedelta64("NaT"),
+        "months": np.timedelta64(2, "M"),
+        "dt": np.datetime64("2024-01-01T10:00"),
+        "dt_ns": np.datetime64("2024-01-01T00:00:00.000000001"),
+        "dt_nat": np.datetime64("NaT"),
+        "median": np.median(np.array([3, 5, 9], dtype="timedelta64[s]")),
+    }
+    stats = json.loads(to_json(rep))["modules"][0]["stats"]
+    assert stats == {
+        "td": 5.0,
+        "ms": 1.5,
+        "nat": None,
+        "months": "2 months",
+        "dt": "2024-01-01T10:00:00",
+        "dt_ns": "2024-01-01T00:00:00",
+        "dt_nat": None,
+        "median": 5.0,
+    }
+    assert format_value(np.timedelta64(90, "s")) == "1:30" and format_value(np.timedelta64(5, "s"), "seconds") == "5.0s"
+    assert format_value(timedelta(seconds=75)) == "1:15" and format_value(timedelta(seconds=75), "text") == "1:15"
+    assert is_missing(np.timedelta64("NaT")) and format_value(np.timedelta64("NaT"), "int") == MISSING
+    assert format_value(np.datetime64("2024-05-02T18:30")) == "2024-05-02 18:30"
+    rep.modules[0].kpis = [Kpi("Think time", np.timedelta64(95, "s")), Kpi("None", np.timedelta64("NaT"), "seconds")]
+    html = render_html(rep)
+    assert ">1:35<" in html and "seconds<" not in html and "NaT" not in html
+    assert "- Think time: **1:35**" in render_markdown(rep)
+
+
+def test_board_transform_check_runs_in_linear_time():
+    import time
+
+    from chess_insights.report.html import _SVG_TRANSFORM, sanitize_board_svg
+
+    for text in ("translate(10, 20)", "rotate(45 22.5 22.5) scale(0.5)", "matrix(1 0 0 1 0 0),translate(-1e1)", " scale(2) "):
+        assert _SVG_TRANSFORM.match(text), text
+    for text in ("scale(1) url(x)", "translate(1)x", "scale(1)" * 9, "expression(alert(1))"):
+        assert not _SVG_TRANSFORM.match(text), text
+    start = time.perf_counter()
+    for k in (18, 30, 200):
+        assert not _SVG_TRANSFORM.match("scale(1)  " * k + "!")
+        svg = f'<svg xmlns="http://www.w3.org/2000/svg"><g transform="{"scale(1)  " * k}!"><rect width="1" height="1"/></g></svg>'
+        assert sanitize_board_svg(svg) == ""
+    assert time.perf_counter() - start < 0.5  # was 78 s for k=18
+
+
+def test_write_report_survives_bad_text_and_never_truncates(report, tmp_path, monkeypatch):
+    import copy
+
+    from chess_insights import report as report_pkg
+
+    good = write_report(report, tmp_path / "bob")
+    before = {p: p.read_bytes() for p in good}
+    # a renderer error leaves every earlier file exactly as it was, and no temporary files behind
+    monkeypatch.setitem(report_pkg.FORMATS, "json", ("json", lambda r: (_ for _ in ()).throw(TypeError("boom"))))
+    with pytest.raises(TypeError, match="boom"):
+        write_report(report, tmp_path / "bob")
+    assert {p: p.read_bytes() for p in good} == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bob.html", "bob.json", "bob.md"]
+    monkeypatch.undo()
+    # a lone surrogate (broken input) is written as U+FFFD instead of crashing mid-write
+    bad = copy.deepcopy(report)
+    bad.modules[0].summary = json.loads('"bad \\ud800 surrogate"')
+    paths = write_report(bad, tmp_path / "bob")
+    for p in paths:
+        text = p.read_bytes().decode("utf-8")
+        assert "bad � surrogate" in text or "bad \\ufffd surrogate" in text
+    assert json.loads(paths[2].read_text(encoding="utf-8"))["modules"][0]["summary"] == "bad � surrogate"
+
+
+def test_write_report_into_a_folder(report, tmp_path):
+    folder = tmp_path / "Desktop"
+    folder.mkdir()
+    assert write_report(report, folder, ["md"]) == [folder / "testerbob.md"]
+    assert write_report(report, str(folder) + "/", ["html"]) == [folder / "testerbob.html"]
+    new = tmp_path / "new-folder"
+    assert write_report(empty_report(), f"{new}/", ["json"]) == [new / "chess-insights.json"]  # trailing separator: a folder
+    assert not (tmp_path / "Desktop.md").exists()
+    assert write_report(report, tmp_path / "plain", ["md"]) == [tmp_path / "plain.md"]  # a stem is still a stem
+
+
+def _tick_boxes(svg: str) -> list[tuple[float, float]]:
+    import html as _h
+
+    from chess_insights.report.html import _tw
+
+    boxes = []
+    for x, txt in re.findall(r'<text class="t-tick" x="([\d.-]+)" y="[\d.]+" text-anchor="middle">([^<]*)</text>', svg):
+        w = _tw(_h.unescape(txt), 12)
+        boxes.append((float(x) - w / 2, float(x) + w / 2))
+    return boxes
+
+
+@pytest.mark.parametrize("scale", [1, 25, 1000, 25_000, 100_000, 3_000_000])
+@pytest.mark.parametrize("fmt", [None, "int", "float2", "signed_int", "seconds", "pct"])
+def test_horizontal_bar_ticks_never_overlap(scale, fmt):
+    rep = empty_report()
+    labels = [f"Row {i}" for i in range(12)]
+    series = [Series(f"s{j}", [scale * ((i * 7 + j * 3) % 11) / 10 for i in range(12)]) for j in range(3)]
+    rep.modules[0].charts = [
+        Chart(kind="hbar", title="hbar", labels=labels, series=series, value_format=fmt),
+        Chart(kind="bar", title="grouped", labels=[f"A rather long category name {i}" for i in range(6)], series=series, value_format=fmt),
+    ]
+    svgs = re.findall(r"<svg .*?</svg>", render_html(rep), re.S)
+    assert len(svgs) == 2 and "rotate(" not in svgs[1]  # long labels: the grouped bars turned horizontal
+    for svg in svgs:
+        boxes = _tick_boxes(svg)
+        assert len(boxes) >= 2
+        assert all(a[1] + 4 <= b[0] for a, b in zip(boxes, boxes[1:])), boxes
+        assert boxes[0][0] >= -0.5 and boxes[-1][1] <= 400.5
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1e300, "1e+300"), (-1e300, f"{MINUS}1e+300"), (1.5e18, "1.5e+18"), (-1e-9, "0"), (-0.00001, "0"), (-0.0, "0"),
+     (-1.5, f"{MINUS}1.5"), (0.12345678, "0.1235"), (-7, f"{MINUS}7"), (123456789012345678, "123456789012345678")],
+)
+def test_text_format_numbers_are_short_and_never_negative_zero(value, expected):
+    assert format_value(value, "text") == expected
+
+
+def test_huge_text_values_stay_short_in_kpis_and_chart_labels():
+    rep = empty_report()
+    rep.modules[0].kpis = [Kpi("Huge", 1e300)]
+    rep.modules[0].charts = [Chart(kind="bar", title="c", labels=[1e300, -1e-9], series=[Series("x", [1, 2])])]
+    html = render_html(rep)
+    assert "0" * 30 not in html and ">1e+300<" in html and ">-0<" not in html
+    assert chart_table(rep.modules[0].charts[0]).rows[1][0] == "0"
+
+
+def test_decimal_values_format_like_floats():
+    from decimal import Decimal
+
+    assert format_value(Decimal("0.5"), "pct") == "50%" and format_value(Decimal("-2.25"), "float1") == f"{MINUS}2.3"
+    for bad in (Decimal("NaN"), Decimal("sNaN"), Decimal("Infinity")):
+        assert format_value(bad, "pct") == MISSING and format_value(bad) == MISSING and format_value(bad, "text") == MISSING
+    assert infer_format(Decimal("2")) == "int" and infer_format(Decimal("0.25")) == "float2"
+    assert format_value(Decimal("0.25")) == "0.25" and format_value(Decimal("0.50"), "text") == "0.5"
+    rep = empty_report()
+    rep.modules[0].tables = [Table("t", ["a", "b"], [["x", Decimal("0.5")], ["y", Decimal("NaN")]], ["text", "pct"])]
+    md = render_markdown(rep)
+    assert "| x | 50% |" in md and f"| y | {MISSING} |" in md
+    assert json.loads(to_json(rep))["modules"][0]["tables"][0]["rows"] == [["x", 0.5], ["y", None]]
+
+
+def test_markdown_bare_urls_become_clean_links():
+    from chess_insights.report.markdown import md_text
+
+    def links(text: str) -> list[tuple[str, str]]:
+        return re.findall(r"\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)", text)
+
+    out = md_text("See https://example.com/a_b_(c). Or www.example.com/_x_, then stop")
+    (label1, href1), (label2, href2) = links(out)
+    unescape = lambda s: re.sub(r"\\(.)", r"\1", s)  # noqa: E731
+    assert unescape(label1) == "https://example.com/a_b_(c)" and href1 == "https://example.com/a_b_%28c%29"
+    assert unescape(label2) == "www.example.com/_x" and href2 == "http://www.example.com/_x"
+    assert "\\" not in href1 + href2  # no backslash ends up in a link target
+    assert out.endswith("\\_, then stop") and out.startswith("See [")
+    # never linked: other schemes, addresses glued to other text (no "![...](...)" image), unsafe URLs
+    for text in ("javascript:alert(1)", "Wow!https://evil.example/x.png", "[x]https://e.com", "http://"):
+        assert not links(md_text(text)), text
+    # a pipe inside an address cannot add a table cell
+    rep = empty_report()
+    rep.modules[0].tables = [Table("t", ["a", "b"], [["https://e.com/a|b", "x"]], ["text", "text"])]
+    row = next(l for l in render_markdown(rep).splitlines() if "e.com" in l)
+    assert len(re.findall(r"(?<!\\)\|", row)) == 3 and "%7C" in row
+
+
+def test_cut_labels_keep_their_distinguishing_end():
+    import html as _h
+
+    rep = empty_report()
+    hbar_labels = [f"Sicilian Defense: Najdorf Variation, English Attack {i} ({'White' if i % 2 else 'Black'})" for i in range(40)]
+    col_labels = [f"Queen's Gambit Declined: Exchange Variation, line {i}" for i in range(40)]
+    rep.modules[0].charts = [
+        Chart(kind="hbar", title="h", labels=hbar_labels, series=[Series("x", list(range(40)))]),
+        Chart(kind="bar", title="c", labels=col_labels, series=[Series("x", list(range(40)))]),
+    ]
+    hsvg, csvg = re.findall(r"<svg .*?</svg>", render_html(rep), re.S)
+    rows = [" ".join(_h.unescape(t) for t in re.findall(r"<tspan[^>]*>([^<]*)</tspan>", g)) for g in re.findall(r'<text class="t-y"[^>]*>(.*?)</text>', hsvg)]
+    assert len(rows) == 40 and len(set(rows)) == 40, rows[:3]
+    assert all(r.endswith("(White)" if i % 2 else "(Black)") and "…" in r for i, r in enumerate(rows))
+    shown = [_h.unescape(t) for t in re.findall(r'<text class="t-x"[^>]*transform="rotate[^>]*>([^<]*)</text>', csvg)]
+    assert shown and len(set(shown)) == len(shown) and all(re.search(r"line \d+$", s) for s in shown), shown[:3]
+
+
+def test_module_ids_never_repeat_page_ids():
+    keys = ["results", "results-h", "study-h", "weaknesses-h", "Results", "strengths"]
+    rep = empty_report()
+    rep.modules = [ModuleResult(key=k, title=k, summary="s") for k in keys]
+    checker = check_html(render_html(rep))
+    assert len(checker.ids) == len(set(i.lower() for i in checker.ids)), sorted(checker.ids)
+    html = render_html(rep)
+    for target in re.findall(r'(?:href="#|aria-labelledby=")([^"]+)"', html):
+        assert target in checker.ids, target
+
+
+def test_result_mix_table_is_transposed_to_fit_a_phone():
+    chart = Chart(
+        kind="stacked_bar", title="How your games end", labels=["Bullet", "Blitz", "Daily"],
+        series=[Series(name, [0.1, 0.12, 0.2]) for name in RESULT_MIX], value_format="pct",
+    )
+    table = chart_table(chart)
+    assert table.columns == ["", "Bullet", "Blitz", "Daily"]
+    assert [row[0] for row in table.rows] == RESULT_MIX and table.rows[0][1:] == [0.1, 0.12, 0.2]
+    rep = empty_report()
+    rep.modules[0].charts = [chart]
+    md = render_markdown(rep)
+    assert "|  | Bullet | Blitz | Daily |" in md and "| Won by checkmate | 10% | 12% | 20% |" in md
+    # few series: one column per series, as before
+    few = chart_table(Chart(kind="bar", title="t", labels=["a"], series=[Series(f"s{i}", [i]) for i in range(4)]))
+    assert few.columns == ["", "s0", "s1", "s2", "s3"]
+
+
+def test_values_beyond_the_labels_are_never_dropped():
+    rep = empty_report()
+    rep.modules[0].charts = [Chart(kind="bar", title="t", labels=["only one"], series=[Series("x", [1, 2, 3])])]
+    html = render_html(rep)
+    svg = re.search(r"<svg .*?</svg>", html, re.S).group(0)
+    assert len(re.findall(r'<path class="bar ', svg)) == 3
+    md = render_markdown(rep)
+    assert "| only one | 1 |" in md and "| 2 | 2 |" in md and "| 3 | 3 |" in md
+
+
+def _role(name: str) -> str:
+    return name.split()[0][:3].lower()  # "won" / "dra" / "los"
+
+
+def test_stacked_result_colours_check_the_segments_that_really_touch(themes):
+    import itertools
+    import random
+
+    def render_stack(values: dict[str, list[float]], n: int) -> tuple[dict[str, str], list[list[str]]]:
+        chart = Chart(kind="stacked_bar", title="How your games end", labels=[f"TC{i}" for i in range(n)],
+                      series=[Series(k, v) for k, v in values.items()], value_format="pct")
+        rep = empty_report()
+        rep.modules[0].charts = [chart]
+        legend = {name: cls.removeprefix("sw-") for cls, name in _legend_items(render_html(rep))}
+        stacks = [[k for k in RESULT_MIX if values[k][i]] for i in range(n)]  # zero segments are not drawn
+        return legend, stacks
+
+    def clashes(slot: dict[str, str], stacks) -> list[tuple[str, str]]:
+        return [(a, b) for st in stacks for a, b in zip(st, st[1:]) if _role(a) != _role(b) and _clash(themes, slot[a], slot[b])]
+
+    # Caruana's real chart: no "Won on time" or "abandoned" games, so "Won by resignation" sits on "Drawn"
+    real = dict(zip(RESULT_MIX, ([0, 0.11], [0.25, 0.56], [0, 0], [0, 0], [0.13, 0.33], [0, 0], [0.13, 0], [0.5, 0], [0, 0])))
+    legend, stacks = render_stack(real, 2)
+    assert list(legend) == [k for k in RESULT_MIX if any(real[k])]  # nothing to draw: not in the key
+    assert not clashes(legend, stacks)
+    assert legend["Won by checkmate"] == "w1" and legend["Won by resignation"] == "w4"
+
+    rng = random.Random(7)
+    for _ in range(150):
+        values = {k: [rng.choice([0, 0, 0.1]) for _ in range(3)] for k in RESULT_MIX}
+        if len({_role(k) for k in RESULT_MIX if any(values[k])}) < 2:
+            continue
+        legend, stacks = render_stack(values, 3)
+        found = clashes(legend, stacks)
+        if not found:
+            continue
+        # only acceptable when no increasing choice of steps per arm avoids every clash
+        drawn = [k for k in RESULT_MIX if any(values[k])]
+        wins = [k for k in drawn if _role(k) == "won"]
+        losses = [k for k in drawn if _role(k) == "los"]
+        for w, lo in itertools.product(itertools.combinations(range(1, 5), len(wins)), itertools.combinations(range(1, 5), len(losses))):
+            slot = {"Drawn": "d", **{k: f"w{s}" for k, s in zip(wins, w)}, **{k: f"l{s}" for k, s in zip(losses, reversed(lo))}}
+            assert clashes(slot, stacks), (values, legend, slot)

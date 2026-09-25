@@ -471,3 +471,159 @@ def test_windows_device_names_are_not_used_as_folder_names(tmp_path, name):
     assert store.username == name.lower()
     assert store.root.name == f"_{name.lower()}"
     assert fetch.GameStore(tmp_path, "conrad").root.name == "conrad"
+
+
+# --------------------------------------------------------------------------- verifier regressions
+def _local_server(handler_body):
+    """(base_url, seen user agents, shutdown) of a local HTTP server answering every GET with ``handler_body``."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            seen.append(self.headers.get("User-Agent"))
+            body = handler_body
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def shutdown():
+        server.shutdown()
+        server.server_close()
+
+    return f"http://127.0.0.1:{server.server_port}/pub", seen, shutdown
+
+
+@pytest.mark.parametrize(
+    "contact, kept",
+    [
+        ("Łukasz Nowak <lukasz@example.pl>", "<lukasz@example.pl>"),
+        ("张伟 zhang@example.cn", "zhang@example.cn"),
+        ("José <jose@example.es>", "Jose <jose@example.es>"),
+        ("me@example.com\n", "me@example.com"),
+        ("me@example.com\r\nX-Injected: 1", "me@example.com X-Injected: 1"),
+        ("\tme@example.com\u200b ", "me@example.com"),
+    ],
+)
+def test_any_contact_is_sent_over_a_real_http_stack(contact, kept, monkeypatch):
+    """--contact / CHESS_INSIGHTS_CONTACT with non-Latin-1 text or a newline used to crash
+    (UnicodeEncodeError) or fail every request as a 'network error' after ~31 s of retries."""
+    base, seen, shutdown = _local_server(b'{"username": "tester"}')
+    try:
+        for how in ("argument", "environment"):
+            session = requests.Session()
+            session.trust_env = False
+            sleeps = []
+            if how == "environment":
+                monkeypatch.setenv("CHESS_INSIGHTS_CONTACT", contact)
+            client = api.ChessComClient(
+                contact=contact if how == "argument" else None, session=session, base_url=base,
+                min_interval=0, sleep=sleeps.append,
+            )
+            assert client.profile("tester") == {"username": "tester"}
+            assert sleeps == []  # first attempt succeeded
+        assert len(seen) == 2
+        for ua in seen:
+            assert ua.isascii() and ua.isprintable() and kept in ua and "  " not in ua
+    finally:
+        shutdown()
+
+
+def test_header_safe_keeps_non_ascii_recognisable():
+    assert api.header_safe("Łukasz") == "%C5%81ukasz"
+    assert api.header_safe("Réti") == "Reti"
+    assert api.header_safe("a\x00b\x7fc") == "a b c"
+
+
+def test_no_connection_gives_up_after_one_retry_and_says_so():
+    """No internet / blocked host / packets dropped: 2 attempts, not 6 (~3.5 minutes of silence before)."""
+    notes = []
+    client, sleeps = make_client({f"{BASE}": [requests.exceptions.ConnectTimeout("connect timed out")]}, notify=notes.append)
+    with pytest.raises(api.ChessComError, match="after 2 attempts.*internet connection"):
+        client.profile("tester")
+    assert len(client.session.calls) == 2 and sleeps == [1.0]
+    assert len(notes) == 1 and "retrying in 1s" in notes[0] and "ConnectTimeout" in notes[0]
+
+
+def test_refused_connection_and_dns_failure_are_connect_failures():
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # nothing listens on this port now
+    session = requests.Session()
+    session.trust_env = False
+    sleeps = []
+    client = api.ChessComClient(session=session, base_url=f"http://127.0.0.1:{port}/pub", min_interval=0, sleep=sleeps.append)
+    with pytest.raises(api.ChessComError, match="after 2 attempts"):
+        client.profile("tester")
+    assert sleeps == [1.0]
+
+
+def test_default_timeouts_are_split_into_connect_and_read():
+    timeouts = []
+
+    class Session(requests.Session):
+        def get(self, url, headers=None, timeout=None):
+            timeouts.append(timeout)
+            return FakeResponse(200, {})
+
+    api.ChessComClient(session=Session(), min_interval=0).profile("tester")
+    connect, read = timeouts[0]
+    assert connect <= 10 and read >= 30
+
+
+def test_a_connection_broken_mid_answer_still_gets_every_retry():
+    client, sleeps = make_client({f"{BASE}": [requests.exceptions.ChunkedEncodingError("cut off")]}, max_retries=3)
+    with pytest.raises(api.ChessComError):
+        client.profile("tester")
+    assert len(client.session.calls) == 4 and sleeps == [1.0, 2.0, 4.0]
+
+
+def test_persistent_429_stays_within_the_wait_budget_and_announces_each_wait():
+    """A 429 with Retry-After: 3600 used to mean 5 silent waits of 120 s (10 minutes)."""
+    notes = []
+    client, sleeps = make_client({f"{BASE}": [FakeResponse(429, headers={"Retry-After": "3600"})]}, notify=notes.append)
+    with pytest.raises(api.RateLimited):
+        client.profile("tester")
+    assert sum(sleeps) <= client.max_total_wait <= 180
+    assert all(s <= client.max_retry_after <= 60 for s in sleeps)
+    assert len(notes) == len(sleeps) and all("HTTP 429" in n and "retrying in 60s" in n for n in notes)
+
+
+def test_a_bad_request_is_not_retried():
+    client, sleeps = make_client({f"{BASE}": [requests.exceptions.InvalidHeader("bad header value")]})
+    with pytest.raises(api.ChessComError, match="InvalidHeader"):
+        client.profile("tester")
+    assert len(client.session.calls) == 1 and sleeps == []
+
+
+def test_load_json_files_unwraps_wrappers_inside_a_games_list(tmp_path, fixtures_dir):
+    """{"games": [{"case": ..., "game": {...}}]} (the shape of the edge-case fixture) was read as 0 games."""
+    game = {"uuid": "g1", "white": {"username": "a"}, "black": {"username": "b"}}
+    path = tmp_path / "wrapped.json"
+    path.write_text(fetch.json.dumps({"games": [{"case": "x", "game": game}, dict(game, uuid="g2")]}), encoding="utf-8")
+    assert [g["uuid"] for g in fetch.load_json_files([path])] == ["g1", "g2"]
+    edge = fetch.load_json_files([fixtures_dir / "real_chesscom_edge_cases.json"])
+    raw = fetch.json.loads((fixtures_dir / "real_chesscom_edge_cases.json").read_text(encoding="utf-8"))
+    assert len(edge) == len(raw["games"]) > 0 and all("white" in g for g in edge)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [('D:\\chess"', "D:\\chess"), ('"reports/me"', "reports/me"), ("plain/dir", "plain/dir")],
+)
+def test_expand_path_drops_the_stray_quote_cmd_exe_leaves(raw, expected):
+    """cmd.exe turns --cache-dir "D:\\chess\\" into D:\\chess" (WinError 123 on every write)."""
+    assert str(fetch.expand_path(raw)) == str(fetch.Path(expected))

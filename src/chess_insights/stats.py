@@ -109,6 +109,27 @@ def two_proportion_test(x1: float, n1: int, x2: float, n2: int) -> MeanTest:
     return MeanTest(n1 + n2, p1 - p2, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
 
 
+def proportion_gap_test(x1: float, n1: int, x2: float, n2: int, x3: float, n3: int, x4: float, n4: int) -> MeanTest:
+    """z-test for a difference of two differences of proportions: (p1 - p2) - (p3 - p4).
+
+    Independent samples; the variance uses Agresti-Caffo adjusted proportions ((x + 1) / (n + 2)),
+    so an empty or all-or-nothing group doesn't produce a zero standard error. Typical use:
+    "your losses in this opening are quick collapses more often than your wins in it, by more
+    than the same gap in your other openings" (p1, p2: this opening; p3, p4: the others).
+    Returned ``mean`` is the difference of differences; ``n`` is n1 + n2 + n3 + n4.
+    """
+    if min(n1, n2, n3, n4) <= 0:
+        return MeanTest(n1 + n2 + n3 + n4, 0.0, float("inf"), 0.0, 1.0)
+    diff = (x1 / n1 - x2 / n2) - (x3 / n3 - x4 / n4)
+    var = 0.0
+    for x, n in ((x1, n1), (x2, n2), (x3, n3), (x4, n4)):
+        p = (x + 1.0) / (n + 2.0)
+        var += p * (1.0 - p) / (n + 2.0)
+    se = math.sqrt(var)
+    z = diff / se
+    return MeanTest(n1 + n2 + n3 + n4, diff, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
+
+
 def one_sided(test: MeanTest, direction: int) -> MeanTest:
     """``test`` with a one-sided p-value for H1: mean > 0 (``direction`` = +1) or mean < 0 (-1).
 
@@ -152,9 +173,14 @@ RATING_NOISE_ATTENUATION = 0.75
 ATTENUATION_RANGE = (RATING_NOISE_ATTENUATION, 1.0)
 
 # At equal ratings White scores roughly 52% and Black 48% in club play, so a
-# White-minus-Black gap of about 0.04 points per game is normal. Groups that are all one
-# colour (an opening as Black) are judged against the colour-adjusted expectation.
+# White-minus-Black gap of about 0.04 points per game is normal (the value shown in the
+# report and used by the synthetic demo player).
 WHITE_EDGE = 0.04
+# The edge is not known exactly: it is smaller in bullet and at lower ratings (about 0.03)
+# and larger in slower games and at higher ratings (0.05-0.06+). A colour claim must hold
+# for every edge in this range: "worse with Black" against the largest, "worse with White"
+# against the smallest (the same both-ends rule as ATTENUATION_RANGE).
+WHITE_EDGE_RANGE = (0.03, 0.06)
 
 
 def attenuated_expected(expected: float, attenuation: float = RATING_NOISE_ATTENUATION) -> float:
@@ -172,8 +198,9 @@ def weighted_bh_adjust(p_values: Sequence[float], weights: Sequence[float]) -> l
 
     Weights are rescaled to average 1 and each p-value is divided by its weight before the
     usual BH step, so the error budget still adds up to ``alpha`` but tests with more weight
-    get more of it (the result is never below the raw p-value, which only makes it safer). The analyses weight groups by games played: a leak in the opening you
-    play in 40% of your games costs far more points than one in a sideline.
+    get more of it (the result is never below the raw p-value, which only makes it safer).
+    The analyses weight groups by games played: a leak in the opening you play in 40% of your
+    games costs far more points than one in a sideline.
     """
     m = len(p_values)
     if m == 0:
@@ -215,7 +242,12 @@ def combined_confidence(test: MeanTest, min_n: int) -> float:
 #   enough data (n >= min_n)  AND  (multiple-testing adjusted) p <= alpha  AND  a big enough effect
 #
 # The effect-size bar stays with each module (it is domain knowledge); this is the statistical
-# part. A report runs a few dozen tests. Each family of tests (every opening family, every
+# part. What is tested matters as much: a claim about a subset of games (an opening, a time of
+# day, a game-length band, an opponent-strength group) compares that subset with the player's
+# *other* games (``difference_test``), never with the rating's expectation alone, because a
+# rating that lags the player's current strength (an improving or declining player) shifts
+# every game and would otherwise turn into a list of specific "strengths" or "weaknesses".
+# A report runs a few dozen tests. Each family of tests (every opening family, every
 # time class...) is Benjamini-Hochberg adjusted, so under pure noise a family makes a false
 # claim with probability about alpha when it can claim either direction, and alpha / 2 when
 # it only ever claims one (a two-sided p-value). The expected number of false claims per
@@ -247,19 +279,73 @@ def is_significant(test: MeanTest, min_n: int, p_adjusted: Optional[float] = Non
     return test.n >= max(min_n, 1) and math.isfinite(test.se) and p <= alpha
 
 
+def evidence_confidence(p_value: float) -> float:
+    """How likely an effect is to be real given its p-value, at most (0.5 .. 1).
+
+    The Sellke-Bayarri-Berger bound: whatever the size of the effect, the data favour "there is
+    an effect" over "there is none" by a Bayes factor of at most 1 / (-e p ln p). Starting
+    from even odds this gives the *highest* posterior probability the p-value can support:
+    p = 0.05 -> 0.71, 0.01 -> 0.89, 0.001 -> 0.98. ``1 - p`` would say 0.95 / 0.99 / 0.999,
+    which overstates what a p-value means (tens of tests run per report, and a handful of
+    real effects at most).
+    """
+    p = clamp(p_value)
+    if p <= 0.0:
+        return 1.0
+    if p >= 1.0 / math.e:
+        return 0.5
+    return 1.0 / (1.0 - math.e * p * math.log(p))
+
+
+def claim_confidence(p_value: float, n: int, min_n: int) -> float:
+    """Confidence for a claim: :func:`evidence_confidence`, scaled down on small samples.
+
+    The sample factor is sqrt(n / (2 min_n)), capped at 1: 0.71 at the minimum sample size,
+    1 from twice it (normal approximations and floors on the standard error are rougher on
+    small samples). A claim that passes the rule (adjusted p <= 0.05, n >= min_n) therefore
+    has a confidence of at least 0.50; zero below ``min_n``.
+    """
+    if n < max(min_n, 1):
+        return 0.0
+    return clamp(evidence_confidence(p_value) * min(1.0, math.sqrt(n / (2.0 * max(min_n, 1)))))
+
+
 def significance(
-    test: MeanTest, min_n: int, p_adjusted: Optional[float] = None, alpha: float = ALPHA
+    test: MeanTest,
+    min_n: int,
+    p_adjusted: Optional[float] = None,
+    alpha: float = ALPHA,
+    n: Optional[int] = None,
 ) -> tuple[bool, float]:
     """(significant, confidence) for a claim backed by ``test``.
 
     ``p_adjusted`` is the family-wise adjusted p-value (``bh_adjust`` / ``weighted_bh_adjust``)
-    when the test is one of several; confidence is :func:`combined_confidence` with that
-    p-value, so it reflects the multiple testing too. A significant claim has confidence of
-    at least ``(1 - alpha) * 0.58`` (0.55 at the minimum sample size, rising to 1 - p at three
-    times it).
+    when the test is one of several, so the confidence (:func:`claim_confidence`) reflects the
+    multiple testing too. ``n`` is the effective sample size when it differs from ``test.n``:
+    for a comparison of two groups, the smaller group (``test.n`` counts both). Both the
+    minimum-sample rule and the confidence use it.
     """
     p = test.p_value if p_adjusted is None else p_adjusted
-    return is_significant(test, min_n, p, alpha), combined_confidence(with_p_value(test, p), min_n)
+    size = test.n if n is None else n
+    ok = size >= max(min_n, 1) and math.isfinite(test.se) and p <= alpha
+    return ok, claim_confidence(p, size, min_n) if math.isfinite(test.se) else 0.0
+
+
+# Real effects of the kind this report looks for are modest: a prior standard deviation of
+# about 0.10 points per game (70 Elo) across players and situations.
+EFFECT_PRIOR_SD = 0.10
+
+
+def shrink_effect(mean: float, se: float, prior_sd: float = EFFECT_PRIOR_SD) -> float:
+    """``mean`` pulled toward 0 by how noisy it is (normal prior with sd ``prior_sd``).
+
+    Use for a claim's *severity*: the effects that clear a significance bar are, on average,
+    overestimates (the winner's curse), most of all on small samples. A 0.20 gap measured with
+    a 0.09 standard error (30 games) shrinks to about 0.11; with a 0.03 error to about 0.18.
+    """
+    if not math.isfinite(se):
+        return 0.0
+    return mean * prior_sd**2 / (prior_sd**2 + se**2)
 
 
 def severity_from_points(points_per_game: float, full_at: float = 0.20) -> float:

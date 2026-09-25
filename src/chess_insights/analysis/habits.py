@@ -13,9 +13,14 @@ Claims follow the project-wide rule (``stats.significance``). Two hypotheses are
 fixed in advance, with their direction, and tested on their own at ``stats.ALPHA``
 with a one-sided p-value: scoring worse straight after a loss, and scoring worse late
 at night (games started 23:00-03:00 in the player's time zone, the one time-of-day
-effect with a strong prior). Everything else is an
-exploratory scan at ``stats.STRICT_ALPHA``: the six 4-hour blocks of the day
-(Benjamini-Hochberg adjusted because six are tested at once) and session length.
+effect with a strong prior). The late-night window only means late night when the
+player's time zone is known (``ctx.options["tz"]``, an IANA name other than the
+command line's default "UTC"); otherwise the same UTC window is tested like any other
+block of the day, at ``stats.STRICT_ALPHA``, and titled by its UTC hours. Everything
+else is an exploratory scan at ``stats.STRICT_ALPHA``: the six 4-hour blocks of the
+day (Benjamini-Hochberg adjusted because six are tested at once) and session length.
+A session-length finding must survive leaving out the games played straight after a
+loss when that is a finding too (later games in a session follow losses more often).
 Games with fewer than 4 plies stay on the timeline (they still end a session or
 a streak) but are not scored.
 """
@@ -43,6 +48,7 @@ from ..stats import (
     pct,
     sample_confidence,
     severity_from_points,
+    shrink_effect,
     significance,
     summarize,
 )
@@ -81,6 +87,9 @@ LATE_NIGHT = ("23:00", "03:00")
 LATE_NIGHT_HOURS = frozenset({23, 0, 1, 2})
 # Day parts that overlap the late-night window: a claim on one of them and on the window is one finding.
 LATE_NIGHT_PARTS = frozenset({0, 5})
+# Time-zone option values that mean "not given": the command line passes "UTC" by default, which
+# says nothing about when the player's night is (pass e.g. "Etc/UTC" or "Europe/London" to mean it).
+UNKNOWN_TZ = frozenset({"", "UTC"})
 SCORE_COLUMNS = ["Games", "W/D/L", "Score", "Expected", "Difference"]
 SCORE_FORMATS = ["int", "text", "pct", "pct", "signed_pct"]
 
@@ -194,6 +203,11 @@ def resolve_tz(name: Any) -> tuple[tzinfo, str]:
         return timezone.utc, "UTC"
 
 
+def local_time_known(name: Any) -> bool:
+    """Whether ``name`` (the "tz" option) says which time zone the player lives in (see UNKNOWN_TZ)."""
+    return name is not None and str(name) not in UNKNOWN_TZ and resolve_tz(name)[1] == str(name)
+
+
 def day_part(moment: datetime, tz: tzinfo) -> int:
     """Index into DAY_PARTS of ``moment`` in time zone ``tz``."""
     return _utc(moment).astimezone(tz).hour // 4
@@ -270,7 +284,8 @@ def tilt_insight(
     test = difference_test(a.test, r.test)
     if a.n_rated < th.min_split_games or r.n_rated < th.min_split_games:
         return None, test, a, r
-    significant, confidence = significance(one_sided(test, -1), th.min_split_games, alpha=th.alpha)
+    n = min(a.n_rated, r.n_rated)
+    significant, confidence = significance(one_sided(test, -1), th.min_split_games, alpha=th.alpha, n=n)
     if test.mean > -th.min_effect or a.test.mean >= 0 or not significant:
         return None, test, a, r
     w = f"{th.tilt_window_min:g}"
@@ -286,7 +301,7 @@ def tilt_insight(
                 f"{pct(a.expected)} was expected ({fmt_points(a.test.mean)} points per game); in your other games "
                 f"{fmt_points(r.test.mean)} per game. The gap is {fmt_points(test.mean)} points per game."
             ),
-            severity=severity_from_points(test.mean),
+            severity=severity_from_points(shrink_effect(test.mean, test.se)),
             confidence=confidence,
             evidence={
                 "n": a.n_rated,
@@ -313,20 +328,39 @@ def tilt_insight(
     )
 
 
+def _fatigue_tests(
+    scored_timeline: Sequence[TimelineGame], splits: Sequence[int], leave_out: frozenset[int] = frozenset()
+) -> list[tuple[int, list[Game], ScoreSummary, ScoreSummary, MeanTest]]:
+    """(first late game number, late games, late summary, earlier summary, late-minus-earlier test) per split."""
+    out = []
+    for first_late in splits:
+        tl = [t for t in scored_timeline if id(t.game) not in leave_out]
+        late = [t.game for t in tl if t.position >= first_late]
+        early = [t.game for t in tl if t.position < first_late]
+        lt, er = summarize(late), summarize(early)
+        out.append((first_late, late, lt, er, difference_test(lt.test, er.test)))
+    return out
+
+
 def fatigue_insight(
-    scored_timeline: Sequence[TimelineGame], th: Thresholds
+    scored_timeline: Sequence[TimelineGame], th: Thresholds, after_loss: Optional[Sequence[Game]] = None
 ) -> tuple[Optional[Insight], dict[str, Any]]:
-    """Late-in-session games vs earlier ones, for each split point; the stronger qualifying one wins."""
-    splits = []
-    for first_late in th.fatigue_splits:
-        late = [t.game for t in scored_timeline if t.position >= first_late]
-        early = [t.game for t in scored_timeline if t.position < first_late]
-        splits.append((first_late, late, summarize(late), summarize(early)))
-    tests = [difference_test(lt.test, er.test) for _, _, lt, er in splits]
-    adjusted = bh_adjust([t.p_value for t in tests])
+    """Late-in-session games vs earlier ones, for each split point; the stronger qualifying one wins.
+
+    ``after_loss``: the games played straight after a loss, when that is a finding of its own.
+    Games later in a session follow a loss more often (a session's first game never does), so a
+    session-length claim must then also hold with those games left out; otherwise it is the
+    after-a-loss finding seen again.
+    """
+    splits = _fatigue_tests(scored_timeline, th.fatigue_splits)
+    adjusted = bh_adjust([t[4].p_value for t in splits])
+    without = None
+    if after_loss:
+        without = _fatigue_tests(scored_timeline, th.fatigue_splits, frozenset(id(g) for g in after_loss))
+        without_adjusted = bh_adjust([t[4].p_value for t in without])
     stats: dict[str, Any] = {}
     best: Optional[Insight] = None
-    for (first_late, late, lt, er), test, p_adj in zip(splits, tests, adjusted, strict=True):
+    for i, ((first_late, late, lt, er, test), p_adj) in enumerate(zip(splits, adjusted, strict=True)):
         stats[f"from_game_{first_late}"] = {
             "n": lt.n_rated,
             "delta": lt.delta,
@@ -336,21 +370,30 @@ def fatigue_insight(
         }
         if lt.n_rated < th.min_split_games or er.n_rated < th.min_split_games:
             continue
-        significant, confidence = significance(test, th.min_split_games, p_adj, alpha=th.strict_alpha)
+        n = min(lt.n_rated, er.n_rated)
+        significant, confidence = significance(test, th.min_split_games, p_adj, alpha=th.strict_alpha, n=n)
         if test.mean > -th.min_effect or lt.test.mean >= 0 or not significant:
             continue
+        if without is not None:
+            _, _, lt2, er2, test2 = without[i]
+            holds, _ = significance(
+                test2, th.min_split_games, without_adjusted[i], alpha=th.strict_alpha, n=min(lt2.n_rated, er2.n_rated)
+            )
+            stats[f"from_game_{first_late}"]["without_after_loss_gap"] = test2.mean
+            if not holds or test2.mean > -th.min_effect:
+                continue
         losses = [g for g in late if g.outcome == "loss"]
         candidate = Insight(
             id=f"{KEY}.weakness.long-sessions",
             kind="weakness",
             category="habits",
-            title="Your results drop the longer you play in one sitting",
+            title=f"You score worse from the {_ordinal(first_late)} game of a session on",
             detail=(
                 f"From the {_ordinal(first_late)} game of a session on you scored {pct(lt.rated_score)} in "
                 f"{lt.n_rated} games where {pct(lt.expected)} was expected ({fmt_points(lt.test.mean)} points per "
                 f"game), against {fmt_points(er.test.mean)} per game in the first {first_late - 1} games."
             ),
-            severity=severity_from_points(test.mean),
+            severity=severity_from_points(shrink_effect(test.mean, test.se)),
             confidence=confidence,
             evidence={"from_game": first_late, **stats[f"from_game_{first_late}"]},
             study=[
@@ -371,9 +414,13 @@ def _ordinal(n: int) -> str:
 
 
 def time_of_day_insights(
-    parts: list[list[Game]], scored: Sequence[Game], tz_name: str, th: Thresholds
+    parts: list[list[Game]], scored: Sequence[Game], tz_name: str, th: Thresholds, local: bool = True
 ) -> tuple[list[Insight], list[Optional[float]]]:
-    """Each 4-hour block vs all other games; BH-adjusted over the blocks with enough games, strict level."""
+    """Each 4-hour block vs all other games; BH-adjusted over the blocks with enough games, strict level.
+
+    ``local``: the blocks are in the player's own time zone, so they can be named (late night,
+    morning...); otherwise they are titled by their hours in ``tz_name``.
+    """
     summaries = [summarize(p) for p in parts]
     tests: dict[int, tuple[MeanTest, ScoreSummary, ScoreSummary]] = {}
     for i, part in enumerate(parts):
@@ -389,7 +436,8 @@ def time_of_day_insights(
     qualifying: list[tuple[int, float, MeanTest, ScoreSummary, ScoreSummary]] = []
     for i in order:
         test, s, rest = tests[i]
-        significant, confidence = significance(test, th.min_bucket_games, adjusted[i], alpha=th.strict_alpha)
+        n = min(s.n_rated, rest.n_rated)
+        significant, confidence = significance(test, th.min_bucket_games, adjusted[i], alpha=th.strict_alpha, n=n)
         if test.mean <= -th.min_effect and s.test.mean < 0 and significant:
             qualifying.append((i, confidence, test, s, rest))
     worst = min(qualifying, key=lambda q: q[3].test.mean)[0] if qualifying else None
@@ -397,11 +445,12 @@ def time_of_day_insights(
     for i, confidence, test, s, rest in qualifying:
         label, name = DAY_PARTS[i]
         start, end = label.split("–")
-        title = (
-            f"Your {name} games ({label}) are your worst"
-            if i == worst
-            else f"You score below your rating in {name} games ({label})"
-        )
+        if not local:
+            title = f"You score below your rating in games started {label} {tz_name}"
+        elif i == worst:
+            title = f"Your {name} games ({label}) are your worst"
+        else:
+            title = f"You score below your rating in {name} games ({label})"
         losses = [g for g in parts[i] if g.outcome == "loss"]
         out.append(
             Insight(
@@ -414,7 +463,7 @@ def time_of_day_insights(
                     f"{pct(s.rated_score)} where {pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per "
                     f"game); in all your other games {fmt_points(rest.test.mean)} per game."
                 ),
-                severity=severity_from_points(test.mean),
+                severity=severity_from_points(shrink_effect(test.mean, test.se)),
                 confidence=confidence,
                 evidence={
                     "block": label,
@@ -446,9 +495,14 @@ def is_late_night(moment: datetime, tz: tzinfo) -> bool:
 
 
 def late_night_insight(
-    late: list[Game], scored: Sequence[Game], tz_name: str, th: Thresholds
+    late: list[Game], scored: Sequence[Game], tz_name: str, th: Thresholds, local: bool = True
 ) -> tuple[Optional[Insight], dict[str, Any]]:
-    """Games started 23:00-03:00 vs all other games: a pre-specified hypothesis tested alone at ``th.alpha``."""
+    """Games started 23:00-03:00 vs all other games: a pre-specified hypothesis tested alone.
+
+    At ``th.alpha`` when the window is in the player's own time zone (``local``); otherwise it
+    is just another 4-hour window of the day in ``tz_name``, tested at ``th.strict_alpha`` and
+    titled by its hours.
+    """
     s = summarize(late)
     ids = {id(g) for g in late}
     rest = summarize([g for g in scored if id(g) not in ids])
@@ -458,27 +512,36 @@ def late_night_insight(
         return None, stats
     directional = one_sided(test, -1)
     stats["p_value_one_sided"] = directional.p_value
-    significant, confidence = significance(directional, th.min_bucket_games, alpha=th.alpha)
+    stats["local_time"] = local
+    alpha = th.alpha if local else th.strict_alpha
+    n = min(s.n_rated, rest.n_rated)
+    significant, confidence = significance(directional, th.min_bucket_games, alpha=alpha, n=n)
     if test.mean > -th.min_effect or s.test.mean >= 0 or not significant:
         return None, stats
     start, end = LATE_NIGHT
     losses = [g for g in late if g.outcome == "loss"]
+    title = (
+        f"You score below your rating in late-night games ({start}–{end})"
+        if local
+        else f"You score below your rating in games started {start}–{end} {tz_name}"
+    )
     return (
         Insight(
             id=f"{KEY}.weakness.late-night",
             kind="weakness",
             category="habits",
-            title=f"You score below your rating in late-night games ({start}–{end})",
+            title=title,
             detail=(
                 f"In {s.n_rated} games started between {start} and {end} ({tz_name}) you scored {pct(s.rated_score)} "
                 f"where {pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game); in all your other "
                 f"games {fmt_points(rest.test.mean)} per game. The gap is {fmt_points(test.mean)} points per game."
             ),
-            severity=severity_from_points(test.mean),
+            severity=severity_from_points(shrink_effect(test.mean, test.se)),
             confidence=confidence,
             evidence={
                 "window": f"{start}–{end}",
                 "time_zone": tz_name,
+                "local_time": local,
                 "n": s.n_rated,
                 "score": s.rated_score,
                 "expected": s.expected,
@@ -489,7 +552,8 @@ def late_night_insight(
                 "p_value_one_sided": directional.p_value,
             },
             study=[
-                f"Stop starting rated games after {start}; play puzzles or unrated games instead.",
+                f"Stop starting rated games after {start}{'' if local else ' ' + tz_name}; play puzzles or unrated "
+                "games instead.",
                 f"Replay your last {min(MAX_EXAMPLES, len(losses)) or 'few'} late-night losses and check whether "
                 "they came from careless blunders or the clock, both signs of tiredness.",
                 "If you do play late, choose a slower time control and stop after the first loss.",
@@ -631,7 +695,9 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             summary="Not enough data: there are no live games to analyse (daily games are left out of this section).",
             stats={"n": 0},
         )
-    tz, tz_name = resolve_tz(ctx.opt("tz", "UTC"))
+    tz_option = ctx.opt("tz", None)
+    tz, tz_name = resolve_tz(tz_option if tz_option is not None else "UTC")
+    local = local_time_known(tz_option)
     scored_tl = [t for t in timeline if t.scored]
     scored = [t.game for t in scored_tl]
 
@@ -653,7 +719,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         (label, summarize([t.game for t in scored_tl if t.position >= lo and (hi is None or t.position <= hi)]))
         for label, lo, hi in FATIGUE_BUCKETS
     ]
-    fatigue, fatigue_stats = fatigue_insight(scored_tl, th)
+    fatigue, fatigue_stats = fatigue_insight(scored_tl, th, groups["after_loss"] if tilt else None)
 
     # streaks and rematches
     streak = longest_losing_streak(timeline)
@@ -670,8 +736,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         weekdays[_utc(moment).astimezone(tz).weekday()].append(g)
         if is_late_night(moment, tz):
             late.append(g)
-    tod_insights, tod_p = time_of_day_insights(parts, scored, tz_name, th)
-    late_insight, late_stats = late_night_insight(late, scored, tz_name, th)
+    tod_insights, tod_p = time_of_day_insights(parts, scored, tz_name, th, local)
+    late_insight, late_stats = late_night_insight(late, scored, tz_name, th, local)
     tod_insights = merge_late_night(late_insight, tod_insights)
     part_rows = [(label, summarize(p)) for (label, _), p in zip(DAY_PARTS, parts, strict=True)]
     weekday_rows = [(calendar.day_name[i], summarize(weekdays[i])) for i in range(7)]
@@ -740,6 +806,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             "games_per_session": avg,
             "longest_session": longest,
             "time_zone": tz_name,
+            "local_time": local,
             "situations": {key: _stats(s) for (key, _), (_, s) in zip(situations, situation_rows, strict=True)},
             "after_loss_gap": {"gap": tilt_test.mean, "p_value": tilt_test.p_value},
             "fatigue": {label: _stats(s) for label, s in fatigue_rows},

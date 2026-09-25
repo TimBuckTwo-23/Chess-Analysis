@@ -175,3 +175,51 @@ def test_describe_filters_shows_the_last_included_day():
 
     text = describe_filters(since=datetime(2024, 1, 1, tzinfo=timezone.utc), until=datetime(2025, 1, 1, tzinfo=timezone.utc))
     assert "since 2024-01-01" in text and "until 2024-12-31" in text
+
+
+def _nan_na_values():
+    import math
+
+    import pandas as pd
+
+    return [None, pd.NA, pd.Series([pd.NA, pd.NA], dtype="Float64").mean(), math.nan, math.inf, "high", [0.5]]
+
+
+@pytest.mark.parametrize("bad", _nan_na_values(), ids=["None", "pd.NA", "Float64-mean", "nan", "inf", "str", "list"])
+@pytest.mark.parametrize("field", ["severity", "confidence"])
+def test_one_insight_with_a_missing_score_does_not_sink_the_report(monkeypatch, bad, field):
+    """severity/confidence None or pd.NA used to raise TypeError in ranking (no report at all);
+    NaN even ranked first, because min(1.0, nan) is 1.0."""
+    broken = ins("fake.weakness.broken", **{field: bad})
+    good = ins("fake.weakness.good", severity=0.7)
+    modules = _capture_module(monkeypatch, [], returns=mod("fake_capture", broken, good))
+    report = pipeline.run_analysis([make_game()], "tester", modules=modules)
+    assert [i.id for i in report.weaknesses] == ["fake.weakness.good"]
+    assert [i.id for i in report.modules[0].insights] == ["fake.weakness.good"]
+    assert report.study_plan and report.headline
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"kind": "bogus"}, {"id": None}, {"title": None}, {"category": ["openings"]}, {"id": ""}],
+    ids=["kind", "id-None", "title-None", "category-list", "id-empty"],
+)
+def test_malformed_insights_are_dropped_not_fatal(monkeypatch, change):
+    broken = ins("fake.weakness.broken")
+    for key, value in change.items():
+        setattr(broken, key, value)
+    items = [broken, ins("fake.weakness.good"), "not an insight"]
+    modules = _capture_module(monkeypatch, [], returns=mod("fake_capture", *items))
+    report = pipeline.run_analysis([make_game()], "tester", modules=modules)
+    assert [i.id for i in report.weaknesses] == ["fake.weakness.good"]
+
+
+def test_numpy_scores_are_kept_as_plain_floats(monkeypatch):
+    import numpy as np
+
+    item = ins("fake.weakness.np", severity=np.float64(0.6), confidence=np.float32(0.9))
+    item.detail = None
+    modules = _capture_module(monkeypatch, [], returns=mod("fake_capture", item))
+    report = pipeline.run_analysis([make_game()], "tester", modules=modules)
+    kept = report.weaknesses[0]
+    assert type(kept.severity) is float and type(kept.confidence) is float and kept.detail == ""

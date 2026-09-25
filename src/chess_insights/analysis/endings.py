@@ -2,11 +2,10 @@
 
 * Result mix per time class: wins, draws and losses split by how they ended
   (every game counts here, including aborted starts).
-* Loss profile: how your losses end compared with how your wins end. Getting
-  checkmated in a much larger share of losses than you checkmate in wins
-  points at king safety and tactics.
-* Game length: score vs the Elo expectation by number of moves, with the five
-  length buckets Benjamini-Hochberg adjusted because they are tested together.
+* Loss profile: how your losses end compared with how your wins end.
+* Game length: score vs the Elo expectation by number of moves; each length band is
+  compared with your games of other lengths (Benjamini-Hochberg adjusted over the five
+  bands).
 * Draw rate per time class.
 
 Skill metrics (loss profile, game length) leave out games with fewer than 4
@@ -14,10 +13,13 @@ plies; game length also leaves out abandoned games, which say nothing about how
 long you can hold a position. Timeouts are only described here: the clock
 module owns the "you lose on time" finding.
 
-Both claims here are secondary under the project-wide rule (``stats.significance`` at
-``stats.STRICT_ALPHA``): the game-length scan tests five buckets, and how losses end
-also depends on resignation habits (a player who never resigns gets mated more), so
-it is weaker evidence about king safety than it looks.
+Nothing here becomes a strength or weakness, only an observation, and only when its
+test passes the project-wide rule (``stats.significance`` at ``stats.STRICT_ALPHA``).
+How long a game lasts and how a loss ends are consequences of the result and of both
+players' resignation habits as much as of skill: a player who never resigns is mated
+more often and loses more long games, one who resigns early loses more short ones,
+with no difference in strength. From results alone these readings can't be told apart
+(the engine analysis can: conversion, endgame accuracy and missed mates).
 """
 
 from __future__ import annotations
@@ -28,16 +30,19 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from ..context import AnalysisContext
-from ..models import TIME_CLASSES, Chart, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Table
+from ..models import TIME_CLASSES, Chart, Game, Insight, Kpi, ModuleResult, Series, Table
 from ..stats import (
     STRICT_ALPHA,
+    MeanTest,
     ScoreSummary,
     bh_adjust,
     clamp,
+    difference_test,
     pct,
     sample_confidence,
     score_to_elo_diff,
     severity_from_points,
+    shrink_effect,
     significance,
     summarize,
     two_proportion_test,
@@ -92,7 +97,7 @@ class Thresholds:
     """Minimum sample sizes and effect sizes; override with ``ctx.options["endings.<name>"]``."""
 
     min_games: int = 10  # below this the summary says there is not enough data
-    strict_alpha: float = STRICT_ALPHA  # both claims here are secondary (see the module docstring)
+    strict_alpha: float = STRICT_ALPHA  # observations here must still pass the strict test (see the module docstring)
     min_losses: int = 20  # losses before comparing how your losses and wins end
     min_wins: int = 10
     min_mate_gap: float = 0.10  # share of losses by mate minus share of wins by mate
@@ -264,7 +269,11 @@ def length_chart(summaries: dict[str, ScoreSummary]) -> Chart:
 def mate_insight(
     p: DecisiveProfile, played: Sequence[Game], th: Thresholds
 ) -> tuple[Optional[Insight], dict[str, Any]]:
-    """Checkmated in a larger share of losses than you checkmate in wins (self-relative)."""
+    """Checkmated in a larger share of losses than you checkmate in wins (self-relative): an observation.
+
+    A pooled two-proportion test at the strict level. Never a weakness: a player who plays on in
+    lost positions instead of resigning is mated more often with no difference in king safety.
+    """
     mated, mating = p.by_method["checkmate"]
     test = two_proportion_test(mated, p.losses, mating, p.wins)
     stats = {
@@ -277,33 +286,37 @@ def mate_insight(
     }
     if p.losses < th.min_losses or p.wins < th.min_wins:
         return None, stats
-    significant, confidence = significance(test, 2 * th.min_losses, alpha=th.strict_alpha)
+    significant, confidence = significance(test, th.min_wins, alpha=th.strict_alpha, n=min(p.losses, p.wins))
     if test.mean < th.min_mate_gap or not significant:
         return None, stats
     mated_games = [g for g in played if g.outcome == "loss" and g.termination == "checkmate"]
+    resigned, opp_resigned = p.by_method["resignation"]
     k = min(MAX_EXAMPLES, len(mated_games))
     return (
         Insight(
-            id=f"{KEY}.weakness.checkmated-often",
-            kind="weakness",
+            id=f"{KEY}.observation.checkmated-often",
+            kind="observation",
             category="endings",
-            title="You get checkmated much more often than you checkmate",
+            title=(
+                f"{pct(p.loss_share('checkmate'))} of your losses end in checkmate, against "
+                f"{pct(p.win_share('checkmate'))} of your wins"
+            ),
             detail=(
-                f"{mated} of your {p.losses} losses ({pct(p.loss_share('checkmate'))}) ended in checkmate, but only "
-                f"{mating} of your {p.wins} wins ({pct(p.win_share('checkmate'))}) ended with you mating your "
-                "opponent. That often goes with king-safety problems and missed tactics around your own king "
-                "(or with playing on in lost positions)."
+                f"{mated} of your {p.losses} losses ended in checkmate, and {mating} of your {p.wins} wins ended "
+                f"with you mating your opponent. You resigned {pct(p.loss_share('resignation'))} of your losses; "
+                f"your opponents resigned {pct(p.win_share('resignation'))} of your wins. Being mated in a larger "
+                "share of games can point at king-safety problems, but it is also exactly what playing on in lost "
+                "positions looks like (a resignation becomes a mate), so on its own it is not evidence of a "
+                "weakness. The engine analysis (--engine) can tell the two apart."
             ),
             severity=clamp(test.mean / 0.30),
             confidence=confidence,
-            evidence=stats,
+            evidence={**stats, "resigned": resigned, "opponent_resigned": opp_resigned},
             study=[
-                f"Replay your last {k} losses by checkmate and find the move where your king's cover was first "
-                "weakened: a pawn push in front of it, a defender traded off, or castling too late.",
+                f"Replay your last {k} losses by checkmate: was the position already lost when the attack started? "
+                "If not, find the move where your king's cover was first weakened.",
                 "Solve 15 mating-pattern puzzles a day (back rank, smothered, Anastasia's, Arabian mate) until you "
                 "spot them instantly for both sides.",
-                "Before every move, list your opponent's checks and captures: if one of them starts an attack on "
-                "your king, deal with it first.",
             ],
             example_games=recent_urls(mated_games),
         ),
@@ -349,9 +362,10 @@ def abandoned_insight(games: Sequence[Game], th: Thresholds) -> tuple[Optional[I
     )
 
 
-_LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
-    ("short", "weakness"): (
-        "You lose too many short games (20 moves or fewer)",
+# Study suggestions per (length band, direction); the observation's title is neutral (see length_insights).
+_LENGTH_TEXT: dict[tuple[str, str], tuple[str, list[str]]] = {
+    ("short", "below"): (
+        "short games",
         [
             "Replay your {k} shortest losses and find the move that lost material or let an attack through: short "
             "losses usually come from an opening trap or a one-move tactic.",
@@ -360,8 +374,8 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
             "In the first 15 moves, check every capture and every check your opponent has before you move.",
         ],
     ),
-    ("early", "weakness"): (
-        "You drop points in games decided between moves 21 and 30",
+    ("early", "below"): (
+        "games decided between moves 21 and 30",
         [
             "Replay your {k} most recent losses of 21-30 moves and mark the first move after which you were "
             "clearly worse: most are early-middlegame tactics.",
@@ -369,8 +383,8 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
             "When the opening ends, make a plan based on the pawn structure before starting operations.",
         ],
     ),
-    ("middle", "weakness"): (
-        "You underperform in long middlegame battles (31-45 moves)",
+    ("middle", "below"): (
+        "long middlegame battles",
         [
             "Replay your {k} most recent losses of 31-45 moves and note where the evaluation turned: a tactic, "
             "a bad plan, or the clock.",
@@ -378,8 +392,8 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
             "Use a blunder check on every move in complex middlegames: what does my move leave undefended?",
         ],
     ),
-    ("long", "weakness"): (
-        "You underperform in long games (46-60 moves)",
+    ("long", "below"): (
+        "long games",
         [
             "Work through the essential endgames: king-and-pawn opposition, the Lucena and Philidor positions, "
             "and basic rook endings.",
@@ -387,8 +401,8 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
             "Keep a clock reserve for the ending: aim to have at least a quarter of your time left at move 40.",
         ],
     ),
-    ("very_long", "weakness"): (
-        "You underperform in very long games (61+ moves)",
+    ("very_long", "below"): (
+        "very long games",
         [
             "Work through the essential endgames: king-and-pawn opposition, the Lucena and Philidor positions, "
             "and basic rook endings.",
@@ -397,37 +411,37 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
             "Practise converting and holding endgames against an engine from positions taken from your own games.",
         ],
     ),
-    ("short", "strength"): (
-        "You punish early mistakes: you score well in short games",
+    ("short", "above"): (
+        "short games",
         [
             "Keep studying opening traps and early tactics: they are winning you games quickly.",
             "Review your {k} most recent quick wins to see which patterns recur, and look for them in new openings.",
         ],
     ),
-    ("early", "strength"): (
-        "You do well in games decided between moves 21 and 30",
+    ("early", "above"): (
+        "games decided between moves 21 and 30",
         [
             "Your early-middlegame play is paying off: review your {k} most recent wins of this length to see which "
             "ideas keep working.",
             "Steer towards the openings that lead to these sharp middlegames.",
         ],
     ),
-    ("middle", "strength"): (
-        "You outplay opponents in long middlegame battles (31-45 moves)",
+    ("middle", "above"): (
+        "long middlegame battles",
         [
             "Review your {k} most recent wins of 31-45 moves and note the plans that worked.",
             "Choose openings that lead to rich middlegames where this strength shows.",
         ],
     ),
-    ("long", "strength"): (
-        "You are strong in long games (46-60 moves)",
+    ("long", "above"): (
+        "long games",
         [
             "Your technique in long games is an asset: when in doubt, keep pieces on and play for a long game.",
             "Review your {k} most recent long wins to reinforce the endgame patterns that work for you.",
         ],
     ),
-    ("very_long", "strength"): (
-        "You are strong in very long games (61+ moves)",
+    ("very_long", "above"): (
+        "very long games",
         [
             "Your stamina and endgame technique are assets: do not agree to early draws in playable positions.",
             "Review your {k} most recent very long wins to reinforce the endgame patterns that work for you.",
@@ -439,25 +453,33 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
 def length_insights(
     groups: dict[str, list[Game]], summaries: dict[str, ScoreSummary], th: Thresholds
 ) -> tuple[list[Insight], dict[str, Optional[float]]]:
-    total = sum(s.n_rated for s in summaries.values())
-    # a length is only a finding if there are enough games of other lengths to set it apart from
-    tested = [
-        key
-        for key, _, _, _ in LENGTH_BUCKETS
-        if summaries[key].n_rated >= th.min_length_games and total - summaries[key].n_rated >= th.min_length_games
-    ]
-    adjusted = dict(zip(tested, bh_adjust([summaries[k].test.p_value for k in tested]), strict=True))
+    """Length bands that score differently from your games of other lengths: observations only.
+
+    Each band is compared with all your other games (a difference test, so a rating that lags
+    your strength doesn't make every band look strong or weak), BH-adjusted over the bands, at
+    the strict level. Never a strength or weakness: game length follows from the result and
+    from both players' resignation habits (see the module docstring).
+    """
     labels = {key: label for key, label, _, _ in LENGTH_BUCKETS}
+    tests: dict[str, tuple[MeanTest, ScoreSummary]] = {}
+    for key in labels:
+        s = summaries[key]
+        rest = summarize([g for k2 in labels if k2 != key for g in groups[k2]])
+        if s.n_rated >= th.min_length_games and rest.n_rated >= th.min_length_games:
+            tests[key] = (difference_test(s.test, rest.test), rest)
+    tested = list(tests)
+    adjusted = dict(zip(tested, bh_adjust([tests[k][0].p_value for k in tested]), strict=True))
     out: list[Insight] = []
     for key in tested:
-        s = summaries[key]
-        significant, confidence = significance(s.test, th.min_length_games, adjusted[key], alpha=th.strict_alpha)
-        if abs(s.test.mean) < th.min_length_effect or not significant:
+        s, (test, rest) = summaries[key], tests[key]
+        n = min(s.n_rated, rest.n_rated)
+        significant, confidence = significance(test, th.min_length_games, adjusted[key], th.strict_alpha, n)
+        if abs(test.mean) < th.min_length_effect or not significant or test.mean * s.test.mean <= 0:
             continue
-        kind: InsightKind = "weakness" if s.test.mean < 0 else "strength"
-        title, study = _LENGTH_TEXT[(key, kind)]
+        direction = "below" if test.mean < 0 else "above"
+        what, study = _LENGTH_TEXT[(key, direction)]
         group = groups[key]
-        if kind == "weakness":
+        if direction == "below":
             losses = [g for g in group if g.outcome == "loss"]
             if key == "short":  # the quickest collapses are the clearest lessons
                 losses.sort(key=lambda g: (g.plies, -g.end_time.timestamp()))
@@ -470,16 +492,19 @@ def length_insights(
             k = min(MAX_EXAMPLES, s.wins) or "few"
         out.append(
             Insight(
-                id=f"{KEY}.{kind}.length-{key.replace('_', '-')}",
-                kind=kind,
+                id=f"{KEY}.observation.length-{key.replace('_', '-')}",
+                kind="observation",
                 category="endings",
-                title=title,
+                title=f"Your {what} ({labels[key]} moves) score {direction} your games of other lengths",
                 detail=(
                     f"In games lasting {labels[key]} moves you scored {pct(s.rated_score)} in {s.n_rated} games where "
-                    f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game, about "
-                    f"{abs(score_to_elo_diff(s.test.mean, s.expected or 0.5)):.0f} Elo)."
+                    f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game); in your games of "
+                    f"other lengths {fmt_points(rest.test.mean)}. The gap is {fmt_points(test.mean)} points per game "
+                    f"(about {abs(score_to_elo_diff(test.mean, s.expected or 0.5)):.0f} Elo). How long a game lasts "
+                    "depends on the result and on when you and your opponents resign, so this describes your games "
+                    "rather than proving a strength or weakness."
                 ),
-                severity=severity_from_points(s.test.mean),
+                severity=severity_from_points(shrink_effect(test.mean, test.se)),
                 confidence=confidence,
                 evidence={
                     "bucket": labels[key],
@@ -488,7 +513,9 @@ def length_insights(
                     "score": s.rated_score,
                     "expected": s.expected,
                     "delta": s.delta,
-                    "p_value": s.test.p_value,
+                    "rest_delta": rest.delta,
+                    "gap": test.mean,
+                    "p_value": test.p_value,
                     "p_adjusted": adjusted[key],
                 },
                 study=[a.format(k=k) for a in study],

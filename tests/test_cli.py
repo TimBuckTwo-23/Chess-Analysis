@@ -471,3 +471,181 @@ def test_missing_time_zone_database_suggests_tzdata(run, monkeypatch):
     monkeypatch.setattr(zoneinfo, "available_timezones", lambda: set())
     code, _, stderr = run("report", "testerbob", "--offline", "--tz", "Europe/London")
     assert code == 2 and "pip install tzdata" in stderr
+
+
+# --------------------------------------------------------------------------- verifier regressions
+def _club_pgn(date="2024.05.04"):
+    """Three games between the same two players on one day, as an over-the-board / ChessBase PGN (no Link, no time)."""
+    games = [(1, "1-0", "1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#"), (2, "0-1", "1. f3 e5 2. g4 Qh4#"), (3, "1/2-1/2", "1. d4 d5")]
+    return "".join(
+        f'[Event "Club night"]\n[Site "Club"]\n[Date "{date}"]\n[Round "{rnd}"]\n[White "Me"]\n[Black "Friend"]\n'
+        f'[Result "{res}"]\n\n{moves} {res}\n\n'
+        for rnd, res, moves in games
+    )
+
+
+def test_contact_with_any_characters_is_sendable(chesscom, run):
+    code, _, stderr = run("fetch", "testerbob", "--contact", "Łukasz Nowak <lukasz@example.pl>\n")
+    assert code == 0, stderr
+    ua = chesscom.headers["User-Agent"]
+    ua.encode("latin-1")  # what http.client needs; used to raise UnicodeEncodeError
+    assert ua.isascii() and ua.isprintable() and "lukasz@example.pl" in ua
+
+
+@pytest.mark.parametrize("command", ["fetch", "report", "demo"])
+def test_unwritable_cache_dir_is_a_friendly_error(chesscom, run, tmp_path, command):
+    """A file (or read-only folder, full disk ...) as --cache-dir used to end in a NotADirectoryError traceback."""
+    if command == "demo":
+        pytest.importorskip("chess_insights.synth")
+    blocker = tmp_path / "afile"
+    blocker.write_text("not a folder")
+    argv = {
+        "fetch": ["fetch", "testerbob"],
+        "report": ["report", "testerbob", "--out", str(tmp_path / "r")],
+        "demo": ["demo", "--games", "3", "--no-engine-synth", "--workers", "1", "--out", str(tmp_path / "d")],
+    }[command]
+    code, _, stderr = run(*argv, "--cache-dir", str(blocker))
+    assert code == 1, stderr
+    assert "could not write to the game cache" in stderr and "--cache-dir" in stderr and "Traceback" not in stderr
+
+
+def test_report_uses_the_cached_games_when_the_cache_cannot_be_updated(chesscom, run, tmp_path, monkeypatch):
+    from chess_insights import fetch
+
+    assert run("fetch", "testerbob")[0] == 0
+
+    def locked(path, data):
+        raise PermissionError(13, "The process cannot access the file because it is being used by another process", str(path))
+
+    monkeypatch.setattr(fetch, "_atomic_write_json", locked)
+    code, _, stderr = run("report", "testerbob", "--out", str(tmp_path / "lk"), "--formats", "json")
+    assert code == 0, stderr
+    assert "could not write to the game cache" in stderr and "already downloaded" in stderr
+    assert report_json(tmp_path / "lk")["n_games"] == 8
+
+
+def test_other_file_errors_are_one_line_not_a_traceback(chesscom, run, tmp_path, monkeypatch):
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", "somewhere")
+
+    monkeypatch.setattr(cli, "load_games", denied)
+    code, _, stderr = run("report", "testerbob", "--offline")
+    assert code == 1 and "Permission denied" in stderr and "Traceback" not in stderr
+
+
+def test_retries_are_announced_instead_of_a_silent_wait(chesscom, run):
+    chesscom.routes[BASE] = requests.exceptions.ConnectTimeout("connect timed out")
+    code, _, stderr = run("report", "testerbob")
+    assert code == 3
+    assert "retrying in" in stderr and "ConnectTimeout" in stderr
+    assert len(chesscom.calls) == 2  # no connection at all: one retry, not five
+
+
+def test_demo_cache_dir_is_not_mixed_with_an_earlier_run(run, tmp_path):
+    """A second demo into the same --cache-dir used to analyse the old run's months too (63 of 63 games)."""
+    pytest.importorskip("chess_insights.synth")
+    cache = tmp_path / "democache"
+    common = ["--no-engine-synth", "--workers", "1", "--formats", "json", "--cache-dir", str(cache)]
+    assert run("demo", "--games", "30", "--out", str(tmp_path / "d1"), *common)[0] == 0
+    code, _, stderr = run("demo", "--games", "3", "--out", str(tmp_path / "d2"), *common)
+    assert code == 0, stderr
+    assert report_json(tmp_path / "d2")["n_games"] <= 3
+    code, _, stderr = run("report", "demo_player", "--offline", "--cache-dir", str(cache), "--out", str(tmp_path / "d3"),
+                          "--formats", "json", cache=False)
+    assert code == 0, stderr
+    assert report_json(tmp_path / "d3")["n_games"] == report_json(tmp_path / "d2")["n_games"]
+
+
+@pytest.mark.parametrize("value", ["", ",", " "])
+def test_empty_formats_is_rejected_before_any_work(chesscom, run, tmp_path, value):
+    code, _, stderr = run("report", "testerbob", "--out", str(tmp_path / "e"), "--formats", value)
+    assert code == 2 and "no report format" in stderr and chesscom.calls == []
+
+
+def test_out_pointing_at_a_folder_writes_inside_it(chesscom, run, tmp_path):
+    existing = tmp_path / "Desktop"
+    existing.mkdir()
+    code, _, stderr = run("report", "TesterBob", "--out", str(existing), "--formats", "json,md")
+    assert code == 0, stderr
+    assert sorted(p.name for p in existing.iterdir()) == ["testerbob.json", "testerbob.md"]
+    assert not (tmp_path / "Desktop.json").exists()
+    code, _, stderr = run("report", "TesterBob", "--out", str(tmp_path / "new") + os.sep, "--formats", "json")
+    assert code == 0, stderr
+    assert (tmp_path / "new" / "testerbob.json").exists()
+
+
+@pytest.mark.parametrize("option", ["--since", "--until"])
+@pytest.mark.parametrize("value", ["9999", "9999-12", "9999-12-31", "0999"])
+def test_far_away_years_are_a_usage_error(chesscom, run, option, value):
+    for command in ("report", "fetch"):
+        code, _, stderr = run(command, "testerbob", option, value)
+        assert code == 2 and "out of range" in stderr and "Traceback" not in stderr
+
+
+def test_the_latest_possible_until_still_works(chesscom, run, tmp_path):
+    code, _, stderr = run("report", "testerbob", "--until", "9998-12-31", "--out", str(tmp_path / "u"), "--formats", "json")
+    assert code == 0, stderr
+
+
+def _close_account(chesscom):
+    chesscom.routes[BASE] = FakeResponse(200, {"username": "testerbob", "status": "closed:fair_play_violations"})
+    del chesscom.routes[f"{BASE}/games/archives"]  # 404 from now on
+
+
+def test_closed_account_report_uses_the_games_downloaded_earlier(chesscom, run, tmp_path):
+    assert run("fetch", "testerbob")[0] == 0
+    _close_account(chesscom)
+    code, _, stderr = run("report", "testerbob", "--out", str(tmp_path / "cl"), "--formats", "json")
+    assert code == 0, stderr
+    assert "closed" in stderr and "already downloaded" in stderr
+    assert report_json(tmp_path / "cl")["n_games"] == 8
+    code, _, stderr = run("fetch", "testerbob")
+    assert code == 2 and "--offline" in stderr  # fetch can't refresh it, but says how to use the cache
+
+
+def test_closed_account_without_cached_games_explains(chesscom, run):
+    _close_account(chesscom)
+    code, _, stderr = run("report", "testerbob")
+    assert code == 2 and "closed" in stderr and "--pgn" in stderr
+
+
+def test_renamed_or_deleted_account_falls_back_to_the_cache(chesscom, run, tmp_path):
+    assert run("fetch", "testerbob")[0] == 0
+    del chesscom.routes[BASE]  # the profile now 404s
+    code, _, stderr = run("report", "testerbob", "--out", str(tmp_path / "gone"), "--formats", "json")
+    assert code == 0, stderr
+    assert "no longer has a player" in stderr and report_json(tmp_path / "gone")["n_games"] == 8
+
+
+def test_json_file_of_wrapped_games(run, tmp_path, fixtures_dir):
+    """The project's own edge-case fixture ({games: [{case, game: {...}}]}) used to find no players at all."""
+    out = tmp_path / "edge"
+    code, _, stderr = run("report", "erik", "--json", str(fixtures_dir / "real_chesscom_edge_cases.json"), "--out", str(out),
+                          "--formats", "json")
+    assert code == 0, stderr
+    assert report_json(out)["n_games"] == 3
+
+
+def test_pgn_wildcard_is_expanded_like_a_shell_would(run, tmp_path, fixtures_dir):
+    """cmd.exe and PowerShell pass *.pgn through unexpanded."""
+    folder = tmp_path / "pgns"
+    folder.mkdir()
+    (folder / "a.pgn").write_text((fixtures_dir / "sample_games.pgn").read_text(encoding="utf-8"), encoding="utf-8")
+    (folder / "notes.txt").write_text("not a pgn")
+    out = tmp_path / "wild"
+    code, _, stderr = run("report", "testerbob", "--pgn", str(folder / "*.pgn"), "--out", str(out), "--formats", "json")
+    assert code == 0, stderr
+    assert report_json(out)["n_games"] > 0
+    code, _, stderr = run("report", "testerbob", "--pgn", str(folder / "*.xyz"))
+    assert code == 2 and "no files match" in stderr
+
+
+def test_club_pgn_without_links_or_times(run, tmp_path):
+    """Same-day games between the same players were merged into one, and dated 1970 (so --since dropped them)."""
+    pgn = tmp_path / "club.pgn"
+    pgn.write_text(_club_pgn(), encoding="utf-8")
+    out = tmp_path / "club"
+    code, _, stderr = run("report", "Me", "--pgn", str(pgn), "--since", "2024", "--out", str(out), "--formats", "json")
+    assert code == 0, stderr
+    data = report_json(out)
+    assert data["n_games"] == 3 and data["date_from"].startswith("2024-05-04")

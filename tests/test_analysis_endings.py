@@ -148,22 +148,37 @@ def test_loss_profile_counts_and_shares():
     assert "1 game(s) with fewer than 4 plies" in table(mr, "How your losses and wins end").note
 
 
-def test_checkmated_more_than_mating_is_a_weakness():
+def test_checkmated_more_than_mating_is_an_observation():
+    # Never a weakness: a player who plays on in lost positions (a resignation becomes a mate) gets
+    # exactly this pattern with no king-safety problem. The old weakness fired in every report of a
+    # null world where the player rarely resigns.
     games = [g("loss", "checkmate") for _ in range(16)] + [g("loss", "resignation") for _ in range(14)]
     games += [g("win", "checkmate") for _ in range(3)] + [g("win", "resignation") for _ in range(27)]
     mr = run(games)
-    ins = insight(mr, "endings.weakness.checkmated-often")
-    assert ins and ins.category == "endings" and "16 of your 30 losses" in ins.detail
+    ins = insight(mr, "endings.observation.checkmated-often")
+    assert ins and ins.kind == "observation" and ins.category == "endings"
+    assert ins.title == "53% of your losses end in checkmate, against 10% of your wins"
+    assert "16 of your 30 losses" in ins.detail and "playing on in lost positions" in ins.detail
     assert set(ins.example_games) <= {x.url for x in games[:16]}
     assert any("mating-pattern" in s for s in ins.study)
+    assert claims(mr) == []
 
 
-def test_similar_mate_shares_are_not_a_weakness():
+def test_mate_observation_compares_shares_not_counts():
+    # Mated 25 times in 60 losses, mating 30 times in 150 wins: more mates *given* than taken, so the old
+    # title "You get checkmated much more often than you checkmate" was false in plain counts.
+    games = [g("loss", "checkmate") for _ in range(25)] + [g("loss", "resignation") for _ in range(35)]
+    games += [g("win", "checkmate") for _ in range(30)] + [g("win", "resignation") for _ in range(120)]
+    ins = insight(run(games), "endings.observation.checkmated-often")
+    assert ins.title == "42% of your losses end in checkmate, against 20% of your wins"
+
+
+def test_similar_mate_shares_are_not_reported():
     games = [g("loss", "checkmate") for _ in range(8)] + [g("loss", "resignation") for _ in range(22)]
     games += [g("win", "checkmate") for _ in range(7)] + [g("win", "resignation") for _ in range(23)]
-    assert insight(run(games), "endings.weakness.checkmated-often") is None
+    assert insight(run(games), "endings.observation.checkmated-often") is None
     few = [g("loss", "checkmate") for _ in range(15)] + [g("win", "resignation") for _ in range(15)]
-    assert insight(run(few), "endings.weakness.checkmated-often") is None  # fewer than 20 losses
+    assert insight(run(few), "endings.observation.checkmated-often") is None  # fewer than 20 losses
 
 
 def test_abandoned_games_observation_and_timeouts_stay_descriptive():
@@ -193,20 +208,52 @@ def test_length_table_rows():
     assert chart.series[0].values[2] is None and chart.series[0].values[0] == pytest.approx(0.5)
 
 
-def test_short_losses_weakness_and_long_game_strength():
+def test_short_and_long_games_that_stand_out_are_observations():
     rng = random.Random(3)
     short = [g("loss" if i % 4 else "win", "resignation", moves_san=moves(12 + i % 8)) for i in range(40)]
     long_ = [g("win" if i % 4 else "loss", "resignation", moves_san=moves(47 + i % 10)) for i in range(40)]
     middle = [g(rng.choice(["win", "loss"]), "resignation", moves_san=moves(35)) for _ in range(30)]
     mr = run(short + long_ + middle)
-    weak = insight(mr, "endings.weakness.length-short")
-    assert weak and weak.title == "You lose too many short games (20 moves or fewer)"
-    assert "25%" in weak.detail and "40 games" in weak.detail
+    weak = insight(mr, "endings.observation.length-short")
+    assert weak and weak.kind == "observation"
+    assert weak.title == "Your short games (≤ 20 moves) score below your games of other lengths"
+    assert "25%" in weak.detail and "40 games" in weak.detail and "when you and your opponents resign" in weak.detail
     shortest = sorted((x for x in short if x.outcome == "loss"), key=lambda x: (x.plies, -x.end_time.timestamp()))
     assert weak.example_games == [x.url for x in shortest[:5]]
-    strong = insight(mr, "endings.strength.length-long")
-    assert strong and strong.kind == "strength" and strong.category == "endings"
+    strong = insight(mr, "endings.observation.length-long")
+    assert strong and strong.category == "endings" and "score above" in strong.title
     assert mr.stats["by_length"]["≤ 20"]["p_adjusted"] is not None
+    assert claims(mr) == []
+
+
+def test_underrated_player_has_no_length_findings():
+    # Every length band 20 points above its expectation (a rating that lags the player's strength):
+    # the old per-band test called several bands strengths; compared with each other, none stands out.
+    rng = random.Random(5)
+    games = [
+        g("win" if rng.random() < 0.7 else "loss", "resignation", moves_san=moves(n))
+        for n in (15, 25, 38, 52, 70)
+        for _ in range(60)
+    ]
+    mr = run(games)
+    assert mr.stats["by_length"]["61+"]["delta"] > 0.1
+    assert not [i for i in mr.insights if ".length-" in i.id]
+
+
+def test_a_player_who_never_resigns_gets_no_endings_claims():
+    # Results drawn from the Elo expectation; every loss is played on to mate in a long game while
+    # opponents resign normally. The old tests reported "checkmated often", "you underperform in very
+    # long games" and "strong in short games" as weaknesses and strengths.
+    rng = random.Random(7)
+    games = []
+    for _ in range(300):
+        if rng.random() < 0.5:
+            games.append(g("win", "resignation", moves_san=moves(rng.randint(15, 45))))
+        else:
+            games.append(g("loss", "checkmate", moves_san=moves(rng.randint(40, 80))))
+    mr = run(games)
+    assert claims(mr) == []
+    assert insight(mr, "endings.observation.checkmated-often") is not None
 
 
 def noise_games(seed: int, n_games: int = 200) -> list:

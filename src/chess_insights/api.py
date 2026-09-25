@@ -16,12 +16,15 @@ import math
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
+from urllib.parse import quote
 
 import requests
+import urllib3
 
 from . import __version__
 
@@ -75,6 +78,34 @@ def normalize_username(username: str) -> str:
     return name.lower()
 
 
+def header_safe(text: str) -> str:
+    """``text`` as an HTTP header value that can always be sent.
+
+    Python's HTTP client only sends Latin-1 and rejects control characters, so a contact such as
+    ``Łukasz <l@example.pl>`` or one with a trailing newline (pasted from a file) would crash or fail
+    every request. Accents are dropped (``é`` -> ``e``), other non-ASCII characters are
+    percent-encoded (``Ł`` -> ``%C5%81``), control characters and runs of whitespace become one space.
+    """
+    text = unicodedata.normalize("NFKD", str(text))
+    text = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text if not unicodedata.combining(ch))
+    text = " ".join(text.split())
+    return "".join(ch if ch.isascii() else quote(ch, safe="") for ch in text)
+
+
+def _is_connect_failure(exc: BaseException) -> bool:
+    """True when no connection could be made at all (DNS failure, refused, connect timeout).
+
+    Retrying those five times only makes a user without internet wait minutes for the error; a
+    connection that breaks mid-response (reset, truncated body, read timeout) is worth retrying.
+    """
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        reason = getattr(exc.args[0] if exc.args else None, "reason", None)
+        return isinstance(reason, urllib3.exceptions.NewConnectionError)  # includes NameResolutionError
+    return False
+
+
 def parse_archive_url(url: str) -> tuple[int, int]:
     """'https://api.chess.com/pub/player/x/games/2024/03' -> (2024, 3)."""
     m = _ARCHIVE_RE.search(url)
@@ -86,7 +117,8 @@ def parse_archive_url(url: str) -> tuple[int, int]:
 class ChessComClient:
     """Serial, polite, retrying PubAPI client.
 
-    ``session`` and ``sleep`` are injectable for tests.
+    ``notify`` receives a one-line message before every retry wait, so a slow or busy chess.com
+    never looks like a hang. ``session`` and ``sleep`` are injectable for tests.
     """
 
     def __init__(
@@ -96,25 +128,31 @@ class ChessComClient:
         *,
         session: Optional[requests.Session] = None,
         max_retries: int = 5,
+        connect_retries: int = 1,
         backoff_base: float = 1.0,
-        max_retry_after: float = 120.0,
+        max_retry_after: float = 60.0,
+        max_total_wait: float = 180.0,
         min_interval: float = 0.25,
-        timeout: float = 30.0,
+        timeout: Union[float, tuple[float, float]] = (10.0, 30.0),
         sleep: Callable[[float], None] = time.sleep,
+        notify: Optional[Callable[[str], None]] = None,
         base_url: str = BASE_URL,
     ) -> None:
-        contact = contact or os.environ.get("CHESS_INSIGHTS_CONTACT")
-        ua = user_agent or DEFAULT_USER_AGENT
+        contact = header_safe(contact or os.environ.get("CHESS_INSIGHTS_CONTACT") or "")
+        ua = header_safe(user_agent or DEFAULT_USER_AGENT) or DEFAULT_USER_AGENT
         if contact:
             ua = f"{ua} contact: {contact}"
         self.session = session or requests.Session()
         self.session.headers.update({"User-Agent": ua, "Accept": "application/json"})
         self.max_retries = max_retries
+        self.connect_retries = connect_retries  # retries when no connection can be made at all
         self.backoff_base = backoff_base
         self.max_retry_after = max_retry_after
+        self.max_total_wait = max_total_wait  # give up rather than wait longer than this in one request
         self.min_interval = min_interval
-        self.timeout = timeout
+        self.timeout = timeout  # (connect, read) seconds
         self._sleep = sleep
+        self._notify = notify
         self._last_request = 0.0
         self.base_url = base_url.rstrip("/")
         self.requests_made = 0
@@ -142,20 +180,22 @@ class ChessComClient:
         """GET JSON with retries. Returns (data, response); data is None on 304 or tolerated 404/410.
 
         ``etag`` / ``last_modified`` make the request conditional (chess.com's ETags are weak,
-        ``W/"..."``, and are sent back unchanged). Retries 429, 5xx, connection errors and
-        truncated/invalid bodies with backoff (honouring ``Retry-After``); never sleeps after
-        the last attempt.
+        ``W/"..."``, and are sent back unchanged). Retries 429, 5xx, broken connections and
+        truncated/invalid bodies with backoff (honouring ``Retry-After``), but gives up after
+        ``connect_retries`` retries when no connection can be made at all (no internet, DNS
+        failure, blocked host), and never waits more than ``max_total_wait`` seconds in total
+        or sleeps after the last attempt. Each wait is announced through ``notify``.
         """
         url = self._url(path_or_url)
         headers = {"If-None-Match": etag} if etag else {"If-Modified-Since": last_modified} if last_modified else {}
         last_error: Optional[BaseException] = None
         attempts = self.max_retries + 1
-        delay = 0.0  # wait before the next attempt; set by each failed attempt
+        made = connect_failures = 0
+        waited = 0.0
         for attempt in range(attempts):
-            if attempt:
-                self._sleep(delay)
             self._throttle()
-            delay = self.backoff_base * 2**attempt
+            delay = self.backoff_base * 2**attempt  # wait before the next attempt, unless the server says otherwise
+            made += 1
             try:
                 resp = self.session.get(url, headers=headers, timeout=self.timeout)
                 self.requests_made += 1
@@ -165,38 +205,60 @@ class ChessComClient:
                     "antivirus that inspects HTTPS traffic is the usual cause: its certificate must be trusted "
                     "(set REQUESTS_CA_BUNDLE to your company's CA file) or the proxy configured (HTTPS_PROXY)."
                 ) from exc
+            except (
+                requests.exceptions.InvalidHeader,
+                requests.exceptions.InvalidURL,
+                requests.exceptions.InvalidSchema,
+                requests.exceptions.MissingSchema,
+            ) as exc:  # a bad request is bad every time: retrying only makes the user wait
+                raise ChessComError(f"could not send the request to {url} ({type(exc).__name__}: {exc})") from exc
             except requests.RequestException as exc:  # connection reset, DNS, timeout, truncated body
                 last_error = exc
-                continue
-
-            if resp.status_code == 304:
-                return None, resp
-            if resp.status_code == 200:
-                try:
-                    return resp.json(), resp
-                except ValueError as exc:  # cut-off or non-JSON body (captive portal, CDN hiccup)
-                    last_error = ChessComError(f"invalid JSON from {url}")
-                    last_error.__cause__ = exc
-                    continue
-            if resp.status_code in (404, 410):
-                if not_found_ok:
+                if _is_connect_failure(exc):
+                    connect_failures += 1
+                    if connect_failures > self.connect_retries:
+                        break
+                    reason = f"could not connect to api.chess.com ({type(exc).__name__})"
+                else:
+                    reason = f"connection problem ({type(exc).__name__})"
+            else:
+                if resp.status_code == 304:
                     return None, resp
-                raise PlayerNotFound(f"{url} -> HTTP {resp.status_code}")
-            if resp.status_code == 429 or resp.status_code >= 500:
-                last_error = RateLimited(f"{url} -> HTTP {resp.status_code}")
-                delay = self._retry_after(resp, attempt)
-                continue
-            if resp.status_code == 403:
-                raise ChessComError(
-                    f"{url} -> HTTP 403. chess.com's CDN rejects requests without a descriptive "
-                    "User-Agent (pass --contact you@example.com), and some networks block api.chess.com."
-                )
-            raise ChessComError(f"{url} -> HTTP {resp.status_code}: {resp.text[:200]}")
+                if resp.status_code == 200:
+                    try:
+                        return resp.json(), resp
+                    except ValueError as exc:  # cut-off or non-JSON body (captive portal, CDN hiccup)
+                        last_error = ChessComError(f"invalid JSON from {url}")
+                        last_error.__cause__ = exc
+                        reason = "incomplete answer"
+                elif resp.status_code in (404, 410):
+                    if not_found_ok:
+                        return None, resp
+                    raise PlayerNotFound(f"{url} -> HTTP {resp.status_code}")
+                elif resp.status_code == 429 or resp.status_code >= 500:
+                    last_error = RateLimited(f"{url} -> HTTP {resp.status_code}")
+                    delay = self._retry_after(resp, attempt)
+                    reason = "too many requests (HTTP 429)" if resp.status_code == 429 else f"server error (HTTP {resp.status_code})"
+                elif resp.status_code == 403:
+                    raise ChessComError(
+                        f"{url} -> HTTP 403. chess.com's CDN rejects requests without a descriptive "
+                        "User-Agent (pass --contact you@example.com), and some networks block api.chess.com."
+                    )
+                else:
+                    raise ChessComError(f"{url} -> HTTP {resp.status_code}: {resp.text[:200]}")
+
+            if attempt == attempts - 1 or waited + delay > self.max_total_wait:
+                break  # never sleep after the last attempt, nor past the total wait budget
+            if self._notify:
+                self._notify(f"chess.com: {reason}; retrying in {delay:.0f}s (retry {attempt + 1})")
+            self._sleep(delay)
+            waited += delay
 
         if isinstance(last_error, ChessComError):
             raise last_error
         raise ChessComError(
-            f"could not reach api.chess.com after {attempts} attempts ({type(last_error).__name__}: {last_error}). "
+            f"could not reach api.chess.com after {made} attempt{'s' if made != 1 else ''} "
+            f"({type(last_error).__name__}: {last_error}). "
             "Check your internet connection; some school and company networks block api.chess.com."
         ) from last_error
 

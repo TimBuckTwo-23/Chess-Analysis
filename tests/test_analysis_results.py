@@ -266,17 +266,25 @@ def test_rating_chart_months_union_with_gaps():
     assert kpis["Peak rating"].value == 1454 and "blitz" in kpis["Peak rating"].hint
 
 
-def test_best_and_worst_time_control():
+def test_time_control_that_stands_out_is_one_claim():
+    # Two pools make one comparison seen from both ends: one claim, for the pool further from its own
+    # rating (rapid +0.25 vs blitz -0.15). The old code also called blitz "your weakest time control".
     rapid = games_by(30, 10, time_class="rapid", time_control="600", base_seconds=600)
     blitz = games_by(14, 26)
     mr = run(rapid + blitz)
-    best = next(i for i in mr.insights if i.id == "results.strength.time-control-rapid")
-    assert best.title == "Rapid is your best time control" and best.category == "results"
-    assert "75%" in best.detail and "35%" in best.detail
+    claims = [i for i in mr.insights if "time-control" in i.id]
+    assert [i.id for i in claims] == ["results.strength.time-control-rapid"]
+    best = claims[0]
+    assert best.title == "You outperform your rapid rating more than your other ratings" and best.category == "results"
+    assert "75%" in best.detail and "35%" in best.detail and "lags behind" in best.detail
     assert set(best.example_games) <= {g.url for g in rapid if g.outcome == "win"}
-    worst = next(i for i in mr.insights if i.id == "results.weakness.time-control-blitz")
-    assert any("increment" in s for s in worst.study)
     assert mr.stats["time_control_comparison"]["best"] == "Rapid"
+    assert mr.stats["time_control_comparison"]["claimed"] == "Rapid"
+    # the weaker side of the same comparison, when it is the pool that is off its rating
+    blitz_only_off = games_by(20, 20, time_class="rapid", time_control="600", base_seconds=600) + games_by(8, 32)
+    worst = [i for i in run(blitz_only_off).insights if "time-control" in i.id]
+    assert [i.id for i in worst] == ["results.weakness.time-control-blitz"]
+    assert any("increment" in s for s in worst[0].study)
     bar = next(c for c in mr.charts if c.title == "Score vs expected by time control")
     assert bar.labels == ["Blitz", "Rapid"] and bar.series[0].values == pytest.approx([14 / 40 - 0.5, 0.25])
 
@@ -329,6 +337,26 @@ def test_black_weakness_detected_and_named():
     assert ins.example_games == [g.url for g in recent_black_losses[:5]]
     table = next(t for t in mr.tables if t.title == "By colour")
     assert [row[:3] for row in table.rows] == [["White", 40, "28/0/12"], ["Black", 40, "12/0/28"]]
+
+
+def test_colour_gap_from_one_opening_is_not_a_second_claim():
+    # Black is weak only in the Caro-Kann (15/150), which the openings module names; without those games
+    # White and Black are normal. The colour finding points to the opening instead of repeating it.
+    def fam(color, family, wins, losses):
+        return games_by(wins, losses, color=color, opening_family=family, opening=family)
+
+    black = fam("black", "Caro-Kann Defense", 15, 135) + fam("black", "French Defense", 50, 50)
+    black += fam("black", "King's Indian Defense", 50, 50)
+    white = fam("white", "Italian Game", 100, 100) + fam("white", "London System", 100, 100)
+    mr = run(black + white)
+    ins = next(i for i in mr.insights if i.category == "color")
+    assert ins.kind == "observation" and ins.id == "results.observation.colour-black"
+    assert "Caro-Kann Defense" in ins.title and ins.evidence["explained_by"] == ["black:Caro-Kann Defense"]
+    # the same gap spread over every Black opening is a colour claim
+    spread = fam("black", "Caro-Kann Defense", 38, 78) + fam("black", "French Defense", 38, 78)
+    spread += fam("black", "King's Indian Defense", 38, 78)
+    ins = next(i for i in run(spread + white).insights if i.category == "color")
+    assert ins.kind == "weakness" and ins.id == "results.weakness.colour-black"
 
 
 def test_white_weakness_detected():
@@ -400,12 +428,24 @@ def test_opponent_claim_must_hold_for_the_plain_elo_formula_too():
     # 85% against opponents 300 points weaker: exactly what the plain Elo formula predicts (85%), but
     # well above the pessimistic attenuated expectation (76%). Rating noise alone can explain that, so
     # no "you reliably beat lower-rated players" (the old attenuated-only test claimed it).
-    games = games_by(255, 45, my_rating=1500, opp_rating=1200) + games_by(60, 60)
+    games = games_by(850, 150, my_rating=1500, opp_rating=1200) + games_by(400, 400)
     mr = run(games)
     lower = mr.stats["opponent_groups"]["lower"]
-    assert lower["delta"] > 0.07 and lower["p_adjusted"] < 0.001  # significant against the attenuated expectation
-    assert abs(lower["elo_delta"]) < 0.01  # ... but not against plain Elo
+    assert lower["gap"] > 0.07 and lower["p_adjusted"] < 0.001  # significant against the attenuated expectation
+    assert abs(lower["elo_gap"]) < 0.01  # ... but not against plain Elo
     assert not [i for i in mr.insights if i.category == "opponents"]
+
+
+def test_underrated_player_has_no_opponent_strength_claims():
+    # 150 Elo stronger than the rating says, against every kind of opponent: the old test (each group
+    # against its expectation) said "you reliably beat lower-rated players"; compared with the
+    # player's other games, nothing about opponent strength stands out.
+    games = games_by(170, 30, my_rating=1500, opp_rating=1350)  # true 85%, rating says 70%
+    games += games_by(140, 60, my_rating=1500, opp_rating=1500)  # true 70%, rating says 50%
+    games += games_by(100, 100, my_rating=1500, opp_rating=1650)  # true 50%, rating says 30%
+    mr = run(games)
+    assert mr.stats["opponent_groups"]["lower"]["delta"] > 0.15  # far above its expectation ...
+    assert not [i for i in mr.insights if i.category == "opponents"]  # ... like every other game
 
 
 def test_time_controls_are_compared_one_against_the_rest_not_best_against_worst():
