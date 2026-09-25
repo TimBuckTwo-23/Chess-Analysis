@@ -166,7 +166,7 @@ class Persona:
     player's rating already prices in their weaknesses, so their ordinary games sit a little above
     expectation and the rating stays roughly stable. The defaults are calibrated so the planted
     subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.10,
-    rapid +0.08 (blitz about 0, bullet -0.03).
+    rapid +0.09 (blitz -0.02, bullet -0.045).
     """
 
     username: str = "demo_player"
@@ -178,12 +178,12 @@ class Persona:
     )
     # T8: stronger at rapid than at the fast time controls
     time_class_shift: dict[str, float] = field(
-        default_factory=lambda: {"blitz": -0.01, "rapid": 0.09, "bullet": -0.03, "daily": 0.0}
+        default_factory=lambda: {"blitz": -0.02, "rapid": 0.09, "bullet": -0.045, "daily": 0.0}
     )
     baseline_shift: float = 0.09
     # T1: Caro-Kann as Black against 1.e4
     caro_kann_share: float = 0.38
-    caro_kann_shift: float = -0.155
+    caro_kann_shift: float = -0.15
     # T2: Italian Game as White (share of all White games; White always opens 1.e4)
     italian_share: float = 0.45
     italian_shift: float = 0.18
@@ -192,16 +192,16 @@ class Persona:
     blitz_flag_share: float = 0.28  # share of planned blitz losses that end on the clock
     low_clock_error_factor: float = 2.2  # error-rate multiplier with less than 10% of the clock left
     # T4: tilt
-    tilt_shift: float = -0.14
+    tilt_shift: float = -0.13
     tilt_window_min: float = 15.0
     quick_requeue_after_loss: float = 0.8
     # T5: late-night play (games starting 23:00-03:00 UTC)
-    late_night_shift: float = -0.115
+    late_night_shift: float = -0.10
     late_session_share: float = 0.22
     # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
-    endgame_error_factor: float = 2.5
+    endgame_error_factor: float = 3.0
     # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
-    throw_win_share: float = 0.40
+    throw_win_share: float = 0.50
     opponent_throw_win_share: float = 0.05
 
 
@@ -483,22 +483,49 @@ def _session_start(rng: random.Random, day: datetime, persona: Persona) -> datet
     return day + timedelta(minutes=minute)
 
 
-def _sample_target(rng: random.Random, expected: float, shift: float, time_class: str) -> str:
+class _OutcomeBalancer:
+    """Keeps each planted subset's intended results close to what its shift promises.
+
+    With independent draws a 100-game subset (say, the Caro-Kann games) wanders about +-0.05
+    points per game from its planned shift, enough to hide a trait in an unlucky seed. A weak
+    negative feedback on each subset's running surplus keeps it within about +-0.015, while
+    consecutive games stay nearly independent (one result moves the next game's odds by ~2.5%).
+    """
+
+    GAIN = 0.05
+
+    def __init__(self) -> None:
+        self.surplus: dict[str, float] = {}
+
+    def adjust(self, keys: Sequence[str], mu: float) -> float:
+        return mu - self.GAIN * sum(self.surplus.get(k, 0.0) for k in keys)
+
+    def record(self, keys: Sequence[str], score: float, mu: float) -> None:
+        for k in keys:
+            self.surplus[k] = self.surplus.get(k, 0.0) + score - mu
+
+
+_SCORE = {"win": 1.0, "draw": 0.5, "loss": 0.0}
+
+
+def _sample_target(
+    rng: random.Random, expected: float, shift: float, time_class: str, balancer: _OutcomeBalancer, keys: Sequence[str]
+) -> str:
     mu = _clamp(expected + shift, 0.03, 0.97)
+    p_score = _clamp(balancer.adjust(keys, mu), 0.02, 0.98)
     draw = _DRAW_RATE[time_class] * (1.0 - abs(expected - 0.5))
-    draw = min(draw, 2 * mu, 2 * (1 - mu))
+    draw = min(draw, 2 * p_score, 2 * (1 - p_score))
     u = rng.random()
-    if u < mu - draw / 2:
-        return "win"
-    if u < mu + draw / 2:
-        return "draw"
-    return "loss"
+    target = "win" if u < p_score - draw / 2 else "draw" if u < p_score + draw / 2 else "loss"
+    balancer.record(keys, _SCORE[target], mu)
+    return target
 
 
 def _plan_one(
     rng: random.Random,
     persona: Persona,
     pool: _OpponentPool,
+    balancer: _OutcomeBalancer,
     *,
     time_class: str,
     time_control: str,
@@ -515,23 +542,23 @@ def _plan_one(
     expected = _expected(offset)
 
     shift = persona.time_class_shift.get(time_class, 0.0)
-    context = False
+    contexts = []
     if color == "black" and opening in CARO_KANN_LINES:
         shift += persona.caro_kann_shift
-        context = True
+        contexts.append("caro-kann")
     if color == "white" and opening in ITALIAN_LINES:
         shift += persona.italian_shift
-        context = True
+        contexts.append("italian")
     if tilt:
         shift += persona.tilt_shift
-        context = True
+        contexts.append("tilt")
     if late:
         shift += persona.late_night_shift
-        context = True
-    if not context:
+        contexts.append("late")
+    if not contexts:
         shift += persona.baseline_shift
 
-    target = _sample_target(rng, expected, shift, time_class)
+    target = _sample_target(rng, expected, shift, time_class, balancer, [time_class, *contexts])
     finish = "board"
     if target != "draw" and time_class != "daily":
         p_loss, p_win = _FLAG_SHARE[time_class]
@@ -584,6 +611,7 @@ def _gap_after(rng: random.Random, target: str, persona: Persona) -> float:
 def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end: datetime) -> list[_Plan]:
     rng = random.Random(f"chess-insights-synth:{seed}")
     pool = _OpponentPool(rng, persona.username)
+    balancer = _OutcomeBalancer()
     mix = {tc: max(0.0, w) for tc, w in persona.time_class_mix.items() if tc in TIME_CONTROLS}
     total_w = sum(mix.values()) or 1.0
     mix = {tc: w / total_w for tc, w in mix.items()} or {"blitz": 1.0}
@@ -637,6 +665,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
                 rng,
                 persona,
                 pool,
+                balancer,
                 time_class=s.time_class,
                 time_control=tc_str,
                 planned_start=t,
@@ -659,6 +688,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
             rng,
             persona,
             pool,
+            balancer,
             time_class="daily",
             time_control=_weighted(rng, TIME_CONTROLS["daily"]),
             planned_start=started,
@@ -682,6 +712,8 @@ Candidate = tuple[chess.Move, int]  # move and its score (cp, mover's point of v
 
 
 class _Mover(Protocol):
+    exhaustive: bool  # top() already scores every legal move
+
     def new_game(self, key: object) -> None: ...
 
     def top(self, board: chess.Board) -> list[Candidate]: ...
@@ -693,6 +725,8 @@ class _Mover(Protocol):
 
 class _EngineMover:
     """Shallow, node-limited Stockfish. The hash is cleared per game so results never depend on game order."""
+
+    exhaustive = False
 
     def __init__(self, path: str) -> None:
         self.path = path
@@ -747,6 +781,8 @@ _CENTER = tuple(
 
 class _HeuristicMover:
     """Fast one-ply material mover: captures, hanging pieces, mate-in-one and a little positional sense."""
+
+    exhaustive = True
 
     def new_game(self, key: object) -> None:
         pass
@@ -862,10 +898,10 @@ def _is_endgame(board: chess.Board) -> bool:
 class _Played:
     index: int
     sans: list[str]
-    clocks: list[int]  # [%clk] in tenths: live = mover's clock after the ply; daily = time spent / 10 (as chess.com archives it)
+    clocks: list[int]  # [%clk] in tenths: live = mover's clock after the ply; daily = time spent / 10 (chess.com archives)
     think: list[int]  # tenths of a second spent on each ply
     final_think: int  # tenths spent by the side to move before the game ended (flag / resignation / agreement)
-    end_kind: str  # checkmate | resignation | timeout | agreement | repetition | stalemate | insufficient | 50move | timevsinsufficient
+    end_kind: str  # a key of _TERMINATION_TEXT
     winner: Optional[str]  # "white" / "black" / None
     fen: str
     tcn: str
@@ -911,6 +947,8 @@ class _Director:
             return (0.2, 0.5) if score < 150 else (0.15, 0.3)
         if role == "loser":
             ramp = _clamp((move_no - 12) / 28.0, 0.0, 1.0)
+            if self.swing_phase == 1:
+                ramp = 0.4 + 0.6 * ramp  # the side destined to win first hands over a clear advantage
             if side == self.player and not endgame:
                 ramp *= 0.6  # the player tends to hold the middlegame and go wrong later (T6)
             elif side != self.player and endgame:
@@ -1002,7 +1040,9 @@ class _GamePlayer:
         return max(1, int(round(t * 10.0)))
 
     # ---- errors ----------------------------------------------------------
-    def _error_kind(self, side: chess.Color, score: int, move_no: int, ply: int, board: chess.Board, clock: int) -> Optional[str]:
+    def _error_kind(
+        self, side: chess.Color, score: int, move_no: int, ply: int, board: chess.Board, clock: int
+    ) -> Optional[str]:
         """Draw this move's quality: None (a good move), "inaccuracy", "mistake" or "blunder"."""
         is_player = side == self.player
         endgame = _is_endgame(board)
@@ -1072,6 +1112,8 @@ class _GamePlayer:
                 if band:
                     return rng.choice(band)
             if attempt == 0:
+                if self.mover.exhaustive:
+                    break
                 pool = self.mover.full(board)
         return cands[0][0], 0.0
 
@@ -1481,10 +1523,11 @@ def _assemble(
     games = []
     for p in plans:
         start, end = times[p.index]
+        offset = int(start.timestamp() - base_ts)
         if p.time_class == "daily":
-            url = f"https://www.chess.com/game/daily/{DAILY_ID_BASE + int((start.timestamp() - base_ts) // 60) * 7 + p.index % 7}"
+            url = f"https://www.chess.com/game/daily/{DAILY_ID_BASE + offset // 60 * 7 + p.index % 7}"
         else:
-            url = f"https://www.chess.com/game/live/{LIVE_ID_BASE + int(start.timestamp() - base_ts) * 12 + p.index % 12}"
+            url = f"https://www.chess.com/game/live/{LIVE_ID_BASE + offset * 12 + p.index % 12}"
         games.append(_game_json(p, played[p.index], persona, start=start, end=end, url=url, ratings=shown[p.index]))
     return games
 

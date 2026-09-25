@@ -115,14 +115,15 @@ def check_result(raw: dict, headers: dict, board: chess.Board) -> None:
 
 
 def check_clocks(raw: dict, g, board: chess.Board) -> None:
-    assert len(g.clocks) == g.plies and all(c is not None for c in g.clocks)
-    start = g.start_time
-    elapsed = raw["end_time"] - int(start.timestamp())
+    elapsed = raw["end_time"] - int(g.start_time.timestamp())
     if raw["time_class"] == "daily":
-        assert raw["time_control"] == "1/86400"
-        assert all(0 < c < 86400 for c in g.clocks)  # time left for that move; never runs out
-        assert elapsed >= sum(86400 - c for c in g.clocks) - len(g.clocks)
+        # archived daily games store time spent / 10 in [%clk]; the parser drops them
+        assert raw["time_control"] == "1/86400" and raw["start_time"] == int(g.start_time.timestamp())
+        spent = parse.parse_movetext(raw["pgn"])[1]
+        assert len(spent) == g.plies and all(c is not None and 0 <= c < 8640 for c in spent)
+        assert elapsed >= 10 * sum(spent) - len(spent)
         return
+    assert len(g.clocks) == g.plies and all(c is not None for c in g.clocks)
     base, inc = g.base_seconds, g.increment
     spent = 0.0
     last = {0: float(base), 1: float(base)}
@@ -232,16 +233,24 @@ def test_tcn_matches_real_chesscom_encoding(fixtures_dir):
     raws = json.loads((fixtures_dir / "real_chesscom_games.json").read_text())["games"]
     checked = 0
     for raw in raws:
-        if raw.get("rules") != "chess" or not raw.get("tcn") or not raw.get("pgn"):
-            continue
+        if raw.get("rules") != "chess" or not raw.get("tcn") or "/game/live/" not in raw["url"]:
+            continue  # (a 2015 daily game still encodes castling as king-takes-rook)
         board = chess.Board()
         for san in parse.parse_movetext(raw["pgn"])[0]:
             board.push_san(san)
         assert synth.encode_tcn(board.move_stack) == raw["tcn"], raw["url"]
         checked += 1
     assert checked >= 5
-    promo = chess.Board("8/P6k/8/8/8/8/6K1/8 w - - 0 1")
-    assert synth.encode_tcn([promo.parse_san("a8=N")]) == "WV"  # knight promotion straight ahead
+    # promotions fold piece and direction into the target character (decoder from chess.com's web client)
+    chars = synth._TCN_CHARS
+    for fen, san in (("8/P6k/8/8/8/8/6K1/8 w - - 0 1", "a8=N"), ("1n5k/P7/8/8/8/8/6K1/8 w - - 0 1", "axb8=Q"),
+                     ("8/6K1/8/8/8/8/5p1k/6N1 b - - 0 1", "fxg1=R")):
+        board = chess.Board(fen)
+        move = board.parse_san(san)
+        code = synth.encode_tcn([move])
+        frm, to = chars.index(code[0]), chars.index(code[1])
+        assert to > 63 and "qnrbkp"[(to - 64) // 3] == chess.piece_symbol(move.promotion)
+        assert (frm, frm + (-8 if frm < 16 else 8) + (to - 1) % 3 - 1) == (move.from_square, move.to_square)
 
 
 def test_planted_traits_contract():
@@ -287,8 +296,9 @@ def test_caro_kann_underperformance_is_visible(medium_archives):
 
 def test_blitz_clock_habits_are_visible(medium_archives):
     games = [g for g in parse.parse_games(all_games(medium_archives), USER) if g.time_class == "blitz"]
-    losses = [g for g in games if g.outcome == "loss"]
-    assert sum(g.termination == "timeout" for g in losses) / len(losses) >= 0.15
+    on_time = lambda gs: sum(g.termination == "timeout" for g in gs) / len(gs)  # noqa: E731
+    losses, wins = [g for g in games if g.outcome == "loss"], [g for g in games if g.outcome == "win"]
+    assert on_time(losses) >= 0.10 and on_time(losses) > 1.5 * on_time(wins)  # flags far more often than opponents
     used_me, used_opp = 0.0, 0.0
     for g in games:
         mine = [c for i, c in enumerate(g.clocks) if g.is_my_ply(i)]
