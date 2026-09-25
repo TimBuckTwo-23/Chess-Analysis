@@ -13,6 +13,7 @@ dependencies = [
     "chess>=1.10",
     "pandas>=2.0",
     "requests>=2.31",
+    "tzdata; sys_platform == 'win32'",  # zoneinfo has no system time-zone database on Windows
 ]
 
 [project.optional-dependencies]

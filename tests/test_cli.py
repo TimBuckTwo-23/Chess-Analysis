@@ -9,6 +9,7 @@ import copy
 import functools
 import io
 import json
+import os
 import subprocess
 import sys
 import types
@@ -310,7 +311,7 @@ def test_missing_input_file_exit_2(run, tmp_path):
 
 def test_json_source(run, tmp_path, fixtures_dir):
     out = tmp_path / "j"
-    code, _, stderr = run("report", "testerbob", "--json", str(fixtures_dir / "chesscom_archive_sample.json"),
+    code, _, stderr = run("report", "@TesterBob", "--json", str(fixtures_dir / "chesscom_archive_sample.json"),
                           "--out", str(out), "--formats", "json")
     assert code == 0, stderr
     assert report_json(out)["n_games"] == 7
@@ -384,7 +385,7 @@ def test_python_dash_m_entry_points():
     src = str(Path(__file__).resolve().parent.parent / "src")
     for module in ("chess_insights", "chess_insights.cli"):
         res = subprocess.run([sys.executable, "-m", module, "--version"], capture_output=True, text=True,
-                             env={"PYTHONPATH": src, "PATH": ""}, timeout=60)
+                             env={**os.environ, "PYTHONPATH": src}, timeout=60)
         assert res.returncode == 0 and "chess-insights" in res.stdout, res.stderr
 
 
@@ -442,3 +443,31 @@ def test_every_documented_command_and_option_parses():
             continue
         argv = [a.strip('"') for a in shlex.split(text.replace("YOUR_USERNAME", "someone"), posix=False)]
         parser.parse_args(argv)  # raises SystemExit on anything undocumented or malformed
+
+
+def test_invalid_json_file_names_the_file(run, tmp_path):
+    bad = tmp_path / "broken.json"
+    bad.write_text('{"games": [', encoding="utf-8")
+    code, _, stderr = run("report", "testerbob", "--json", str(bad))
+    assert code == 2 and "broken.json" in stderr and "Traceback" not in stderr
+
+
+def test_default_report_name_is_safe_on_windows():
+    import argparse
+
+    args = argparse.Namespace(out=None)
+    assert cli._out_stem(args, "Aux") == Path("reports") / "_aux"
+    assert cli._out_stem(args, "TesterBob") == Path("reports") / "testerbob"
+
+
+def test_missing_time_zone_database_suggests_tzdata(run, monkeypatch):
+    """Windows ships no IANA database; without the tzdata package every name is unknown."""
+    import zoneinfo
+
+    def no_db(key):
+        raise zoneinfo.ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(zoneinfo, "ZoneInfo", no_db)
+    monkeypatch.setattr(zoneinfo, "available_timezones", lambda: set())
+    code, _, stderr = run("report", "testerbob", "--offline", "--tz", "Europe/London")
+    assert code == 2 and "pip install tzdata" in stderr

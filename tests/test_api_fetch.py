@@ -462,3 +462,12 @@ def test_load_json_files_accepts_every_shape(tmp_path):
         p.write_text(data if isinstance(data, str) else fetch.json.dumps(data), encoding="utf-8")
         paths.append(p)
     assert [g["uuid"] for g in fetch.load_json_files(paths)] == [f"g{i}" for i in range(1, 8)]
+
+
+@pytest.mark.parametrize("name", ["con", "AUX", "nul", "com1", "lpt9", "prn"])
+def test_windows_device_names_are_not_used_as_folder_names(tmp_path, name):
+    """chess.com usernames like 'con' or 'aux' are valid, but Windows can't create such folders."""
+    store = fetch.GameStore(tmp_path, name)
+    assert store.username == name.lower()
+    assert store.root.name == f"_{name.lower()}"
+    assert fetch.GameStore(tmp_path, "conrad").root.name == "conrad"

@@ -150,6 +150,7 @@ class ChessComClient:
         headers = {"If-None-Match": etag} if etag else {"If-Modified-Since": last_modified} if last_modified else {}
         last_error: Optional[BaseException] = None
         attempts = self.max_retries + 1
+        delay = 0.0  # wait before the next attempt; set by each failed attempt
         for attempt in range(attempts):
             if attempt:
                 self._sleep(delay)

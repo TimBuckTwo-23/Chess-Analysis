@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -34,6 +35,18 @@ def expand_path(path: Path | str) -> Path:
 
 
 DEFAULT_CACHE_DIR = expand_path(os.environ.get("CHESS_INSIGHTS_CACHE") or "~/.chess-insights-cache")
+
+# Device names Windows reserves, with or without an extension ("con", "aux.html" ...).
+_WINDOWS_DEVICES = frozenset(
+    {"con", "prn", "aux", "nul", "conin$", "conout$"} | {f"{p}{i}" for p in ("com", "lpt") for i in range(10)}
+)
+
+
+def safe_file_stem(name: str) -> str:
+    """``name`` as a file or folder name that works on Windows too: characters outside
+    ``[A-Za-z0-9_.-]`` become ``_`` and device names (``con``, ``aux`` ...) get a ``_`` prefix."""
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip(" .") or "_"
+    return f"_{stem}" if stem.split(".")[0].lower() in _WINDOWS_DEVICES else stem
 
 YearMonth = tuple[int, int]
 
@@ -119,7 +132,7 @@ class GameStore:
 
     def __init__(self, cache_dir: Path | str, username: str) -> None:
         self.username = normalize_username(username)
-        self.root = expand_path(cache_dir) / self.username
+        self.root = expand_path(cache_dir) / safe_file_stem(self.username)
         self.games_dir = self.root / "games"
 
     def month_path(self, ym: YearMonth) -> Path:

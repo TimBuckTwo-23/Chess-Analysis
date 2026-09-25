@@ -23,7 +23,7 @@ from typing import Iterable, Optional, Sequence
 
 from . import __version__
 from .dataset import describe_filters, filter_games
-from .fetch import DEFAULT_CACHE_DIR, expand_path, load_games, load_json_files, read_text, sync
+from .fetch import DEFAULT_CACHE_DIR, expand_path, load_games, load_json_files, read_text, safe_file_stem, sync
 from .models import TIME_CLASSES, Game, Report
 from .parse import games_from_pgn, merge_games, parse_games, parse_pgn_headers, split_pgn
 
@@ -72,7 +72,7 @@ def _csv(values: Optional[Sequence[str]]) -> Optional[list[str]]:
 def _time_classes(text: str) -> str:
     bad = [v for v in (_csv([text]) or []) if v.lower() not in TIME_CLASSES]
     if bad:
-        raise argparse.ArgumentTypeError(f"unknown time class {', '.join(bad)!s}; choose from {', '.join(TIME_CLASSES)}")
+        raise argparse.ArgumentTypeError(f"unknown time class {', '.join(bad)}; choose from {', '.join(TIME_CLASSES)}")
     return text.lower()
 
 
@@ -94,6 +94,10 @@ def _non_negative_int(text: str) -> int:
     if value < 0:
         raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
     return value
+
+
+_ONE_DAY = timedelta(days=1)
+_PERIOD_RE = re.compile(r"^(\d{4})(?:[-/.](\d{1,2})(?:[-/.](\d{1,2}))?)?$")
 
 
 @dataclass(frozen=True)
@@ -125,10 +129,6 @@ class Period:
         return self.year, self.month or 12
 
 
-_ONE_DAY = timedelta(days=1)
-_PERIOD_RE = re.compile(r"^(\d{4})(?:[-/.](\d{1,2})(?:[-/.](\d{1,2}))?)?$")
-
-
 def _period(text: str) -> Period:
     m = _PERIOD_RE.match(text.strip())
     bad = argparse.ArgumentTypeError(f"expected YYYY-MM (or YYYY, or YYYY-MM-DD), got {text!r}")
@@ -145,16 +145,13 @@ def _period(text: str) -> Period:
 def _timezone_name(text: str) -> str:
     if text.strip().upper() in ("UTC", "Z", "GMT"):
         return "UTC"
-    try:
-        from zoneinfo import ZoneInfo
+    import zoneinfo
 
-        ZoneInfo(text.strip())
+    try:
+        zoneinfo.ZoneInfo(text.strip())
     except Exception:  # noqa: BLE001 — ZoneInfoNotFoundError, ValueError for odd strings
-        hint = ""
-        try:
-            import tzdata  # noqa: F401
-        except ImportError:
-            hint = " (if the name is right, install the time zone database: pip install tzdata)"
+        # Windows has no system time zone database: Python needs the tzdata package there.
+        hint = "" if zoneinfo.available_timezones() else " (no time zone database found: pip install tzdata)"
         raise argparse.ArgumentTypeError(
             f"unknown time zone {text!r}: use an IANA name such as America/New_York or Europe/London{hint}"
         ) from None
@@ -327,8 +324,7 @@ def _not_in_file(username: str, names: Counter, what: str) -> UserError:
 def _out_stem(args: argparse.Namespace, username: str) -> Path:
     if args.out:
         return expand_path(args.out)
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", username.lower()).strip("._") or "report"
-    return Path("reports") / safe
+    return Path("reports") / safe_file_stem(username.lower())
 
 
 def resolve_stockfish_arg(value: Optional[str]) -> Optional[str]:
@@ -406,20 +402,28 @@ def _load_raw_games(args: argparse.Namespace) -> list[Game]:
 
     Raises UserError(EXIT_NO_GAMES) with a specific explanation when there are none.
     """
+    if args.pgn or args.json_files:
+        from .api import normalize_username
+
+        try:  # "@Name" / a pasted profile URL; other sites' names are used as given
+            name = normalize_username(args.username)
+        except ValueError:
+            name = args.username.strip()
     if args.pgn:
         files = _expand_inputs(args.pgn, ".pgn")
         texts = [read_text(p) for p in files]
-        games = [g for text in texts for g in games_from_pgn(text, args.username)]
+        games = [g for text in texts for g in games_from_pgn(text, name)]
         if not games:
             raise _not_in_file(args.username, _players(texts), "PGN file(s)")
         return merge_games(games)  # repeats across files dropped, chronological
     if args.json_files:
-        files = _expand_inputs(args.json_files, ".json")
-        try:
-            raws = load_json_files(files)
-        except ValueError as exc:
-            raise UserError(f"not a JSON file: {exc}") from None
-        games = parse_games(raws, args.username)
+        raws = []
+        for path in _expand_inputs(args.json_files, ".json"):
+            try:
+                raws.extend(load_json_files([path]))
+            except ValueError as exc:
+                raise UserError(f"{path} is not valid JSON ({exc})") from None
+        games = parse_games(raws, name)
         if not games:
             raise _not_in_file(args.username, _raw_players(raws), "JSON file(s)")
         return games
@@ -531,7 +535,7 @@ def run_engine(games: list[Game], username: str, args: argparse.Namespace, cache
     if not path:
         return {}, "Engine analysis skipped: Stockfish not found (install it or pass --stockfish PATH)."
     cfg = EngineConfig(path=path, depth=args.depth, workers=args.workers)
-    eval_dir = expand_path(cache_dir) / username.lower() / "evals" if cache_dir else None
+    eval_dir = expand_path(cache_dir) / safe_file_stem(username.lower()) / "evals" if cache_dir else None
     t0 = time.time()
 
     def progress(done: int, total: int) -> None:
