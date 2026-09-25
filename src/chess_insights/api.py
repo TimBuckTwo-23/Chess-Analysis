@@ -48,6 +48,7 @@ class MonthResult:
     etag: Optional[str]
     last_modified: Optional[str]
     not_modified: bool = False  # True when the server answered 304 to a conditional request
+    missing: bool = False  # True on 404: chess.com sometimes 404s a listed month transiently
 
 
 def normalize_username(username: str) -> str:
@@ -144,6 +145,11 @@ class ChessComClient:
                 last_error = RateLimited(f"{url} -> HTTP {resp.status_code}")
                 self._sleep(self._retry_after(resp, attempt))
                 continue
+            if resp.status_code == 403:
+                raise ChessComError(
+                    f"{url} -> HTTP 403. chess.com's CDN rejects requests without a descriptive "
+                    "User-Agent (pass --contact you@example.com), and some networks block api.chess.com."
+                )
             raise ChessComError(f"{url} -> HTTP {resp.status_code}: {resp.text[:200]}")
 
         if isinstance(last_error, ChessComError):
@@ -175,7 +181,7 @@ class ChessComClient:
         return sorted(urls, key=parse_archive_url)
 
     def month(self, username: str, year: int, month: int, etag: Optional[str] = None) -> MonthResult:
-        """Games of one month. A 404 for a month is treated as an empty month."""
+        """Games of one month. A 404 yields an empty result with ``missing=True`` (retry later)."""
         path = f"player/{normalize_username(username)}/games/{year:04d}/{month:02d}"
         data, resp = self.request(path, etag=etag, not_found_ok=True)
         return MonthResult(
@@ -185,4 +191,5 @@ class ChessComClient:
             etag=resp.headers.get("ETag"),
             last_modified=resp.headers.get("Last-Modified"),
             not_modified=resp.status_code == 304,
+            missing=resp.status_code in (404, 410),
         )

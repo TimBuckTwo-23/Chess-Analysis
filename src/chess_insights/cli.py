@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("fetch", help="download/refresh your game archive from chess.com")
     f.add_argument("username")
     add_source_args(f)
+    f.add_argument("--refresh-all", action="store_true", help="re-check old months too (picks up new Game Review accuracies)")
 
     r = sub.add_parser("report", help="analyse your games and write an HTML/Markdown/JSON report")
     r.add_argument("username")
@@ -99,6 +100,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         args.cache_dir,
         since=parse_month(args.since) if args.since else None,
         until=parse_month(args.until) if args.until else None,
+        refresh_all=getattr(args, "refresh_all", False),
         progress=_say,
     )
     _say(

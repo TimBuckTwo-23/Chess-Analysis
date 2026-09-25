@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from .api import ChessComClient, normalize_username, parse_archive_url
+from .api import ChessComClient, PlayerNotFound, normalize_username, parse_archive_url
 
 DEFAULT_CACHE_DIR = Path(os.environ.get("CHESS_INSIGHTS_CACHE", "~/.chess-insights-cache")).expanduser()
 
@@ -47,6 +47,17 @@ def month_end(ym: YearMonth) -> datetime:
     y, m = ym
     nxt = (y + 1, 1) if m == 12 else (y, m + 1)
     return datetime(nxt[0], nxt[1], 1, tzinfo=timezone.utc)
+
+
+def _months_since(joined: Optional[int], now: datetime) -> list[YearMonth]:
+    if not joined:
+        return []
+    start = datetime.fromtimestamp(int(joined), tz=timezone.utc)
+    ym, last, out = (start.year, start.month), (now.year, now.month), []
+    while ym <= last:
+        out.append(ym)
+        ym = (ym[0] + 1, 1) if ym[1] == 12 else (ym[0], ym[1] + 1)
+    return out
 
 
 def _in_range(ym: YearMonth, since: Optional[YearMonth], until: Optional[YearMonth]) -> bool:
@@ -137,6 +148,7 @@ class SyncSummary:
     months_downloaded: int = 0
     months_cached: int = 0
     months_not_modified: int = 0
+    months_missing: int = 0
     games_total: int = 0
     requests: int = 0
 
@@ -149,36 +161,53 @@ def sync(
     since: Optional[YearMonth] = None,
     until: Optional[YearMonth] = None,
     snapshots: bool = True,
+    refresh_all: bool = False,
     progress: Optional[Callable[[str], None]] = None,
     now: Optional[Callable[[], datetime]] = None,
 ) -> SyncSummary:
-    """Bring the local cache up to date with chess.com. Safe to interrupt and re-run."""
+    """Bring the local cache up to date with chess.com. Safe to interrupt and re-run.
+
+    ``refresh_all`` re-validates complete months too (cheap conditional requests);
+    chess.com adds data to old games later, e.g. accuracies after a Game Review.
+    """
     now = now or (lambda: datetime.now(timezone.utc))
     say = progress or (lambda _msg: None)
     store = GameStore(cache_dir, username)
     summary = SyncSummary(username=store.username)
     start_requests = client.requests_made
 
+    profile = client.profile(username)  # also raises PlayerNotFound early for unknown users
     if snapshots:
-        store.save_snapshot("profile", client.profile(username))
+        store.save_snapshot("profile", profile)
         try:
             store.save_snapshot("stats", client.stats(username))
         except Exception as exc:  # stats are a nice-to-have
             say(f"warning: could not fetch stats: {exc}")
 
-    months = [parse_archive_url(u) for u in client.archives(username)]
+    try:
+        months = [parse_archive_url(u) for u in client.archives(username)]
+    except PlayerNotFound:
+        # chess.com occasionally 404s the archive list of a real player; walk the
+        # months from the join date instead (empty months return an empty list).
+        say("warning: archive list unavailable, scanning month by month from the join date")
+        months = _months_since(profile.get("joined"), now())
     months = [ym for ym in months if _in_range(ym, since, until)]
     summary.months_listed = len(months)
     say(f"{store.username}: {len(months)} monthly archives")
 
     for i, ym in enumerate(months, 1):
         cached = store.load_month(ym)
-        if cached and cached.get("complete"):
+        if cached and cached.get("complete") and not refresh_all:
             summary.months_cached += 1
             summary.games_total += len(cached.get("games", []))
             continue
         fetched_at = now()
         result = client.month(username, ym[0], ym[1], etag=(cached or {}).get("etag"))
+        if result.missing:
+            summary.months_missing += 1
+            summary.games_total += len((cached or {}).get("games", []))
+            say(f"  [{i}/{len(months)}] {month_key(ym)}: not available right now (HTTP 404), will retry next run")
+            continue
         complete = fetched_at >= month_end(ym) + timedelta(days=1)
         if result.not_modified and cached is not None:
             games = cached.get("games", [])

@@ -106,6 +106,12 @@ def test_unknown_player_raises_player_not_found():
         client.archives("nobody")
 
 
+def test_403_explains_user_agent_and_network():
+    client, _ = make_client({f"{BASE}": [FakeResponse(403)]})
+    with pytest.raises(api.ChessComError, match="User-Agent"):
+        client.profile("tester")
+
+
 def test_other_http_errors_raise():
     client, _ = make_client({f"{BASE}": [FakeResponse(403, {"message": "forbidden"})]})
     with pytest.raises(api.ChessComError):
@@ -122,7 +128,7 @@ def test_month_conditional_request_and_404_as_empty():
     assert res.not_modified and res.games == []
     assert client.session.calls[-1][1] == {"If-None-Match": '"abc"'}
     empty = client.month("tester", 2024, 4)
-    assert empty.games == [] and not empty.not_modified
+    assert empty.games == [] and not empty.not_modified and empty.missing
 
 
 def _routes_for_sync(month_payloads):
@@ -159,6 +165,41 @@ def test_sync_downloads_then_skips_complete_months(tmp_path):
     assert f"{BASE}/games/2024/01" not in urls
     assert client2.session.calls[-1] == (f"{BASE}/games/2024/02", {"If-None-Match": '"20242"'})
     assert (s2.months_cached, s2.months_downloaded) == (1, 1)
+
+
+def test_sync_does_not_cache_a_404_month(tmp_path):
+    routes = _routes_for_sync({(2024, 1): [{"uuid": "a"}]})
+    routes[f"{BASE}/games/2024/01"] = [FakeResponse(404, {"message": "An internal error has occurred"})]
+    client, _ = make_client(routes)
+    s = fetch.sync("tester", client, tmp_path, snapshots=False)
+    assert s.months_missing == 1 and fetch.GameStore(tmp_path, "tester").months() == []
+
+
+def test_sync_falls_back_to_join_date_when_archive_list_404s(tmp_path):
+    joined = int(datetime(2024, 1, 10, tzinfo=timezone.utc).timestamp())
+    routes = {
+        f"{BASE}": [FakeResponse(200, {"username": "tester", "joined": joined})],
+        f"{BASE}/games/2024/01": [FakeResponse(200, {"games": [{"uuid": "a"}]})],
+        f"{BASE}/games/2024/02": [FakeResponse(200, {"games": []})],
+        f"{BASE}/games/2024/03": [FakeResponse(200, {"games": [{"uuid": "b"}]})],
+    }
+    client, _ = make_client(routes)
+    now = lambda: datetime(2024, 3, 5, tzinfo=timezone.utc)  # noqa: E731
+    s = fetch.sync("tester", client, tmp_path, snapshots=False, now=now)
+    assert (s.months_listed, s.games_total) == (3, 2)
+
+
+def test_refresh_all_revalidates_complete_months(tmp_path):
+    payloads = {(2024, 1): [{"uuid": "a"}]}
+    now = lambda: datetime(2024, 6, 1, tzinfo=timezone.utc)  # noqa: E731
+    client, _ = make_client(_routes_for_sync(payloads))
+    fetch.sync("tester", client, tmp_path, now=now, snapshots=False)
+    routes = _routes_for_sync(payloads)
+    routes[f"{BASE}/games/2024/01"] = [FakeResponse(200, {"games": [{"uuid": "a", "accuracies": {"white": 90}}]})]
+    client2, _ = make_client(routes)
+    s = fetch.sync("tester", client2, tmp_path, now=now, snapshots=False, refresh_all=True)
+    assert s.months_downloaded == 1
+    assert fetch.load_games("tester", tmp_path)[0]["accuracies"] == {"white": 90}
 
 
 def test_sync_respects_since_until(tmp_path):

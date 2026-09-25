@@ -120,8 +120,14 @@ class Game:
     # moves
     initial_fen: Optional[str]  # None for the standard start position
     moves_san: list[str]  # every ply, SAN
-    clocks: list[Optional[float]]  # mover's remaining seconds AFTER each ply; same length as moves_san
+    clocks: list[Optional[float]]  # mover's remaining seconds AFTER each ply (increment included); all None for daily games
     pgn: str
+
+    # chess.com reports ratings AFTER the game. parse.parse_games reconstructs the
+    # pre-game ratings (previous rated game in the same pool) so that expected scores
+    # aren't biased by the game's own result. None when unknown (first game in a pool).
+    my_rating_before: Optional[int] = None
+    opp_rating_before: Optional[int] = None
 
     # ---- derived helpers -------------------------------------------------
     @property
@@ -139,7 +145,12 @@ class Game:
 
     @property
     def rating_diff(self) -> Optional[int]:
-        """Opponent rating minus my rating (positive = opponent stronger)."""
+        """Opponent rating minus my rating before the game (positive = opponent stronger).
+
+        Uses the reconstructed pre-game ratings when available, else the post-game ones.
+        """
+        if self.my_rating_before is not None and self.opp_rating_before is not None:
+            return self.opp_rating_before - self.my_rating_before
         if self.my_rating is None or self.opp_rating is None:
             return None
         return self.opp_rating - self.my_rating

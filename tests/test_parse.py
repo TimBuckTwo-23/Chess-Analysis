@@ -75,6 +75,28 @@ def test_daily_game(games):
     assert g.moves_san[-1] == "Qxf7#"
 
 
+def test_daily_clocks_are_dropped(games):
+    g = by_url(games, "605000000005")
+    assert g.clocks == [None] * g.plies  # archived daily [%clk] = time spent / 10, not remaining time
+
+
+def test_pregame_ratings_are_reconstructed():
+    from chess_insights.parse import fill_pregame_ratings
+    from factories import make_game
+
+    g1 = make_game(my_rating=1500, opp_rating=1480)
+    g2 = make_game(my_rating=1508, opp_rating=1600)  # won +8 -> before: me 1500, opp 1608
+    g3 = make_game(my_rating=1400, opp_rating=1300)  # -108 swing: keep opponent's post-game rating
+    g4 = make_game(my_rating=1400, opp_rating=1450, rated=False)
+    g5 = make_game(my_rating=1300, opp_rating=1300, time_class="rapid")  # separate pool
+    fill_pregame_ratings([g1, g2, g3, g4, g5])
+    assert (g1.my_rating_before, g1.opp_rating_before, g1.rating_diff) == (None, None, -20)
+    assert (g2.my_rating_before, g2.opp_rating_before, g2.rating_diff) == (1500, 1608, 108)
+    assert (g3.my_rating_before, g3.opp_rating_before) == (1508, 1300)
+    assert (g4.my_rating_before, g4.opp_rating_before) == (1400, 1450)
+    assert g5.my_rating_before is None
+
+
 def test_chess960_keeps_initial_fen(games):
     g = by_url(games, "105000000006")
     assert g.rules == "chess960"

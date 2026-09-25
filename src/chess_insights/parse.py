@@ -60,6 +60,9 @@ _PHRASE_FIXES = {
     "Four Pawns": "Four Pawns",
 }
 _FAMILY_ENDINGS = {"Defense", "Game", "Opening", "Gambit", "Attack", "System", "Countergambit"}
+# chess.com files some lines of one opening under a separate name; group them for the player.
+_FAMILY_ALIASES = {"Giuoco Piano Game": "Italian Game"}
+_UNKNOWN_OPENINGS = {"Undefined", "Unknown"}
 
 _TERMINATION_BY_CODE = {
     "checkmated": "checkmate",
@@ -188,7 +191,7 @@ def opening_from_eco_url(url: Optional[str]) -> tuple[Optional[str], Optional[st
         if not tok or _MOVE_SEQ_RE.match(tok):
             break
         words.append(_WORD_FIXES.get(tok, tok))
-    if not words:
+    if not words or words[0] in _UNKNOWN_OPENINGS:
         return None, None
     name = " ".join(words)
     for bad, good in _PHRASE_FIXES.items():
@@ -199,7 +202,7 @@ def opening_from_eco_url(url: Optional[str]) -> tuple[Optional[str], Optional[st
     family = " ".join(family_words)
     rest = " ".join(parts[len(family_words) :])
     opening = f"{family}: {rest}" if rest else family
-    return opening, family
+    return opening, _FAMILY_ALIASES.get(family, family)
 
 
 def normalize_termination(my_code: str, opp_code: str) -> str:
@@ -240,6 +243,35 @@ def _to_float(x: Any) -> Optional[float]:
         return None
 
 
+def _same_position(fen_a: str, fen_b: str) -> bool:
+    """Compare placement/side/castling only (chess.com FENs have 4 or 6 fields)."""
+    return fen_a.split()[:3] == fen_b.split()[:3]
+
+
+def fill_pregame_ratings(games: list[Game], max_symmetric_change: int = 40) -> None:
+    """Estimate pre-game ratings in place (``games`` sorted by end time).
+
+    chess.com reports each player's rating *after* the game. The player's pre-game
+    rating is their post-game rating from the previous rated game in the same pool
+    (rules + time class). The opponent's is estimated by assuming the rating change
+    was symmetric, which holds for established ratings; for large (provisional)
+    swings the opponent's post-game rating is kept.
+    """
+    last: dict[tuple[str, str], int] = {}
+    for g in games:
+        if not g.rated:
+            g.my_rating_before, g.opp_rating_before = g.my_rating, g.opp_rating
+            continue
+        pool = (g.rules, g.time_class)
+        prev = last.get(pool)
+        if prev is not None and g.my_rating is not None and g.opp_rating is not None:
+            change = g.my_rating - prev
+            g.my_rating_before = prev
+            g.opp_rating_before = g.opp_rating + change if abs(change) <= max_symmetric_change else g.opp_rating
+        if g.my_rating is not None:
+            last[pool] = g.my_rating
+
+
 def _header_datetime(date: Optional[str], time_: Optional[str]) -> Optional[datetime]:
     if not date or "?" in date:
         return None
@@ -272,6 +304,9 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     time_class = raw.get("time_class") or time_class_for(tc)
     if time_class == "daily":
         inc = 0
+        # Archived daily games store "time spent / 10" in [%clk], not the remaining
+        # time, so the values mean something different; drop them.
+        clocks = [None] * len(moves)
 
     end_ts = raw.get("end_time")
     if end_ts is not None:
@@ -292,8 +327,10 @@ def parse_game(raw: dict[str, Any], username: str) -> Optional[Game]:
     accuracies = raw.get("accuracies") or {}
     other = "black" if color == "white" else "white"
 
-    initial = raw.get("initial_setup") or (headers.get("FEN") if headers.get("SetUp") == "1" else None)
-    if initial and initial.strip() == STANDARD_START_FEN:
+    # Prefer the PGN FEN: for chess960 it carries the real castling files, while
+    # initial_setup uses KQkq. Standard games have initial_setup "" or the start FEN.
+    initial = (headers.get("FEN") if headers.get("SetUp") == "1" else None) or raw.get("initial_setup") or None
+    if initial and _same_position(initial, STANDARD_START_FEN):
         initial = None
 
     url = raw.get("url") or headers.get("Link") or ""
@@ -343,6 +380,7 @@ def parse_games(raws: Iterable[dict[str, Any]], username: str) -> list[Game]:
         seen.add(g.game_id)
         out.append(g)
     out.sort(key=lambda g: g.end_time)
+    fill_pregame_ratings(out)
     return out
 
 
@@ -408,4 +446,5 @@ def parse_games_from_pgns(pgns: Iterable[str], username: str) -> list[Game]:
         seen.add(g.game_id)
         out.append(g)
     out.sort(key=lambda g: g.end_time)
+    fill_pregame_ratings(out)
     return out
