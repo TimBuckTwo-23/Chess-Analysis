@@ -405,6 +405,7 @@ class FamilyTest:
     p_adjusted: float = 1.0  # weighted BH over every family tested
     kind: Optional[InsightKind] = None  # the claim it supports, if any (family_tests fills it in)
     retest_gap: Optional[float] = None  # the gap against the rest without the colour's other claimed families
+    typical: Optional[float] = None  # the colour's typical family: median score-vs-expected (3+ families)
 
     @property
     def effect(self) -> float:
@@ -437,6 +438,18 @@ def family_tests(
             drop = min(mine, key=lambda t: abs(t.group.summary.test.mean))
             out.remove(drop)
     adjusted = weighted_bh_adjust([t.test.p_value for t in out], [t.group.summary.n_rated for t in out])
+    for color in ("white", "black"):
+        own = sorted(
+            f.summary.test.mean
+            for f in families
+            if f.color == color and f.label != UNNAMED and f.summary.n_rated >= th.min_family_games
+        )
+        if len(own) >= 3:
+            mid = len(own) // 2
+            typical = own[mid] if len(own) % 2 else (own[mid - 1] + own[mid]) / 2.0
+            for t in out:
+                if t.group.color == color:
+                    t.typical = typical
     for t, p in zip(out, adjusted, strict=True):
         t.p_adjusted = p
         t.kind = _claim_kind(t, th)
@@ -451,6 +464,7 @@ def family_tests(
                 left_out = {id(g) for c in accepted for g in c.group.games} | {id(g) for g in t.group.games}
                 rest = summarize([g for g in by_colour[color] if id(g) not in left_out])
                 retest = FamilyTest(t.group, rest, difference_test(t.group.summary.test, rest.test), t.prior_n)
+                retest.typical = t.typical
                 factor = t.p_adjusted / t.test.p_value if t.test.p_value > 0 else 1.0
                 retest.p_adjusted = min(1.0, retest.test.p_value * factor)
                 t.retest_gap = retest.test.mean
@@ -480,8 +494,10 @@ def _claim_kind(t: FamilyTest, th: Thresholds) -> Optional[InsightKind]:
     )
     if not significant or abs(t.effect) < th.min_effect:
         return None
-    # the family must itself be off its rating in the same direction, not merely differ from the rest
-    if own * t.test.mean <= 0 or abs(own) < th.min_effect / 2:
+    # With three or more families, the family must also stand out from the colour's *typical* family
+    # (the median), not merely from the average of the rest: one real outlier (a weak Caro-Kann) pulls
+    # that average and would otherwise make an ordinary family (the French) look like a strength.
+    if t.typical is not None and ((own - t.typical) * t.test.mean <= 0 or abs(own - t.typical) < th.min_effect / 2):
         return None
     return "weakness" if t.test.mean < 0 else "strength"
 

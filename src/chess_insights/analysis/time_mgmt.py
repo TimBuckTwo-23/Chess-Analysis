@@ -416,6 +416,41 @@ def trouble_beyond_flags(cs: ClassStats, p_adj: float, th: Thresholds) -> tuple[
     return significant and test.mean >= th.min_trouble_gap, test
 
 
+def merge_across_classes(insights: list[Insight], order: Sequence[str]) -> list[Insight]:
+    """One finding for the same clock habit in several time classes ("... in blitz and rapid").
+
+    Each per-class claim passed on its own; the merged one keeps the lowest confidence, the highest
+    severity and the study plan and examples of the class with the highest priority, and its id lists
+    the classes (``time.weakness.lost-on-time-blitz-rapid``). Otherwise one habit, found in three time
+    controls, would take three places in the report's top lists.
+    """
+    groups: dict[str, list[Insight]] = {}
+    for ins in insights:
+        base = ins.id.rsplit("-", 1)[0]
+        groups.setdefault(base, []).append(ins)
+    out: list[Insight] = []
+    for base, group in groups.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        group.sort(key=lambda i: order.index(i.id.rsplit("-", 1)[1]) if i.id.rsplit("-", 1)[1] in order else 99)
+        classes = [i.id.rsplit("-", 1)[1] for i in group]
+        main = max(group, key=lambda i: i.priority)
+        names = ", ".join(classes[:-1]) + f" and {classes[-1]}"
+        out.append(
+            dataclasses.replace(
+                main,
+                id=f"{base}-{'-'.join(classes)}",
+                title=main.title.replace(f"in {main.id.rsplit('-', 1)[1]}", f"in {names}"),
+                detail=" ".join(i.detail for i in group),
+                severity=max(i.severity for i in group),
+                confidence=min(i.confidence for i in group),
+                evidence={"time_classes": classes, **{c: i.evidence for c, i in zip(classes, group, strict=True)}},
+            )
+        )
+    return out
+
+
 def flag_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
     if cs.losses < th.min_losses:
         return None
@@ -793,6 +828,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             clock_strength_insight(cs, p_flags[i], p_balance[i], th),
         )
         insights.extend(ins for ins in found if ins)
+    insights = merge_across_classes(insights, TIME_CLASSES)
 
     main = classes[0]
     profile = think_profile(main.clocks)

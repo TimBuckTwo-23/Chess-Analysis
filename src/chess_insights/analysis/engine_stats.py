@@ -69,7 +69,7 @@ class Thresholds:
     pressure_fraction: float = 0.15  # "short of time": clock before the move below this share of the start
     min_pressure_moves: int = 30  # your moves while short of time, per time class
     pressure_ratio: float = 2.0  # blunder rate short of time vs otherwise
-    pressure_peer_ratio: float = 1.3  # ... and your short-of-time blunder rate vs your opponents'
+    pressure_peer_ratio: float = 1.3  # ... and vs your opponents, relative to the same with time left (per phase)
     win_threshold: float = 85.0  # win % that counts as a winning position (your point of view)
     loss_threshold: float = 15.0  # win % that counts as a lost position
     min_conversion_games: int = 10  # games that reached a winning (or lost) position, for each side
@@ -277,9 +277,14 @@ def _recent(r: Analysed) -> float:
 
 
 def _clock_before(g: Game, ply: int) -> Optional[float]:
-    """The mover's clock before ``ply``: their previous clock, or the starting clock for their first move."""
+    """The mover's clock before ``ply``: their previous clock, or the starting clock for their first move.
+
+    None when the game has no clock for the move (a PGN without ``%clk``): the starting clock only counts
+    for a first move whose clock was recorded.
+    """
     if ply < 2:
-        return float(g.base_seconds) if g.base_seconds else None
+        recorded = ply < len(g.clocks) and g.clocks[ply] is not None
+        return float(g.base_seconds) if g.base_seconds and recorded else None
     return g.clocks[ply - 2] if ply - 2 < len(g.clocks) else None
 
 
@@ -606,29 +611,100 @@ def _phase_insight(
 
 
 # --------------------------------------------------------------------------- time pressure
+PRESSURE_KEYS = ("me_low", "me_ok", "opp_low", "opp_ok")
+Cells = dict[tuple[str, str], Tally]  # (PRESSURE_KEYS entry, phase) -> moves
+
+
+def _pressure_excess(totals: dict[tuple[str, str], tuple[int, int]], phases: Sequence[str] = PHASES) -> Optional[float]:
+    """How much more time pressure raises your blunder rate than your opponents', comparing like with like, phase
+    by phase: 1 = no more than theirs.
+
+    ``totals`` maps (key, phase) to (blunders, moves). In each phase with moves in all four cells the ratio of
+    ratios (your short-of-time rate / theirs) / (your rate with time left / theirs) is taken, and the phases are
+    pooled on the log scale with inverse-variance weights (Woolf; half an event is added to each cell of a
+    phase with an empty cell). Low-clock moves are mostly endgame moves, so an unstratified comparison would
+    blame the clock for an endgame weakness. None if no phase can be compared.
+    """
+    weighted = total_weight = 0.0
+    for ph in phases:
+        cells = [totals.get((k, ph), (0, 0)) for k in PRESSURE_KEYS]
+        if min(m for _, m in cells) <= 0:
+            continue
+        pad = 0.5 if min(x for x, _ in cells) == 0 else 0.0
+        (a, na), (c, nc), (b, nb), (d, nd) = ((x + pad, m) for x, m in cells)
+        log_ratio = math.log(a / na) - math.log(b / nb) - math.log(c / nc) + math.log(d / nd)
+        weight = 1.0 / (1.0 / a + 1.0 / b + 1.0 / c + 1.0 / d)
+        weighted += weight * log_ratio
+        total_weight += weight
+    return math.exp(weighted / total_weight) if total_weight > 0 else None
+
+
+def pressure_excess_test(per_game: Sequence[Cells]) -> tuple[Optional[float], MeanTest]:
+    """(:func:`_pressure_excess`, one-sided test that it exceeds 1) with GAMES as the unit.
+
+    The standard error of log(excess) is the delete-one-game jackknife, so it carries the noise of every
+    ingredient (your short-of-time blunders, your opponents' rates, your ratio to them with time left) and
+    the clustering of errors within games. ``n`` is the number of games.
+    """
+    totals: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+    for cells in per_game:
+        for key, t in cells.items():
+            totals[key][0] += t.blunders
+            totals[key][1] += t.moves
+    n = len(per_game)
+    full = _pressure_excess({k: (x, m) for k, (x, m) in totals.items()})
+    if full is None:
+        return None, MeanTest(n, 0.0, float("inf"), 0.0, 1.0)
+    phases = [ph for ph in PHASES if min(totals.get((k, ph), [0, 0])[1] for k in PRESSURE_KEYS) > 0]
+    replicates = []
+    for cells in per_game:
+        loo = {
+            k: (x - (cells[k].blunders if k in cells else 0), m - (cells[k].moves if k in cells else 0))
+            for k, (x, m) in totals.items()
+        }
+        value = _pressure_excess(loo, phases)
+        if value is not None:
+            replicates.append(math.log(value))
+    estimate = math.log(full)
+    if len(replicates) < 2:
+        return full, MeanTest(n, estimate, float("inf"), 0.0, 1.0)
+    centre = sum(replicates) / len(replicates)
+    k = len(replicates)
+    se = math.sqrt((k - 1) / k * sum((x - centre) ** 2 for x in replicates))
+    if se <= 0.0:
+        return full, MeanTest(n, estimate, float("inf"), 0.0, 1.0)
+    z = estimate / se
+    return full, MeanTest(n, estimate, se, z, clamp(1.0 - normal_cdf(z)))
+
+
 def pressure_section(
     records: Sequence[Analysed], th: Thresholds
 ) -> tuple[Optional[Table], list[Insight], dict[str, Any]]:
-    """Your blunder rate on moves made while short of time vs other moves, per time class (live games)."""
-    keys = ("me_low", "me_ok", "opp_low", "opp_ok")
+    """Your blunder rate on moves made while short of time vs other moves, per time class (live games with clocks)."""
+    keys = PRESSURE_KEYS
     by_game: dict[str, list[dict[str, Tally]]] = defaultdict(list)  # time class -> one {key: Tally} per game
+    by_phase: dict[str, list[Cells]] = defaultdict(list)  # the same moves split by phase, one Cells per game
     low_games: dict[str, list[Analysed]] = defaultdict(list)
     for r in records:
         g = r.game
-        if g.time_class == "daily" or not g.base_seconds:
+        if g.time_class == "daily" or not g.base_seconds or not any(c is not None for c in g.clocks or ()):
             continue
         limit = th.pressure_fraction * float(g.base_seconds)
         counts = {k: Tally() for k in keys}
+        cells: Cells = defaultdict(Tally)
         low_blunder = False
         for p in r.plies:
             before = _clock_before(g, p.ply)
             if before is None:
                 continue
             low = before < limit
-            counts[("me" if p.is_user else "opp") + ("_low" if low else "_ok")].add(p)
+            key = ("me" if p.is_user else "opp") + ("_low" if low else "_ok")
+            counts[key].add(p)
+            cells[(key, p.phase)].add(p)
             low_blunder |= low and p.is_user and p.judgement == "blunder"
         if any(t.moves for t in counts.values()):
             by_game[g.time_class].append(counts)
+            by_phase[g.time_class].append(cells)
         if low_blunder:
             low_games[g.time_class].append(r)
     if not by_game:
@@ -674,8 +750,11 @@ def pressure_section(
     own = {tc: clustered_rate_test(column(tc, "me_low"), column(tc, "me_ok"), blunders) for tc in judged}
     benched = [tc for tc in judged if groups[tc]["opp_low"].moves >= th.min_pressure_moves]
     bench = {tc: clustered_rate_test(column(tc, "me_low"), column(tc, "opp_low"), blunders) for tc in benched}
+    # ... and that jump must be larger than your opponents' in the same phases of the game (see _pressure_excess)
+    excess_tests = {tc: pressure_excess_test(by_phase[tc]) for tc in benched}
     own_adj = dict(zip(judged, bh_adjust([own[tc].p_value for tc in judged])))
     bench_adj = dict(zip(benched, bh_adjust([bench[tc].p_value for tc in benched])))
+    excess_adj = dict(zip(benched, bh_adjust([excess_tests[tc][1].p_value for tc in benched])))
     insights = []
     for tc in judged:
         t = groups[tc]
@@ -691,13 +770,15 @@ def pressure_section(
         if tc in bench:
             bench_significant, bench_conf = _claim(bench[tc], th, bench_adj[tc])
             stats[tc].update(benchmark_p_value=bench[tc].p_value, benchmark_p_adjusted=bench_adj[tc])
-            # Short of time you must be worse off against your opponents than you are with time on the clock:
-            # blundering twice as often as them in every situation is the blunder-rate finding, not a clock one.
-            low_ratio = _rate_ratio(t["me_low"].blunders, t["me_low"].moves, t["opp_low"].blunders, t["opp_low"].moves)
-            ok_ratio = _rate_ratio(t["me_ok"].blunders, t["me_ok"].moves, t["opp_ok"].blunders, t["opp_ok"].moves)
-            excess = _stands_out(low_ratio, ok_ratio, th.pressure_peer_ratio)
-            worse_than_peers = bench_significant and (low or 0) > (opp_low or 0) and excess > 0
-            confidence = min(confidence, bench_conf)
+            # Short of time you must be worse off against your opponents than you are with time on the clock, in
+            # the same phase: blundering twice as often as them in every situation is the blunder-rate finding,
+            # and twice as often in the endgame (where most short-of-time moves are) is the endgame one.
+            ratio, excess_test = excess_tests[tc]
+            excess_significant, excess_conf = _claim(excess_test, th, excess_adj[tc])
+            stats[tc].update(phase_adjusted_excess=ratio, excess_p_adjusted=excess_adj[tc])
+            excess = ratio if ratio is not None and ratio >= th.pressure_peer_ratio else 0.0
+            worse_than_peers = bench_significant and excess_significant and (low or 0) > (opp_low or 0) and excess > 0
+            confidence = min(confidence, bench_conf, excess_conf)
         detail = (
             f"In {tc}, with less than {share} of your starting clock left you blundered {_f1(low)} times per 100 "
             f"moves ({t['me_low'].blunders} in {t['me_low'].moves} moves), against {_f1(ok)} per 100 moves with "
@@ -714,6 +795,7 @@ def pressure_section(
             "time_class": tc, "moves_low": t["me_low"].moves, "blunders_low": t["me_low"].blunders,
             "per100_low": low, "per100_ok": ok, "opp_moves_low": t["opp_low"].moves, "opp_per100_low": opp_low,
             "opp_per100_ok": opp_ok, "p_adjusted": own_adj[tc],
+            "phase_adjusted_excess": excess_tests[tc][0] if tc in excess_tests else None,
         }
         examples = _urls(low_games[tc], lambda r: (r.game.outcome != "loss", _recent(r)))
         if worse_than_peers:
@@ -998,7 +1080,7 @@ def tactics_section(
         formats=["text", "int", "float2", "int", "float2"],
         note="Missed tactical shot: the engine's best move was a capture, check or promotion, you played something "
         "else and lost at least 15% of your winning chances. Left material hanging: a mistake or blunder the "
-        "opponent could punish with a capture.",
+        "opponent could punish with a capture that wins material (recapturing in a trade doesn't count).",
     )
     stats: dict[str, Any] = {
         "missed_tactics": me.missed_tactics, "opp_missed_tactics": opp.missed_tactics,
@@ -1207,6 +1289,46 @@ def anatomy_section(
 
 
 # --------------------------------------------------------------------------- opening outcome
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction of the regularised incomplete beta function (Lentz's method)."""
+    tiny = 1e-300
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        for numerator in (m * (b - m) * x / ((a + 2 * m - 1) * (a + 2 * m)),
+                          -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 2 * m + 1))):
+            d = 1.0 + numerator * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + numerator / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-12:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularised incomplete beta function I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_test(test: MeanTest) -> MeanTest:
+    """``test`` (a one-sample :func:`stats.mean_test`) with its two-sided p-value from Student's t (n - 1 degrees
+    of freedom) instead of the normal distribution, which is too optimistic for a handful of games."""
+    if test.n < 2 or not math.isfinite(test.se):
+        return dataclasses.replace(test, p_value=1.0)
+    df = test.n - 1
+    return dataclasses.replace(test, p_value=clamp(_betainc(df / 2.0, 0.5, df / (df + test.z * test.z))))
+
+
 def opening_eval(r: Analysed) -> Optional[float]:
     """Eval (cp, your side) gained from the start position to after ply OPENING_PLY; None if the game ended earlier.
 
@@ -1244,7 +1366,7 @@ def opening_section(
         family, colour = key
         items = groups[key]
         evals = [cp for _, cp in items]
-        tests[key] = mean_test(evals, min_sd=OPENING_EVAL_SD)
+        tests[key] = student_t_test(mean_test(evals, min_sd=OPENING_EVAL_SD))  # as few as 8 games: t, not z
         avg = sum(evals) / len(evals)
         worse = sum(1 for cp in evals if cp <= -100)
         score = sum(r.game.score for r, _ in items) / len(items)

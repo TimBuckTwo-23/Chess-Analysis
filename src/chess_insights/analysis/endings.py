@@ -477,7 +477,7 @@ def length_insights(
         if abs(test.mean) < th.min_length_effect or not significant or test.mean * s.test.mean <= 0:
             continue
         direction = "below" if test.mean < 0 else "above"
-        what, study = _LENGTH_TEXT[(key, direction)]
+        _, study = _LENGTH_TEXT[(key, direction)]
         group = groups[key]
         if direction == "below":
             losses = [g for g in group if g.outcome == "loss"]
@@ -495,7 +495,7 @@ def length_insights(
                 id=f"{KEY}.observation.length-{key.replace('_', '-')}",
                 kind="observation",
                 category="endings",
-                title=f"Your {what} ({labels[key]} moves) score {direction} your games of other lengths",
+                title=f"Your games of {labels[key]} moves score {direction} your games of other lengths",
                 detail=(
                     f"In games lasting {labels[key]} moves you scored {pct(s.rated_score)} in {s.n_rated} games where "
                     f"{pct(s.expected)} was expected ({fmt_points(s.test.mean)} points per game); in your games of "

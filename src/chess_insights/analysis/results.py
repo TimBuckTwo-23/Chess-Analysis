@@ -402,7 +402,8 @@ def colour_insight(
     if explained:
         kind = "observation"
         names = " and the ".join(fam for _, fam in explained_by)
-        title = f"The {names} accounts for most of your gap between White and Black"
+        verb = "accounts" if len(explained_by) == 1 else "account"
+        title = f"The {names} {verb} for most of your gap between White and Black"
     elif kind == "weakness":
         title = f"You score noticeably worse with the {weaker} pieces"
     else:
@@ -419,7 +420,10 @@ def colour_insight(
         f"{'wider' if excess > 0 else 'narrower'} than usual (about {abs(score_to_elo_diff(abs(excess))):.0f} Elo)."
     )
     if explained:
-        detail += " Without your games in that opening, the gap is within the normal range (see Openings)."
+        detail += (
+            f" Without your games in {'that opening' if len(explained_by) == 1 else 'those openings'}, the gap is "
+            "within the normal range (see Openings)."
+        )
     return (
         Insight(
             id=f"{KEY}.{kind}.colour-{weaker}",

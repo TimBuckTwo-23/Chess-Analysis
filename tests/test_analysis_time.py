@@ -245,6 +245,40 @@ def test_flag_counting_and_lost_on_time_weakness():
     assert mr.stats["by_time_class"]["blitz"]["lost_on_time"] == 12
 
 
+def flag_player(base: int = 300, extra_trouble: int = 0, **kw) -> list:
+    """15 losses on time, 10 other losses, 15 wins; ``extra_trouble`` of the wins with a low clock too."""
+    lost_on_time = [
+        timed_game([5] * 12, [5] * 12, outcome="loss", termination="timeout", my_result_code="timeout", base=base, **kw)
+        for _ in range(15)
+    ]
+    others = [timed_game([5] * 12, [5] * 12, outcome="loss", base=base, **kw) for _ in range(10)]
+    low = [timed_game([5] * 11 + [base - 60], [5] * 12, outcome="win", base=base, **kw) for _ in range(extra_trouble)]
+    wins = [timed_game([5] * 12, [5] * 12, outcome="win", base=base, **kw) for _ in range(15 - extra_trouble)]
+    return lost_on_time + others + low + wins
+
+
+def test_time_trouble_that_is_only_the_flags_is_not_a_second_finding():
+    # Every flag counts as time trouble: 15 flags in 40 games make "time trouble" significant too, but
+    # without the games lost on time there is none. One finding (losing on time), not two.
+    mr = run(flag_player())
+    assert insight(mr, "time.weakness.lost-on-time-blitz") is not None
+    assert row(mr, "Time trouble", "Blitz")["You in time trouble"] == pytest.approx(15 / 40)
+    assert insight(mr, "time.weakness.time-trouble-blitz") is None
+    assert mr.stats["trouble_gap_without_flag_losses"]["blitz"] == pytest.approx(0.0)
+    # low clocks in games that did not end on the clock as well: both findings
+    both = run(flag_player(extra_trouble=12))
+    assert insight(both, "time.weakness.lost-on-time-blitz") and insight(both, "time.weakness.time-trouble-blitz")
+
+
+def test_same_clock_habit_in_several_time_controls_is_one_finding():
+    rapid = flag_player(base=600, time_class="rapid")
+    mr = run(flag_player() + rapid)
+    flags = [i for i in mr.insights if "lost-on-time" in i.id]
+    assert [i.id for i in flags] == ["time.weakness.lost-on-time-blitz-rapid"]
+    assert flags[0].title == "You lose on time too often in blitz and rapid"
+    assert flags[0].evidence["time_classes"] == ["blitz", "rapid"]
+
+
 def test_flags_below_minimum_losses_are_not_judged():
     games = [
         timed_game([5] * 12, [5] * 12, outcome="loss", termination="timeout", my_result_code="timeout")

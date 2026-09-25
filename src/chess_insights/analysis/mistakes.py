@@ -199,10 +199,10 @@ def binomial_sf(k: int, n: int, p: float) -> float:
         return 0.0
     if p >= 1.0:
         return 1.0
-    log_p, log_q = math.log(p), math.log1p(-p)
+    log_p, log_q, log_n = math.log(p), math.log1p(-p), math.lgamma(n + 1)
     total = 0.0
     for j in range(k, n + 1):
-        total += math.exp(math.lgamma(n + 1) - math.lgamma(j + 1) - math.lgamma(n - j + 1) + j * log_p + (n - j) * log_q)
+        total += math.exp(log_n - math.lgamma(j + 1) - math.lgamma(n - j + 1) + j * log_p + (n - j) * log_q)
     return clamp(total)
 
 

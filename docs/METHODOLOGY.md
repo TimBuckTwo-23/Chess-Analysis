@@ -31,10 +31,20 @@ noise on the rating difference gives about 0.94. The opponent-strength section
 shows the bucket numbers against `a = 0.75`, but only makes a claim that holds for
 *every* `a` in that range (see section 2).
 
-**Colour.** At equal ratings White scores about 52% and Black about 48%. Groups
-that are all one colour (an opening as Black) are judged against that
-colour-adjusted expectation, `E ± 0.02`; otherwise every White opening would drift
-toward "strength" and every Black one toward "weakness".
+**Rating lag.** A rating trails your current strength: an improving player scores
+above expectation in almost every game, a declining one below. That is one fact
+about the rating, not a strength or weakness of any particular kind of game. So a
+claim about a *subset* of your games (an opening, a time of day, opponents of some
+strength, a time control) always compares that subset with your *other* games; the
+rating's expectation alone is only used for the tables and charts.
+
+**Colour.** At equal ratings White scores about 52% and Black about 48% in club
+blitz and rapid, a White-minus-Black gap of about 0.04 points per game. The exact
+edge is uncertain (about 0.03 in bullet and at lower ratings, 0.05 or more in
+slower games; 0.06–0.08 for players rated 2000+), so a colour claim must hold for
+every edge from 0.03 to 0.05: "worse with Black" against 0.05, "worse with White"
+against 0.03. Openings are compared only with your other openings *of the same
+colour*, so neither the edge nor a colour-wide gap turns into opening claims.
 
 ## 2. Separating signal from noise
 
@@ -48,7 +58,9 @@ of an average `score − E` is roughly:
 | 100 | 0.047 | 33 |
 | 400 | 0.023 | 16 |
 
-So a 20-game opening needs a ~150 Elo effect before anything can be said.
+So a 20-game opening needs a ~150 Elo effect before anything can be said, and a
+comparison of two groups (an opening against your other openings) is noisier than
+either group alone.
 
 ### The claim rule
 
@@ -56,23 +68,32 @@ Something becomes a **strength or weakness** only if all three hold; otherwise i
 is at most an *observation* (shown in its section, never in the top lists or the
 study plan):
 
-1. **Enough games** (module minimums, e.g. 8 rated games in an opening family as one
-   colour, 20–25 in a split such as "right after a loss").
-2. **A significant test after multiple-testing adjustment.** z-tests of the mean
-   `score − E`, difference tests between two groups, paired tests against your
-   opponents in the same games, two-proportion tests for rates. When a test is
-   repeated over a family of groups (every opening, every time class, every block
-   of the day) the p-values are Benjamini–Hochberg adjusted, and the adjusted p must
-   be at or below the family's α (next section).
+1. **Enough games** in *both* groups compared (module minimums, e.g. 8 rated games
+   in an opening family as one colour, 20–25 in a split such as "right after a
+   loss").
+2. **A significant test after multiple-testing adjustment.** Difference tests of the
+   mean `score − E` between a group and your other games, paired tests against your
+   opponents in the same games, (differences of) two-proportion tests for rates.
+   When a test is repeated over a family of groups (every opening, every time class,
+   every block of the day) the p-values are Benjamini–Hochberg adjusted, and the
+   adjusted p must be at or below the family's α (next section).
 3. **An effect big enough to matter** (e.g. 0.06 points per game, about 40 Elo).
 
 This rule lives in one place, `stats.significance`, and every module uses it.
-An insight's **confidence** is `1 − adjusted p`, scaled down below three times the
-minimum sample, so every claim has a confidence of at least 0.55 and "high
-confidence" (≥ 0.7) needs a clear result on a decent sample. Small groups are also
+
+**Confidence** is *not* `1 − p`. A p-value of 0.004 does not make a claim 99.6%
+certain, least of all in a report that runs a few dozen tests. The confidence is
+the most the evidence can support if a real effect and no effect were equally
+likely beforehand (the Sellke–Bayarri–Berger bound, `1 / (1 − e·p·ln p)` for the
+adjusted p): p = 0.05 gives 0.71, p = 0.01 gives 0.89, p = 0.001 gives 0.98. It is
+scaled down when the smaller group compared has fewer than twice the minimum
+number of games, so every claim has a confidence of at least 0.50 and "high
+confidence" (≥ 0.7) needs a clear result on a decent sample. **Severity** uses the
+effect shrunk toward 0 by its own uncertainty (a normal prior with a standard
+deviation of 0.10 points per game): effects that just clear a significance bar are
+overestimates on average, most of all on small samples. Small groups are also
 **shrunk toward 0** (`stats.shrink`) before ranking or charting, so a 3–0 opening
-doesn't top the "strengths" list, and small streaky samples never get a standard
-error below that of a player scoring exactly as expected.
+doesn't top the "strengths" list.
 
 ### The error budget: two tiers
 
@@ -84,40 +105,83 @@ so the families are split into two tiers:
 
 | α | Claims | Why |
 |---|---|---|
-| **0.05** | White vs Black; opening families; scoring worse straight after a loss; scoring worse late at night (23:00–03:00) | The claims players most need, and the hardest to detect: effects of 5–15 points per 100 games that only part of the games carry. The last two are fixed in advance with their direction, so they use a one-sided test. |
-| **0.01** | Other times of day, game length, time controls, opponent strength, session length, how losses end, time trouble, losing on time, slow openings, clock handling, quick losses in one opening | Exploratory scans (many ways to get lucky), claims with a less direct reading (being mated more than you mate also depends on resignation habits), and clock or quick-loss habits, whose paired or mirror tests have power to spare when the habit is real. |
+| **0.05** | White vs Black; opening families; scoring worse straight after a loss; scoring worse late at night (23:00–03:00 in your time zone) | The claims players most need, and the hardest to detect: effects of 5–15 points per 100 games that only part of the games carry. The last two are fixed in advance with their direction, so they use a one-sided test. |
+| **0.01** | Other times of day, time controls, opponent strength, session length, time trouble, losing on time, slow openings, clock handling, quick losses in one opening | Exploratory scans (many ways to get lucky), and clock or quick-loss habits, whose paired or mirror tests have power to spare when the habit is real. |
 
-The budget adds up to about 4 × 0.05 + 11 × ≤ 0.01 ≈ 0.25, and measures at about
-0.2 false claims per report (below). A report that says wrong things is worse than
-one that says little, so the budget is kept well under the 0.3 target; the price is
-paid in power at 400 games (below).
+**Late night needs your time zone.** 23:00–03:00 UTC is early evening in New York.
+Without a time zone (the command line's default, `--tz UTC`) the same UTC window is
+still tested, but at 0.01 like any other block of the day, and it is titled by its
+UTC hours ("games started 23:00–03:00 UTC"); the 4-hour blocks are too. Pass your
+zone (`--tz America/New_York`, or `--tz Etc/UTC` if you really live in UTC) to get
+the late-night test.
+
+### Observations that are never claims
+
+Two patterns follow from the result and from *both* players' resignation habits as
+much as from skill, so from results alone they can't be told apart from a habit,
+and they are only ever observations (and only when their test passes at 0.01):
+
+* **How losses end.** Being mated in a larger share of your losses than you mate
+  in your wins can point at king safety, but it is exactly what never resigning
+  looks like: a resignation becomes a mate.
+* **Game length.** A player who plays on in lost positions loses more long games; one
+  who resigns early loses more short ones; opponents' habits do the same to wins.
+  Each length band is compared with your games of other lengths.
+
+The engine analysis (section 3) measures the skills behind them directly
+(conversion, endgame accuracy, missed mates).
+
+### One fact, one finding
+
+Several tests can pick up the same thing. The report names it once:
+
+* **A colour gap that one opening accounts for.** If the openings module names an
+  opening (a weak Caro-Kann) and the White–Black gap is within the normal range
+  without those games, the colour result becomes an observation pointing to the
+  opening.
+* **An outlier opening.** A weak Caro-Kann lowers "your other Black openings" for
+  every other Black family, so an ordinary French can look like a strength. Opening
+  claims are accepted strongest first, and each further one must also hold against
+  your other openings without the ones already named, and stand out from your
+  *typical* opening of that colour (the median), not just from their average.
+* **Time trouble and losing on time.** Every flag is time trouble. When losing on
+  time is a finding, time trouble is a second one only if it still holds with the
+  games you lost on time left out. The same clock habit in several time controls is
+  one finding ("… in blitz and rapid").
+* **Long sessions and playing on after a loss.** Later games in a session follow a
+  loss more often (a session's first game never does). When "after a loss" is a
+  finding, "you score worse from the 4th game of a session on" must also hold without
+  the games played straight after a loss.
+* **Two time controls** are one comparison seen from both ends: at most one
+  time-control finding, for the pool further from its own rating. It is worded as
+  what it measures ("you outperform your rapid rating more than your other
+  ratings"): each time control has its own rating, so a pool whose rating lags your
+  recent results looks exactly the same.
 
 ### Benchmarks chosen to avoid false claims
 
-* **Self-relative comparisons** wherever possible. Clock usage, blunder rates and
+* **Self-relative comparisons** everywhere. Clock usage, blunder rates and
   conversion are compared with *your opponents in the same games* (rating-matched
-  peers on the same clock and position). "After a loss", times of day and session
-  length compare those games with all your other games, so a rating that lags
-  behind your strength doesn't create a finding.
-* **Openings** are tested against the colour-adjusted expectation, and the family
-  tests are *weighted* Benjamini–Hochberg adjusted with weights = games played: a
-  leak in the opening you play in 40% of your games costs far more points than one
-  in a sideline, so it gets most of the error budget (the family-wise error rate is
-  unchanged).
+  peers on the same clock and position). Openings are compared with your other
+  openings of the same colour; "after a loss", times of day, session length,
+  opponent strength and time controls with the rest of your games.
+* **Openings**: the family tests are *weighted* Benjamini–Hochberg adjusted with
+  weights = games played: a leak in the opening you play in 40% of your games costs
+  far more points than one in a sideline, so it gets most of the error budget (the
+  family-wise error rate is unchanged). If one opening is almost all of your games
+  with a colour, it can't be told apart from that colour and is not claimed.
 * **Quick losses in one opening** compare how often your losses in it are over
-  within 25 moves with how often your *wins* in it are (your opponents' quick
-  collapses in the same openings). A sharp opening produces short games for both
-  sides and is not a weakness.
+  within 25 moves with how often your *wins* in it are (a sharp opening is short for
+  both sides), and then with the same gap in your other openings (a player who
+  resigns early has quick losses in every opening): a difference of differences.
 * **Opponent strength** must be significant, in the same direction, against both
   the attenuated (`a = 0.75`) and the plain Elo (`a = 1.0`) expectation. With
-  realistic rating noise, `a = 0.75` alone manufactures "you reliably beat
-  lower-rated players" and plain Elo alone "you drop points against lower-rated
-  players".
+  realistic rating noise, `a = 0.75` alone manufactures "you beat lower-rated
+  players" and plain Elo alone "you drop points against lower-rated players".
 * **Time controls.** Each rating pool is judged against its own rating, so each
   pool's score-vs-expected is near zero by construction; picking the best and the
   worst of several noisy numbers finds a "gap" in pure noise. Each time control is
-  instead compared with all your other time controls together, BH-adjusted over the
-  time controls.
+  instead compared with all your other time controls together, BH-adjusted.
 * **Late night** is one pre-specified window, 23:00–03:00 in your time zone (a
   4-hour block starting at midnight would cut it in two). If an overlapping 4-hour
   block is also flagged, the report keeps the one finding with the stronger evidence.
@@ -127,63 +191,29 @@ paid in power at 400 games (below).
 ### Calibration: how often the report is wrong, and what it finds
 
 `tests/null_world.py` generates a *null world*: games with realistic rating noise
-(75 Elo on the true strength difference) and White's first-move edge, but where
-openings, terminations, clocks, schedules and game lengths have nothing to do with
-results. Every strength or weakness reported on it is false. The same generator can
-*plant* realistic effects, each shifting only the games it concerns.
+(75 Elo on the true strength difference) and White's first-move edge (0.04), but
+where openings, terminations, clocks, schedules and game lengths have nothing to do
+with results. Every strength or weakness reported on it is false. The same
+generator can *plant* realistic effects, each shifting only the games it concerns,
+and habits that are not skill effects (a rating that lags, never resigning).
 
-False claims in the top lists, 64 null worlds per size:
+False claims in the top lists per report (the null player gives the time zone,
+`Etc/UTC`, so late night is tested at 0.05; seeds not used for tuning):
 
-| | 400 games | 600 games |
-|---|---|---|
-| Before this calibration | 4.95 per report (max 10) | 4.44 (max 9) |
-| Now | **0.20** (max 2) | **0.23** (max 2) |
+@@NULL_TABLE@@
 
-Share of 32 planted worlds in which the report's top weaknesses name the planted
-effect (right kind and category). *Plain*: the effect sits on top of an otherwise
-accurate rating. *Priced in*: the rating has absorbed the effect, so every game is
-lifted by `share × effect` and the affected games fall short of expectation by less
-(the realistic case for a long-standing habit; the gap to the other games is the
-same).
+Share of 32 worlds (seeds 1000–1031) in which the report's top weaknesses name the
+planted effect (right kind and category), one effect at a time:
 
-| Planted effect | 400 plain | 600 plain | 400 priced in | 600 priced in |
-|---|---|---|---|---|
-| Caro-Kann as Black −0.15 (40% of Black games) | 53% | 88% | 47% | 72% |
-| Right after a loss −0.12 | 84% | 97% | 72% | 91% |
-| Late night (23:00–03:00, ~29% of games) −0.10 | 72% | 88% | 59% | 84% |
-| Time trouble in 35% more games, −0.10 in them | 100% | 100% | 94% | 97% |
-| 25% of mate/resignation losses become losses on time | 66% | 88% | | |
-| 40% of Italian Game losses (its main White opening) over within 22 moves, score unchanged | 53% | 78% | | |
-| Black −0.08 | 31% | 53% | 50% | 62% |
-
-Before this calibration the old thresholds "found" most of these too, but only
-because they claimed almost anything: the same reports carried 3–6 other,
-mostly false, strengths and weaknesses. Late-night play, split across two 4-hour
-blocks, was found in 19% / 31% of worlds.
+@@POWER_TABLE@@
 
 What this means for you:
 
-* **With 600+ games** the report finds opening, tilt, late-night and clock effects
-  of these sizes most of the time. **With 400 games** it finds the stronger ones
-  (tilt, late night, time trouble) and misses about half of the others; it says
-  less rather than guessing.
-* **A colour imbalance of 8 points per 100 games needs about 1,000 games** (found in
-  62–71% of worlds at 1,000): the gap between two halves of your games is simply
-  that noisy.
-* The null world is idealised: each game's true strength equals the current rating.
-  Real ratings lag (after a losing run you are briefly underrated), which makes
-  "after a loss" *harder* to find, never easier, and the error budget assumes
-  families of tests are roughly independent. With several real effects at once,
-  their knock-on effects (a weak Caro-Kann makes "Black" look weak too) are real
-  associations, not false claims, but they can crowd the top lists.
+@@POWER_NOTES@@
 
 Run `CALIBRATION_RUNS=64 CALIBRATION_GAMES=600 pytest tests/test_null_calibration.py`
 to re-measure the false-claim rate after changing a threshold, and
-`tests/test_power.py` checks that the planted effects above are still found.
-
-Every insight carries a **severity** (how big the effect is) and a **confidence**
-(how sure we are). The report ranks by their product and shows the confidence
-label next to each claim.
+`POWER_RUNS=32 pytest tests/test_power.py` to re-measure detection.
 
 These are associations, not causes. "You score worse after 11 pm" might be
 tiredness, or it might be the different player pool at that hour. The tool

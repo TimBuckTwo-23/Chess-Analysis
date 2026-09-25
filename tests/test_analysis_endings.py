@@ -216,7 +216,7 @@ def test_short_and_long_games_that_stand_out_are_observations():
     mr = run(short + long_ + middle)
     weak = insight(mr, "endings.observation.length-short")
     assert weak and weak.kind == "observation"
-    assert weak.title == "Your short games (≤ 20 moves) score below your games of other lengths"
+    assert weak.title == "Your games of ≤ 20 moves score below your games of other lengths"
     assert "25%" in weak.detail and "40 games" in weak.detail and "when you and your opponents resign" in weak.detail
     shortest = sorted((x for x in short if x.outcome == "loss"), key=lambda x: (x.plies, -x.end_time.timestamp()))
     assert weak.example_games == [x.url for x in shortest[:5]]

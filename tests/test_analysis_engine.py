@@ -1,6 +1,7 @@
 """analysis/engine_stats.py: aggregates over hand-built engine evaluations (no Stockfish needed)."""
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -505,3 +506,126 @@ def test_a_general_excess_of_errors_is_not_blamed_on_one_phase_or_error_type():
         specific += len([i for i in claims(mr) if i != "engine.weakness.blunder-rate"])
         assert "Key finding: You blunder more often" in mr.summary
     assert specific <= 1
+
+
+# --------------------------------------------------------------------------- verifier findings
+def pressure_world(seed: int, *, n_games: int = 200, my_endgame: float = 1.0, my_low: float = 2.0,
+                   opp_low: float = 2.0):
+    """Blitz games (180 s, no increment) in which both sides spend their clock the same way, so most short-of-time
+    moves are endgame moves. Blunder probability per move: 3% x (``my_endgame`` for your endgame moves) x
+    (``my_low`` / ``opp_low`` when that side has less than 27 s left), with some game-to-game variation."""
+    import random
+
+    from chess_insights.models import PlyEval
+
+    rng = random.Random(seed)
+    pairs = []
+    n = 70
+    for _ in range(n_games):
+        color = rng.choice(("white", "black"))
+        game = make_game(color=color, moves_san=[SANS[i % len(SANS)] for i in range(n)], base_seconds=180,
+                         time_control="180", outcome=rng.choice(("win", "draw", "loss")))
+        clock = {"white": 180.0, "black": 180.0}
+        pace = {s: rng.uniform(3.0, 7.0) for s in clock}
+        intensity = {s: rng.gammavariate(2.0, 0.5) for s in clock}
+        plies, clocks = [], []
+        for i in range(n):
+            mover = "white" if i % 2 == 0 else "black"
+            phase = "opening" if i < 20 else "middlegame" if i < 44 else "endgame"
+            mine = mover == color
+            low = clock[mover] < 27.0
+            p = 0.03 * intensity[mover]
+            p *= my_endgame if mine and phase == "endgame" else 1.0
+            p *= (my_low if mine else opp_low) if low else 1.0
+            clock[mover] = max(1.0, clock[mover] - rng.expovariate(1.0 / pace[mover]))
+            clocks.append(round(clock[mover], 1))
+            blunder = rng.random() < min(p, 0.5)
+            plies.append(PlyEval(
+                ply=i, mover=mover, is_user=mine, san=game.moves_san[i], best_san=None, cp_before=0, cp_after=0,
+                mate_before=None, mate_after=None, win_before=50.0, win_after=50.0, accuracy=90.0,
+                cp_loss=300 if blunder else 10, judgement="blunder" if blunder else None, phase=phase,
+                clock_after=clocks[-1], time_spent=None, tags=[],
+            ))
+        game.clocks = clocks
+        pairs.append((game, make_game_eval(game.game_id, plies, my_accuracy=80.0, opp_accuracy=80.0)))
+    return pairs
+
+
+def _pressure(pairs):
+    ctx = AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs})
+    _, insights, stats = engine_stats.pressure_section(engine_stats.join(ctx), engine_stats.Thresholds())
+    return {i.id: i for i in insights}, stats.get("blitz", {})
+
+
+def test_an_endgame_weakness_is_not_blamed_on_the_clock():
+    """Same clock habits and the same short-of-time multiplier for both sides; you only err more in the endgame,
+    where most short-of-time moves are. Comparing your short-of-time moves (mostly endgame) with your other
+    moves (mostly opening and middlegame) used to turn that into 'you blunder much more than your opponents
+    when short of time', more often the more games there were."""
+    naive = 0
+    for seed in range(6):
+        found, st = _pressure(pressure_world(700 + seed, n_games=300, my_endgame=2.5))
+        assert "engine.weakness.time-pressure-blunders-blitz" not in found, st
+        raw = (st["blunders_per100_low"] / st["opp_blunders_per100_low"]) / (
+            st["blunders_per100_ok"] / st["opp_blunders_per100_ok"])
+        naive += raw >= 1.3  # what the unstratified check looked at
+        assert st["phase_adjusted_excess"] < raw
+    assert naive >= 4  # the confound is really there
+
+
+def test_a_real_time_pressure_weakness_is_still_found():
+    found = sum(
+        "engine.weakness.time-pressure-blunders-blitz"
+        in _pressure(pressure_world(800 + seed, n_games=300, my_low=5.0))[0]  # 5x when short of time, them 2x
+        for seed in range(6)
+    )
+    assert found >= 5
+    clean = sum(bool(_pressure(pressure_world(900 + seed))[0].get("engine.weakness.time-pressure-blunders-blitz"))
+                for seed in range(6))
+    assert clean == 0
+
+
+def test_pressure_excess_is_a_phase_stratified_ratio_of_ratios():
+    T = engine_stats.Tally
+
+    def cells(me_low, me_ok, opp_low, opp_ok, phase="endgame"):
+        return {(k, phase): T(moves=100, blunders=x) for k, x in zip(engine_stats.PRESSURE_KEYS,
+                                                                      (me_low, me_ok, opp_low, opp_ok))}
+
+    # endgame: you are twice as error-prone as your opponents with or without time; the clock adds nothing
+    games = [cells(8, 4, 4, 2)] * 10 + [cells(1, 2, 1, 2, "opening")] * 10
+    ratio, test = engine_stats.pressure_excess_test(games)
+    assert ratio == pytest.approx(1.0) and test.p_value >= 0.5 and test.n == 20
+    ratio, test = engine_stats.pressure_excess_test([cells(12, 2, 3, 2), cells(10, 2, 2, 2)] * 15)
+    assert ratio == pytest.approx(math.exp(math.log(11 * 2 / (2.5 * 2)))) and test.p_value < 0.01
+    never_short = {("me_low", "endgame"): T(moves=100, blunders=5), ("me_ok", "endgame"): T(moves=100, blunders=5),
+                   ("opp_ok", "endgame"): T(moves=100, blunders=5)}
+    assert engine_stats.pressure_excess_test([never_short] * 5)[0] is None  # opponents never short of time
+
+
+def test_games_without_clock_data_stay_out_of_the_time_pressure_table():
+    """A PGN without %clk: the first two plies used to count as 'plenty of time' (from the starting clock)."""
+    def spec(i, user):
+        return {"judgement": "blunder"} if i == 1 else {}
+
+    pairs = [analysed(spec, clocks=[None] * 40, base_seconds=300, time_control="300") for _ in range(12)]
+    mr = run(pairs)
+    assert not [t for t in mr.tables if t.title == "Blunders when short of time"]
+    assert mr.stats["time_pressure"] == {}
+    assert engine_stats._clock_before(pairs[0][0], 0) is None
+    with_clocks = analysed(spec, base_seconds=300, time_control="300")[0]
+    assert engine_stats._clock_before(with_clocks, 0) == 300.0 and engine_stats._clock_before(with_clocks, 1) == 300.0
+
+
+def test_opening_claims_on_a_handful_of_games_use_students_t():
+    """8 games a pawn and a half worse after move 10: z = 2.8 (p = 0.005) would pass the 0.01 bar, but with 7 degrees
+    of freedom p is 0.027: too few games for a claim. The same average over 30 games is one."""
+    def at_ply_20(cp):
+        return lambda i, user: {"cp_after": cp} if i == 19 else {}
+
+    few = run([analysed(at_ply_20(148), color="black", opening_family="Caro-Kann Defense") for _ in range(8)])
+    assert insight(few, "engine.weakness.openings-black-caro-kann-defense") is None
+    test = engine_stats.mean_test([-148.0] * 8, min_sd=engine_stats.OPENING_EVAL_SD)
+    assert test.p_value < 0.01 < engine_stats.student_t_test(test).p_value == pytest.approx(0.0268, abs=5e-4)
+    many = run([analysed(at_ply_20(148), color="black", opening_family="Caro-Kann Defense") for _ in range(30)])
+    assert insight(many, "engine.weakness.openings-black-caro-kann-defense") is not None

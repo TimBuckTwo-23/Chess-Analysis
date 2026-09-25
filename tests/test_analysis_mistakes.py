@@ -265,7 +265,8 @@ def test_a_wrong_move_you_rarely_play_there_is_not_a_habit():
     """The same wrong move in 3 of 40 games, the engine's move in the other 37: at an ordinary error rate
     that is chance, so an observation at most, never a weakness."""
     # each of these games also has a one-off error later on (a different queen move each time)
-    specs = [_game(n, LINE + ["Nd4", "Nxe5", queen], {5: "Nf6", 7: "Qh4"}) for n, queen in enumerate(["Qg5", "Qf6", "Qe7"], 1)]
+    specs = [_game(n, LINE + ["Nd4", "Nxe5", queen], {5: "Nf6", 7: "Qh4"})
+             for n, queen in enumerate(["Qg5", "Qf6", "Qe7"], 1)]
     specs += [_game_with_error(n, "Nf6", error=False) for n in range(4, 41)]
     ctx = _ctx(specs)
     [rep] = mistakes.assess(

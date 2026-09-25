@@ -1,14 +1,18 @@
 """The report must still find real effects of realistic size.
 
-Each test plants one effect in the null world (tests/null_world.py) and checks that
-the report's top lists name it, as the right kind (weakness) and category, without
-contradicting it. The detection rates behind these fixed seeds, measured over 32
-seeds at 400 and 600 games, are in docs/METHODOLOGY.md (section 2): at 600 games
-every effect below except the colour one is found in 78-100% of seeds, at 400
-games tilt, late night and time trouble are (colour needs about 1,000 games).
+Planted effects (tests/null_world.py) must reach the report's top lists as the right kind
+(weakness) and category, without the opposite claim. To keep this quick, effects that
+touch different games share a world: a 1,200-game player with four habits (tilt, late
+night, time trouble, flagging), a 1,200-game player with two opening problems (a weak
+Caro-Kann, quick losses in the Italian) and a 2,000-game player who is weaker with
+Black. The seed is simply 0: at these sizes each effect is found in 90-100% of worlds
+(measured over 32 seeds; the colour effect in about 80%), so passing does not hinge on a
+lucky seed. Detection rates by size, for one effect at a time, are in
+docs/METHODOLOGY.md (section 2): at 400-600 games the opening, quick-loss and colour
+effects are found much less often.
 
-POWER_RUNS=32 (optionally POWER_GAMES=400) re-measures those rates; it takes a few
-minutes per effect, so it only runs when asked for.
+POWER_RUNS=32 (optionally POWER_GAMES=600) re-measures those single-effect rates; it
+takes a few minutes per effect, so it only runs when asked for.
 """
 
 import os
@@ -19,25 +23,41 @@ import pytest
 from chess_insights.pipeline import run_analysis
 from null_world import null_games
 
-GAMES = 600
-SEED = 2
+SEED = 0
+OPTIONS = {"tz": "Etc/UTC"}  # the null world's schedule is in UTC
 
-# name: (planted effects, category, keywords that must appear in the insight's id or title)
-EFFECTS = {
-    "opening": ({"opening": ("black", "Caro-Kann Defense", -0.15)}, "openings", ("caro-kann",)),
-    "tilt": ({"tilt_after_loss": -0.12}, "habits", ("after a loss",)),
-    "late_night": ({"late_night": -0.10}, "habits", ("night",)),
-    "time_trouble": ({"time_trouble": (0.35, -0.10)}, "time", ("time-trouble",)),
-    "flagging": ({"flagging": 0.25}, "time", ("lost-on-time",)),
-    "short_losses": ({"short_losses": ("white", "Italian Game", 0.40)}, "openings", ("early-losses", "italian")),
-    "colour": ({"colour": ("black", -0.08)}, "color", ("black",)),
+PLANTED = {
+    "opening": {"opening": ("black", "Caro-Kann Defense", -0.15)},
+    "short_losses": {"short_losses": ("white", "Italian Game", 0.40)},
+    "tilt": {"tilt_after_loss": -0.12},
+    "late_night": {"late_night": -0.10},
+    "time_trouble": {"time_trouble": (0.35, -0.10)},
+    "flagging": {"flagging": 0.25},
+    "colour": {"colour": ("black", -0.08)},
 }
+WORLDS = {  # name: (effects, games)
+    "habits_and_clock": (("tilt", "late_night", "time_trouble", "flagging"), 1200),
+    "openings": (("opening", "short_losses"), 1200),
+    "colour": (("colour",), 2000),
+}
+# effect: (category, keywords that must all appear in the insight's id or title)
+EXPECT = {
+    "opening": ("openings", ("caro-kann",)),
+    "short_losses": ("openings", ("early-losses", "italian")),
+    "tilt": ("habits", ("after a loss",)),
+    "late_night": ("habits", ("late-night",)),
+    "time_trouble": ("time", ("time-trouble",)),
+    "flagging": ("time", ("lost-on-time",)),
+    "colour": ("color", ("black",)),
+}
+WORLD_OF = {effect: world for world, (effects, _) in WORLDS.items() for effect in effects}
 
 
 @lru_cache(maxsize=None)
-def report_for(name: str):
-    planted, _, _ = EFFECTS[name]
-    return run_analysis(null_games(GAMES, seed=SEED, planted=planted), "nullplayer")
+def report_for(world: str):
+    effects, games = WORLDS[world]
+    planted = {k: v for e in effects for k, v in PLANTED[e].items()}
+    return run_analysis(null_games(games, seed=SEED, planted=planted), "nullplayer", options=OPTIONS)
 
 
 def found(report, category: str, keywords: tuple[str, ...], kind: str = "weakness"):
@@ -48,10 +68,10 @@ def found(report, category: str, keywords: tuple[str, ...], kind: str = "weaknes
     ]
 
 
-@pytest.mark.parametrize("name", list(EFFECTS))
-def test_planted_weakness_reaches_the_top_list(name):
-    _, category, keywords = EFFECTS[name]
-    report = report_for(name)
+@pytest.mark.parametrize("effect", list(EXPECT))
+def test_planted_weakness_reaches_the_top_list(effect):
+    category, keywords = EXPECT[effect]
+    report = report_for(WORLD_OF[effect])
     hits = found(report, category, keywords)
     assert hits, [(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses]
     assert all(i.confidence >= 0.5 for i in hits)
@@ -59,29 +79,46 @@ def test_planted_weakness_reaches_the_top_list(name):
     assert not found(report, category, keywords, kind="strength")
 
 
+def test_planted_worlds_carry_few_other_claims():
+    # each world's top lists name its planted effects and little else (knock-on findings are re-tested)
+    for world, (effects, _) in WORLDS.items():
+        report = report_for(world)
+        planted = [i for e in effects for i in found(report, *EXPECT[e])]
+        others = [i.id for i in report.strengths + report.weaknesses if i not in planted]
+        assert len(others) <= 1, (world, others)
+
+
 def test_planted_effects_are_described_with_their_numbers():
-    opening = found(report_for("opening"), "openings", ("caro-kann",))[0]
-    assert opening.title == "The Caro-Kann Defense is costing you points as Black"
-    assert opening.evidence["colour_adjusted_delta"] < -0.08 and opening.evidence["p_adjusted"] <= 0.05
-    tilt = found(report_for("tilt"), "habits", ("after a loss",))[0]
+    opening = found(report_for("openings"), *EXPECT["opening"])[0]
+    assert opening.title == "You score less with the Caro-Kann Defense than with your other Black openings"
+    assert opening.evidence["gap"] < -0.08 and opening.evidence["p_adjusted"] <= 0.05
+    tilt = found(report_for("habits_and_clock"), *EXPECT["tilt"])[0]
     assert tilt.evidence["gap"] < -0.06 and tilt.evidence["p_value_one_sided"] <= 0.05
-    late = found(report_for("late_night"), "habits", ("night",))[0]
-    assert "23:00" in late.title or "00:00" in late.title
+    late = found(report_for("habits_and_clock"), *EXPECT["late_night"])[0]
+    assert late.title == "You score below your rating in late-night games (23:00–03:00)"
+    flags = found(report_for("habits_and_clock"), *EXPECT["flagging"])
+    assert len(flags) == 1  # one finding, however many time controls it shows up in
 
 
 POWER_RUNS = int(os.environ.get("POWER_RUNS", "0"))
-POWER_GAMES = int(os.environ.get("POWER_GAMES", str(GAMES)))
-MIN_DETECTION = 0.7  # at 600 games; colour is below it (information-limited, see the methodology)
+POWER_GAMES = int(os.environ.get("POWER_GAMES", "1200"))
+MIN_DETECTION = 0.85  # one effect at a time, at 1,200 games; colour is below it (information-limited)
 
 
 @pytest.mark.skipif(POWER_RUNS == 0, reason="set POWER_RUNS to measure detection rates over many seeds")
-@pytest.mark.parametrize("name", [n for n in EFFECTS if n != "colour"])
-def test_detection_rate(name):
-    planted, category, keywords = EFFECTS[name]
+@pytest.mark.parametrize("effect", list(EXPECT))
+def test_detection_rate(effect):
+    category, keywords = EXPECT[effect]
     hits = sum(
-        bool(found(run_analysis(null_games(POWER_GAMES, seed=s, planted=planted), "nullplayer"), category, keywords))
-        for s in range(POWER_RUNS)
+        bool(
+            found(
+                run_analysis(null_games(POWER_GAMES, seed=s, planted=PLANTED[effect]), "p", options=OPTIONS),
+                category,
+                keywords,
+            )
+        )
+        for s in range(1000, 1000 + POWER_RUNS)
     )
-    print(f"{name}: detected in {hits}/{POWER_RUNS} worlds of {POWER_GAMES} games")
-    if POWER_GAMES >= 600:
+    print(f"{effect}: detected in {hits}/{POWER_RUNS} worlds of {POWER_GAMES} games")
+    if POWER_GAMES >= 1200 and effect != "colour":
         assert hits / POWER_RUNS >= MIN_DETECTION
