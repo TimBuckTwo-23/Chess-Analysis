@@ -92,6 +92,35 @@ def two_proportion_test(x1: float, n1: int, x2: float, n2: int) -> MeanTest:
     return MeanTest(n1 + n2, p1 - p2, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
 
 
+def bh_adjust(p_values: Sequence[float]) -> list[float]:
+    """Benjamini-Hochberg adjusted p-values (same order as the input).
+
+    Use when testing many groups at once (every opening, every hour of the day):
+    with 20 openings, one will look "significant" at p < 0.05 by luck alone.
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: p_values[i])
+    adjusted = [1.0] * m
+    running = 1.0
+    for rank in range(m, 0, -1):
+        i = order[rank - 1]
+        running = min(running, p_values[i] * m / rank)
+        adjusted[i] = clamp(running)
+    return adjusted
+
+
+# Ratings are noisy estimates of strength, so real results regress toward 50%:
+# everyone seems to "overperform" against stronger and "underperform" against weaker
+# opponents. Judge opponent-strength buckets against this attenuated expectation.
+RATING_NOISE_ATTENUATION = 0.75
+
+
+def attenuated_expected(expected: float, attenuation: float = RATING_NOISE_ATTENUATION) -> float:
+    return 0.5 + attenuation * (expected - 0.5)
+
+
 def shrink(mean: float, n: int, prior_mean: float, prior_n: float = 10.0) -> float:
     """Empirical-Bayes style shrinkage of a small-sample mean toward a prior."""
     if n <= 0:

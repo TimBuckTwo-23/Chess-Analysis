@@ -57,6 +57,15 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
    everything.
 6. Don't mix time classes when a metric depends on the clock (time trouble, move
    times). Report them per time class.
+7. When the same test runs over many groups (every opening family, every
+   time-of-day bucket), adjust with `stats.bh_adjust` before calling anything
+   significant.
+8. Opponent-strength buckets are judged against `stats.attenuated_expected`.
+   Rating noise makes *everyone* look like they underperform against weaker
+   players and overperform against stronger ones.
+9. Exclude games with fewer than 4 plies (aborted starts, instant abandons) from
+   skill metrics. They still count in the results totals.
+10. Word findings as associations ("you score worse after 11 pm"), not causes.
 
 ## Module ownership
 
