@@ -165,8 +165,8 @@ class Persona:
     loss gets three), and games with none of the planted contexts get ``baseline_shift``: a real
     player's rating already prices in their weaknesses, so their ordinary games sit a little above
     expectation and the rating stays roughly stable. The defaults are calibrated so the planted
-    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.12,
-    rapid +0.09 (blitz -0.02, bullet -0.04).
+    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.13,
+    rapid +0.09 (blitz -0.03, bullet -0.04).
     """
 
     username: str = "demo_player"
@@ -178,12 +178,12 @@ class Persona:
     )
     # T8: stronger at rapid than at the fast time controls
     time_class_shift: dict[str, float] = field(
-        default_factory=lambda: {"blitz": -0.01, "rapid": 0.10, "bullet": -0.025, "daily": 0.0}
+        default_factory=lambda: {"blitz": 0.0, "rapid": 0.115, "bullet": -0.02, "daily": 0.0}
     )
     baseline_shift: float = 0.09
     # T1: Caro-Kann as Black against 1.e4
     caro_kann_share: float = 0.38
-    caro_kann_shift: float = -0.155
+    caro_kann_shift: float = -0.15
     # T2: Italian Game as White (share of all White games; White always opens 1.e4)
     italian_share: float = 0.45
     italian_shift: float = 0.18
@@ -192,12 +192,12 @@ class Persona:
     blitz_flag_share: float = 0.28  # share of planned blitz losses that end on the clock
     low_clock_error_factor: float = 2.2  # error-rate multiplier with less than 10% of the clock left
     # T4: tilt
-    tilt_shift: float = -0.13
+    tilt_shift: float = -0.125
     tilt_window_min: float = 15.0
     quick_requeue_after_loss: float = 0.8
     # T5: late-night play (games starting 23:00-03:00 UTC)
-    late_night_shift: float = -0.13
-    late_session_share: float = 0.25
+    late_night_shift: float = -0.16
+    late_session_share: float = 0.28
     # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
     endgame_error_factor: float = 3.0
     # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
@@ -220,7 +220,16 @@ PLANTED_TRAITS: list[dict[str, Any]] = [
         "category": "openings",
         "expect": "strength",
         "description": "Scores above their rating with the Italian Game as White",
-        "keywords": ["italian"],
+        # White-side phrasings only: doing well *against* the Italian as Black is not this trait
+        "keywords": [
+            "white.italian",
+            "italian game as white",
+            "italian game is working for you as white",
+            "as white in the italian",
+            "as white with the italian",
+            "italian game (white)",
+            "white: italian",
+        ],
     },
     {
         "id": "T3-blitz-clock",
@@ -508,19 +517,21 @@ def _session_start(rng: random.Random, day: datetime, persona: Persona) -> datet
 class _OutcomeBalancer:
     """Keeps each planted subset's intended results close to what its shift promises.
 
-    With independent draws a 100-game subset (say, the Caro-Kann games) wanders about +-0.05
-    points per game from its planned shift, enough to hide a trait in an unlucky seed. A weak
-    negative feedback on each subset's running surplus keeps it within about +-0.015, while
-    consecutive games stay nearly independent (one result moves the next game's odds by ~2.5%).
+    With independent draws a 45-game subset (say, the Caro-Kann games) wanders about +-0.07
+    points per game from its planned shift, enough to hide a trait in an unlucky seed. A negative
+    feedback on each subset's running surplus keeps it much closer. Trait contexts are spread over
+    months, so they take a firm gain; time classes, whose games follow each other within a
+    session, get a gentle one so consecutive games stay nearly independent.
     """
 
-    GAIN = 0.05
+    GAIN = {"bullet": 0.04, "blitz": 0.04, "rapid": 0.04, "daily": 0.04}
+    CONTEXT_GAIN = 0.12
 
     def __init__(self) -> None:
         self.surplus: dict[str, float] = {}
 
     def adjust(self, keys: Sequence[str], mu: float) -> float:
-        return mu - self.GAIN * sum(self.surplus.get(k, 0.0) for k in keys)
+        return mu - sum(self.GAIN.get(k, self.CONTEXT_GAIN) * self.surplus.get(k, 0.0) for k in keys)
 
     def record(self, keys: Sequence[str], score: float, mu: float) -> None:
         for k in keys:
