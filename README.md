@@ -21,10 +21,16 @@ What you get:
 * **Engine review** (optional, with Stockfish): Lichess-style accuracy, blunder
   rates by game phase, blunders under time pressure, converting winning
   positions, missed tactics, and how you come out of each opening.
+* **Positions you keep getting wrong** (with Stockfish): the exact positions
+  where you have played the same bad move in several games, with the engine's
+  move drawn on the board.
+* **Personal puzzles** (`--puzzles`): your costliest mistakes exported as a PGN.
+  You can import it into a Lichess study.
 
-Every insight is compared with a benchmark: your Elo expectation, or your
-opponents in the same games. Findings from small samples are held back, so the
-report doesn't overreact to a handful of games.
+Every insight is compared with a benchmark: your Elo expectation, your other
+games, or your opponents in the same games. Findings that could be chance are
+held back. On simulated players with no real strengths or weaknesses, a report
+contains on average fewer than 0.3 false claims (`tests/test_null_calibration.py`).
 
 ## Quick start
 
@@ -159,3 +165,18 @@ module map, [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for how every number is c
 pip install -e ".[dev]"
 py -m pytest            # engine tests are skipped automatically if Stockfish isn't found
 ```
+
+## Moving this folder into its own repository
+
+The project lives in `chess-insights/` of a larger repository for now. To give it
+its own GitHub repository with its history:
+
+```bash
+# 1. On github.com, create an empty repository named chess-insights (no README).
+# 2. Then, from a clone of the current repository:
+git subtree split --prefix=chess-insights -b chess-insights-only
+git push https://github.com/<you>/chess-insights.git chess-insights-only:main
+```
+
+The CI workflow in `.github/workflows/ci.yml` starts running once the folder is
+the root of its own repository.
