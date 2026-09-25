@@ -794,3 +794,263 @@ def test_write_report_strips_suffix_and_filters_formats(report, tmp_path):
     with pytest.raises(ValueError, match="unknown report format"):
         write_report(report, tmp_path / "x", formats=("pdf",))
     assert not (tmp_path / "x.html").exists()
+
+
+# --------------------------------------------------------------------------- review fixes (regressions)
+def _board_svg(fen: str = "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3") -> str:
+    import chess
+    import chess.svg
+
+    board = chess.Board(fen)
+    arrows = [chess.svg.Arrow(chess.A7, chess.A6, color="red"), chess.svg.Arrow(chess.G8, chess.F6, color="green")]
+    return chess.svg.board(board, orientation=chess.BLACK, arrows=arrows, size=280, check=chess.E1)
+
+
+def _diagram_report(*diagrams) -> Report:
+    from chess_insights.models import Diagram
+
+    rep = empty_report()
+    rep.modules[0].diagrams = [d if isinstance(d, Diagram) else Diagram(*d) for d in diagrams]
+    return rep
+
+
+BOARD_TAGS = {"svg", "defs", "g", "path", "rect", "circle", "use", "line", "polygon", "radialgradient", "stop", "text", "title"}
+
+
+def _board_parts(html: str) -> list[str]:
+    return re.findall(r'<div class="board-svg"[^>]*>(.*?)</div>', html, re.S)
+
+
+@pytest.mark.parametrize(
+    "svg",
+    [
+        '<svg onload="alert(1)"><rect width="8" height="8"/></svg>',
+        '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe></foreignObject></svg>',
+        '<svg><image href="https://evil.example/pixel.png" width="1" height="1"/></svg>',
+        '<svg><a href="jav&#x61;script:alert(1)"><rect width="8" height="8"/></a></svg>',
+        '<svg><rect width="8" height="8" style="fill:url(https://evil.example/a.svg#x)"/></svg>',
+        '<svg><desc><![CDATA[x><img src=x onerror=alert(1)>]]></desc></svg>',
+        '<svg><set attributeName="onmouseover" to="alert(1)"/></svg>',
+        '<svg><use href="https://evil.example/sprite.svg#a"/></svg>',
+        '<svg><g><rect width="8" height="8" onclick="alert(1)"/></g></svg>',
+        '<svg/><img src=x onerror=alert(1)>',
+    ],
+)
+def test_diagram_svg_is_sanitised_by_allowlist(svg):
+    fen = "8/8/8/4k3/8/8/4K3/8 w - - 0 1"
+    html = render_html(_diagram_report(("Hostile", fen, svg, "caption", GAME.format(1))))
+    checker = check_html(html)
+    lowered = html.lower()
+    for needle in ("onload", "onerror", "onclick", "onmouseover", "foreignobject", "iframe", "evil.example", "<img", "<set", "<a href=\"jav"):
+        assert needle not in lowered, needle
+    assert not checker.srcs
+    (board,) = _board_parts(html)
+    tags = set(re.findall(r"<([a-zA-Z]+)", board))
+    assert {t.lower() for t in tags} <= BOARD_TAGS, tags
+    # a rejected SVG falls back to a board drawn from the FEN by python-chess
+    assert "<use" in board and "white-king" in board and "black-king" in board
+
+
+def test_diagram_svg_from_python_chess_is_kept_with_unique_ids():
+    html = render_html(_diagram_report(("First", "x", _board_svg(), "c1", ""), ("Second", "x", _board_svg(), "c2", "")))
+    checker = check_html(html)
+    boards = _board_parts(html)
+    assert len(boards) == 2
+    for board in boards:
+        assert board.count('class="arrow"') == 4  # both arrows (shaft + head) survive
+        assert "radialGradient" in board  # check highlight
+    assert len(checker.ids) == len(set(checker.ids)), [i for i in checker.ids if checker.ids.count(i) > 1][:5]
+    refs = set(re.findall(r'href="#([^"]+)"', html)) | set(re.findall(r"url\(#([^)]+)\)", html))
+    assert refs and refs <= set(checker.ids)
+
+
+def test_diagram_without_usable_svg_or_fen_shows_text_only():
+    html = render_html(_diagram_report(("Broken", "not a fen", "<svg onload=alert(1)></svg>", "caption", "")))
+    check_html(html)
+    assert "onload" not in html and ">Broken<" in html
+
+
+RESULT_MIX = [
+    "Won by checkmate",
+    "Won by resignation",
+    "Won on time",
+    "Won: abandoned / other",
+    "Drawn",
+    "Lost: abandoned / other",
+    "Lost on time",
+    "Lost by resignation",
+    "Lost by checkmate",
+]
+
+
+def _legend_items(html: str) -> list[tuple[str, str]]:
+    legend = re.search(r'<ul class="legend"[^>]*>(.*?)</ul>', html, re.S).group(1)
+    return re.findall(r'<span class="key (?:key--line )?(sw[\w-]+)" aria-hidden="true"></span>([^<]*)</li>', legend)
+
+
+def test_result_mix_chart_uses_semantic_colours_and_never_folds_results():
+    chart = Chart(
+        kind="stacked_bar",
+        title="How your games end",
+        labels=["Blitz", "Rapid"],
+        series=[Series(name, [0.1, 0.12]) for name in RESULT_MIX],
+        value_format="pct",
+    )
+    rep = empty_report()
+    rep.modules[0].charts = [chart]
+    html = render_html(rep)
+    items = _legend_items(html)
+    assert [name for _, name in items] == RESULT_MIX  # nothing folded into "Other"
+    swatch = dict((name, cls) for cls, name in items)
+    assert swatch["Drawn"] == "sw-d"
+    wins = {swatch[n] for n in RESULT_MIX[:4]}
+    losses = {swatch[n] for n in RESULT_MIX[5:]}
+    assert wins == {"sw-w1", "sw-w2", "sw-w3", "sw-w4"} and losses == {"sw-l1", "sw-l2", "sw-l3", "sw-l4"}
+    assert swatch["Won by checkmate"] == "sw-w1" and swatch["Lost by checkmate"] == "sw-l1"  # most decisive = strongest
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    for token in ("--s-w1:", "--s-w4:", "--s-d:", "--s-l1:", "--s-l4:"):
+        assert style.count(token) == 3, token  # light + both dark blocks
+    svg = re.search(r"<svg .*?</svg>", html, re.S).group(0)
+    assert 'class="bar f-w1"' in svg and 'class="bar f-l1"' in svg and 'class="bar f-d"' in svg
+
+
+def test_result_series_are_put_in_win_draw_loss_order():
+    chart = Chart(
+        kind="stacked_bar",
+        title="Results by session length",
+        labels=["1 game", "2+ games"],
+        series=[Series("Losses", [3, 4]), Series("Wins", [5, 6]), Series("Draws", [1, 0])],
+        value_format="int",
+    )
+    rep = empty_report()
+    rep.modules[0].charts = [chart]
+    html = render_html(rep)
+    assert _legend_items(html) == [("sw-w1", "Wins"), ("sw-d", "Draws"), ("sw-l1", "Losses")]
+    assert chart_table(chart).columns == ["", "Wins", "Draws", "Losses"]
+    assert "| 1 game | 5 | 1 | 3 |" in render_markdown(rep)
+
+
+def test_series_colour_follows_identity_not_position():
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind="line", title="a", labels=["1", "2"], series=[Series("Bullet", [1, 2]), Series("Blitz", [1, 2]), Series("Rapid", [2, 3])]),
+        Chart(kind="line", title="b", labels=["1", "2"], series=[Series("Blitz", [1, 2]), Series("Rapid", [2, 3])]),
+    ]
+    html = render_html(rep)
+    legends = re.findall(r'<ul class="legend"[^>]*>(.*?)</ul>', html, re.S)
+    colours = [dict((n, c) for c, n in re.findall(r'class="key key--line (sw[\w-]+)"[^>]*></span>([^<]*)<', lg)) for lg in legends]
+    assert colours[0]["Blitz"] == colours[1]["Blitz"] and colours[0]["Rapid"] == colours[1]["Rapid"]
+    assert len(set(colours[1].values())) == 2
+
+
+@pytest.mark.parametrize("kind", ["bar", "hbar", "line"])
+def test_zero_reference_is_the_zero_baseline_not_a_second_line(kind):
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind=kind, title="Score vs expected", labels=["a", "b", "c"], series=[Series("Score − expected", [0.05, -0.04, 0.02])], value_format="signed_pct", reference=0.0)
+    ]
+    html = render_html(rep)
+    svg = re.search(r"<svg .*?</svg>", html, re.S).group(0)
+    assert 'class="ref"' not in svg and "Reference 0%" not in html
+    assert '<ul class="legend"' not in html  # a single series with no other reference needs no legend
+    assert svg.count('class="zero"') == 1
+    assert "Reference line" not in render_markdown(rep)
+
+
+def _x_label_boxes(svg: str) -> list[tuple[float, float]]:
+    import html as _h
+
+    boxes = []
+    for m in re.finditer(r'<text class="t-x" x="([\d.]+)" y="[\d.]+"[^>]*text-anchor="middle">([^<]*)</text>', svg):
+        width = len(_h.unescape(m.group(2))) * 13 * 0.58
+        boxes.append((float(m.group(1)) - width / 2, float(m.group(1)) + width / 2))
+    return boxes
+
+
+@pytest.mark.parametrize("n", [6, 11, 16, 25, 39])
+def test_line_chart_month_labels_never_overlap(n):
+    labels = [f"{2020 + i // 12}-{i % 12 + 1:02d}" for i in range(n)]
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind="line", title="Rating by month", labels=labels, series=[Series("Blitz", [1500 + i for i in range(n)]), Series("Rapid", [1600 - i for i in range(n)])], value_format="rating")
+    ]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    boxes = _x_label_boxes(svg)
+    assert len(boxes) >= 2 and boxes[-1][1] <= 400 and boxes[0][0] >= 0
+    assert all(a[1] + 2 <= b[0] for a, b in zip(boxes, boxes[1:])), boxes
+    assert re.search(rf">{labels[-1]}</text>", svg)  # the most recent month is always labelled
+
+
+@pytest.mark.parametrize("n", [8, 12, 13, 16])
+def test_bar_value_labels_never_collide(n):
+    rep = empty_report()
+    rep.modules[0].charts = [Chart(kind="bar", title="t", labels=[str(i) for i in range(n)], series=[Series("x", [-0.123] * n)], value_format="signed_pct")]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    caps = [float(x) for x in re.findall(r'<text class="t-val" x="([\d.]+)"', svg)]
+    width = len(f"{MINUS}12%") * 12 * 0.58
+    assert all(b - a >= width + 2 for a, b in zip(caps, caps[1:]))
+
+
+@pytest.mark.parametrize(
+    ("value", "fmt", "expected"),
+    [
+        (0.0004, "pct", "<0.1%"),  # a real but tiny rate is not "0%"
+        (0.00049, "pct", "<0.1%"),
+        (0.0005, "pct", "0.1%"),
+        (0.0996, "pct", "10%"),  # rounds up to 10%: no stray decimal
+        (-0.0996, "pct", f"{MINUS}10%"),
+        (0.0996, "signed_pct", "+10%"),
+        (-0.0, "pct", "0%"),
+        (-0.0, "float1", "0.0"),
+        (-0.04, "float1", "0.0"),
+        (-0.4, "signed_int", "0"),
+        (90061, "seconds", "25:01:01"),
+    ],
+)
+def test_format_value_edge_cases(value, fmt, expected):
+    assert format_value(value, fmt) == expected
+
+
+@pytest.mark.parametrize("fmt", ["int", "float1", "float2", "signed_int", "rating", "pct", "seconds"])
+def test_huge_numbers_stay_short(fmt):
+    for x in (1e300, -1e300, 1.5e18):
+        text = format_value(x, fmt)
+        assert len(text) <= 16 and "e" in text.lower(), (fmt, text)
+    assert format_value(123456789012, "int") == "123,456,789,012"  # ordinary big numbers keep grouping
+
+
+def test_huge_values_do_not_break_the_chart():
+    rep = empty_report()
+    rep.modules[0].charts = [Chart(kind="bar", title="huge", labels=["a", "b"], series=[Series("x", [1e300, 2e300])])]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    xs = [float(x) for x in re.findall(r'<path class="bar[^"]*" d="M([\d.]+),', svg)]
+    assert len(xs) == 2 and all(0 < x < 400 for x in xs)
+
+
+def test_markdown_code_spans_links_and_block_markers():
+    from chess_insights.models import Diagram
+    from chess_insights.report.markdown import md_link, md_text
+
+    rep = empty_report()
+    rep.modules[0].diagrams = [Diagram("Pos", "8/8/8/8/8/8/8/8 w - - 0 1 `**x**` <b>", "", "c", "")]
+    md = render_markdown(rep)
+    line = next(l for l in md.splitlines() if "Pos" in l)
+    spans = re.findall(r"(`+)(.+?)\1", line)
+    assert spans and all("\\" not in body for _, body in spans)  # no backslash escapes inside code spans
+    assert "<b>" in spans[-1][1] and line.count("`") % 2 == 0
+    # a backslash in a URL cannot escape the closing parenthesis of the link
+    link = md_link("https://example.org/a\\", "x")
+    assert link.endswith(")") and not link.endswith("\\)")
+    # text that would become a heading closer, a thematic break or maths is escaped
+    assert md_text("---") != "---" and md_text("***").count("\\") == 3
+    assert md_text("Game #1 #").endswith("\\#")
+    assert md_text("$x$") == "\\$x\\$"
+
+
+def test_json_never_crashes_on_signalling_nan_decimal():
+    from decimal import Decimal
+
+    rep = empty_report()
+    rep.modules[0].stats = {"snan": Decimal("sNaN"), "nan": Decimal("NaN"), "x": Decimal("1.5")}
+    stats = json.loads(to_json(rep))["modules"][0]["stats"]
+    assert stats == {"snan": None, "nan": None, "x": 1.5}
