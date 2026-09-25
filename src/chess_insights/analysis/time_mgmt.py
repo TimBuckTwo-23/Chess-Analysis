@@ -436,8 +436,8 @@ def flag_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insig
         study=[
             f"Replay your {min(MAX_EXAMPLES, len(timeouts))} most recent losses on time and note how much time you had "
             "left at moves 20 and 30: that is where the flag was really lost.",
-            "Once you are low on time, switch to safe, fast moves: keep pieces protected, avoid complications and "
-            "trade pieces when you are ahead.",
+            "Once you are low on time, switch to safe, fast moves: keep every piece protected and avoid "
+            "complications.",
             "When you are ahead on the board but behind on the clock, trade pieces early so the position becomes "
             "easy to play quickly.",
         ],
@@ -472,9 +472,11 @@ def opening_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
     )
     if cp and cp.n:
         detail += f" You were behind on the clock at move {cp.move} in {pct(cp.behind_rate)} of {cp.n} games."
+    (base, inc), _ = Counter((c.game.base_seconds or 0, c.game.increment) for c in slow).most_common(1)[0]
+    per_move = max(1, round(cs.opp_opening * base / OPENING_MOVES))
     study = [
-        f"Aim to reach move {OPENING_MOVES} in {tc} having used no more than about {pct(cs.opp_opening)} of your "
-        "clock, as your opponents do.",
+        f"Budget about {per_move} seconds per move for your first {OPENING_MOVES} moves in your {base / 60:g}+{inc} "
+        "games (your opponents' pace) and keep the time you save for the middlegame.",
         "When you leave your preparation, play on principles (develop, castle, fight for the centre) instead of "
         "calculating long lines in the first moves.",
     ]
@@ -747,7 +749,12 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         return _not_enough("there are no live games to analyse (daily games have no running clock).", n=0)
     clocked = [gc for g in sorted(live, key=lambda g: g.end_time) if (gc := game_clock(g))]
     if not clocked:
-        return _not_enough(f"none of your {len(live)} live games have clock data.", n=0, n_live=len(live))
+        return _not_enough(
+            f"none of your {len(live)} live games has usable clock data (clocks for both players and at least "
+            f"{MIN_PLIES} plies).",
+            n=0,
+            n_live=len(live),
+        )
 
     by_class: dict[str, list[GameClock]] = {}
     for gc in clocked:

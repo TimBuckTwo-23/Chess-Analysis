@@ -431,7 +431,13 @@ _LENGTH_TEXT: dict[tuple[str, InsightKind], tuple[str, list[str]]] = {
 def length_insights(
     groups: dict[str, list[Game]], summaries: dict[str, ScoreSummary], th: Thresholds
 ) -> tuple[list[Insight], dict[str, Optional[float]]]:
-    tested = [key for key, _, _, _ in LENGTH_BUCKETS if summaries[key].n_rated >= th.min_length_games]
+    total = sum(s.n_rated for s in summaries.values())
+    # a length is only a finding if there are enough games of other lengths to set it apart from
+    tested = [
+        key
+        for key, _, _, _ in LENGTH_BUCKETS
+        if summaries[key].n_rated >= th.min_length_games and total - summaries[key].n_rated >= th.min_length_games
+    ]
     adjusted = dict(zip(tested, bh_adjust([summaries[k].test.p_value for k in tested]), strict=True))
     labels = {key: label for key, label, _, _ in LENGTH_BUCKETS}
     out: list[Insight] = []

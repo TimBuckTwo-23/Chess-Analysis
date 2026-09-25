@@ -165,8 +165,8 @@ class Persona:
     loss gets three), and games with none of the planted contexts get ``baseline_shift``: a real
     player's rating already prices in their weaknesses, so their ordinary games sit a little above
     expectation and the rating stays roughly stable. The defaults are calibrated so the planted
-    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.10,
-    rapid +0.09 (blitz -0.02, bullet -0.045).
+    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.12,
+    rapid +0.09 (blitz -0.02, bullet -0.04).
     """
 
     username: str = "demo_player"
@@ -178,12 +178,12 @@ class Persona:
     )
     # T8: stronger at rapid than at the fast time controls
     time_class_shift: dict[str, float] = field(
-        default_factory=lambda: {"blitz": -0.02, "rapid": 0.09, "bullet": -0.045, "daily": 0.0}
+        default_factory=lambda: {"blitz": -0.01, "rapid": 0.10, "bullet": -0.025, "daily": 0.0}
     )
     baseline_shift: float = 0.09
     # T1: Caro-Kann as Black against 1.e4
     caro_kann_share: float = 0.38
-    caro_kann_shift: float = -0.15
+    caro_kann_shift: float = -0.155
     # T2: Italian Game as White (share of all White games; White always opens 1.e4)
     italian_share: float = 0.45
     italian_shift: float = 0.18
@@ -196,8 +196,8 @@ class Persona:
     tilt_window_min: float = 15.0
     quick_requeue_after_loss: float = 0.8
     # T5: late-night play (games starting 23:00-03:00 UTC)
-    late_night_shift: float = -0.10
-    late_session_share: float = 0.22
+    late_night_shift: float = -0.13
+    late_session_share: float = 0.25
     # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
     endgame_error_factor: float = 3.0
     # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
@@ -445,26 +445,48 @@ class _Session:
     start: datetime
 
 
-def _pick_opening(rng: random.Random, color: str, persona: Persona) -> str:
+class _QuotaPicker:
+    """Weighted choices whose running frequencies stay close to the weights.
+
+    A real repertoire is stable: someone who answers 1.e4 with the Caro-Kann 38% of the time
+    does not drift to 23% over a few hundred games the way independent draws can. Options that
+    fall behind their share get proportionally more weight, so the order stays random while
+    the frequencies track the persona.
+    """
+
+    def __init__(self, rng: random.Random) -> None:
+        self.rng = rng
+        self.counts: dict[str, dict[str, int]] = {}
+
+    def pick(self, decision: str, options: Sequence[tuple[str, float]]) -> str:
+        counts = self.counts.setdefault(decision, {})
+        n = sum(counts.values()) + 1
+        total = sum(w for _, w in options) or 1.0
+        choice = _weighted(self.rng, [(o, max(0.02, w / total * n - counts.get(o, 0))) for o, w in options])
+        counts[choice] = counts.get(choice, 0) + 1
+        return choice
+
+
+def _pick_opening(picker: _QuotaPicker, color: str, persona: Persona) -> str:
     if color == "white":
         italian_w = sum(w for k, w in _WHITE_REPERTOIRE if k in ITALIAN_LINES)
         rest_w = 1.0 - italian_w
         scale_it = persona.italian_share / italian_w if italian_w else 0.0
         scale_rest = (1.0 - persona.italian_share) / rest_w if rest_w else 0.0
-        weights = [(k, w * (scale_it if k in ITALIAN_LINES else scale_rest)) for k, w in _WHITE_REPERTOIRE]
-        return _weighted(rng, weights)
-    first = _weighted(rng, _OPPONENT_FIRST_MOVE)
+        return picker.pick("white", [(k, w * (scale_it if k in ITALIAN_LINES else scale_rest)) for k, w in _WHITE_REPERTOIRE])
+    first = picker.pick("first-move", _OPPONENT_FIRST_MOVE)
     if first == "d4":
-        return _weighted(rng, _BLACK_VS_D4)
+        return picker.pick("vs-d4", _BLACK_VS_D4)
     if first == "c4":
         return "english_kings"
     if first == "Nf3":
         return "kings_indian_attack"
-    r = rng.random()
-    if r < persona.caro_kann_share:
-        return _weighted(rng, _CARO_KANN_MIX)
-    if r < persona.caro_kann_share + (1.0 - persona.caro_kann_share) * 0.8:
-        return _weighted(rng, _BLACK_VS_E5)
+    rest = 1.0 - persona.caro_kann_share
+    reply = picker.pick("vs-e4", [("caro", persona.caro_kann_share), ("e5", rest * 0.8), ("scandinavian", rest * 0.2)])
+    if reply == "caro":
+        return picker.pick("caro-kann", _CARO_KANN_MIX)
+    if reply == "e5":
+        return picker.pick("vs-e5", _BLACK_VS_E5)
     return "scandinavian"
 
 
@@ -473,7 +495,7 @@ def _session_start(rng: random.Random, day: datetime, persona: Persona) -> datet
     r = rng.random()
     late = persona.late_session_share
     if r < late:
-        minute = rng.uniform(22 * 60 + 40, 25 * 60 + 20)  # 22:40 - 01:20 next day
+        minute = rng.uniform(23 * 60 + 40, 25 * 60 + 50)  # 23:40 - 01:50 next day
     elif r < late + 0.55:
         minute = rng.uniform(17 * 60, 21 * 60 + 30)
     elif r < late + 0.70:
@@ -526,6 +548,7 @@ def _plan_one(
     persona: Persona,
     pool: _OpponentPool,
     balancer: _OutcomeBalancer,
+    picker: _QuotaPicker,
     *,
     time_class: str,
     time_control: str,
@@ -536,8 +559,8 @@ def _plan_one(
     prev_opponent: Optional[str],
 ) -> _Plan:
     base, inc = _parse_tc(time_control)
-    color = rng.choice(("white", "black"))
-    opening = _pick_opening(rng, color, persona)
+    color = picker.pick("colour", (("white", 0.5), ("black", 0.5)))
+    opening = _pick_opening(picker, color, persona)
     offset = int(_clamp(round(rng.gauss(0.0, OPPONENT_RATING_SD)), -400, 400))
     expected = _expected(offset)
 
@@ -612,6 +635,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
     rng = random.Random(f"chess-insights-synth:{seed}")
     pool = _OpponentPool(rng, persona.username)
     balancer = _OutcomeBalancer()
+    picker = _QuotaPicker(rng)
     mix = {tc: max(0.0, w) for tc, w in persona.time_class_mix.items() if tc in TIME_CONTROLS}
     total_w = sum(mix.values()) or 1.0
     mix = {tc: w / total_w for tc, w in mix.items()} or {"blitz": 1.0}
@@ -666,6 +690,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
                 persona,
                 pool,
                 balancer,
+                picker,
                 time_class=s.time_class,
                 time_control=tc_str,
                 planned_start=t,
@@ -689,6 +714,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
             persona,
             pool,
             balancer,
+            picker,
             time_class="daily",
             time_control=_weighted(rng, TIME_CONTROLS["daily"]),
             planned_start=started,

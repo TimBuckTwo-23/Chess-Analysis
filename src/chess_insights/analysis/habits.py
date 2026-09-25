@@ -274,8 +274,7 @@ def tilt_insight(
                 "p_value": test.p_value,
             },
             study=[
-                f"Adopt a stop rule: after a loss, wait at least {w} minutes before the next game, and stop for "
-                "the day after two losses in a row.",
+                f"Stop rule: after any loss, wait at least {w} minutes before starting another game.",
                 "Use the break to find the move where the lost game turned; start the next game only once you "
                 "know what went wrong.",
                 "If you catch yourself pressing 'New game' seconds after a loss, switch to puzzles instead.",
@@ -504,7 +503,7 @@ def _summary(
     th: Thresholds,
 ) -> str:
     text = (
-        f"You played {n} live games in {n_sessions} session{'s' if n_sessions != 1 else ''} "
+        f"You played {n} live game{'s' if n != 1 else ''} in {n_sessions} session{'s' if n_sessions != 1 else ''} "
         f"(on average {avg:.1f} games, at most {longest})."
     )
     if a.n_rated and r.n_rated:
@@ -617,7 +616,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         Kpi("Sessions", n_sessions, "int", hint=f"a pause of more than {th.session_gap_min:g} min starts a new one"),
         Kpi("Games per session", avg, "float1", hint=f"longest: {longest}"),
         Kpi("After a loss", after_loss.delta, "signed_pct", hint=f"score vs expected, {after_loss.n_rated} games"),
-        Kpi("Otherwise", rest.delta, "signed_pct", hint=f"score vs expected, {rest.n_rated} games"),
+        Kpi("All other games", rest.delta, "signed_pct", hint=f"score vs expected, {rest.n_rated} games"),
         Kpi("Longest losing streak", len(streak), "int"),
     ]
 
