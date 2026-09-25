@@ -13,11 +13,11 @@ from chess_insights import fetch, parse, synth
 from chess_insights.models import CATEGORIES, DRAW_CODES, LOSS_CODES
 
 USER = synth.DEFAULT_PERSONA.username
-HEADER_ORDER = [
-    "Event", "Site", "Date", "Round", "White", "Black", "Result", "CurrentPosition", "Timezone", "ECO", "ECOUrl",
-    "UTCDate", "UTCTime", "WhiteElo", "BlackElo", "TimeControl", "Termination", "StartTime", "EndDate", "EndTime", "Link",
-]
-GAME_KEYS = {"url", "pgn", "time_control", "end_time", "rated", "tcn", "uuid", "initial_setup", "fen", "time_class", "rules", "white", "black", "eco"}
+HEADER_ORDER = (
+    "Event Site Date Round White Black Result CurrentPosition Timezone ECO ECOUrl UTCDate UTCTime WhiteElo BlackElo "
+    "TimeControl Termination StartTime EndDate EndTime Link"
+).split()
+GAME_KEYS = set("url pgn time_control end_time rated tcn uuid initial_setup fen time_class rules white black eco".split())
 PLAYER_KEYS = {"rating", "result", "@id", "username", "uuid"}
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-1[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 TERMINATION_RE = {
@@ -132,7 +132,7 @@ def check_clocks(raw: dict, g, board: chess.Board) -> None:
         assert 0 < clk <= last[side] + inc + 1e-9, (raw["url"], i)  # clocks only ever grow by the increment
         spent += last[side] + inc - clk
         last[side] = clk
-    flagged = raw["white"]["result"] == "timeout" or raw["black"]["result"] == "timeout" or raw["white"]["result"] == "timevsinsufficient"
+    flagged = {raw["white"]["result"], raw["black"]["result"]} & {"timeout", "timevsinsufficient"}
     if flagged:  # the side on move used up its whole remaining clock
         remaining = last[0 if board.turn == chess.WHITE else 1]
         assert abs(elapsed - (spent + remaining)) <= 1.1, raw["url"]
@@ -299,11 +299,14 @@ def test_blitz_clock_habits_are_visible(medium_archives):
     on_time = lambda gs: sum(g.termination == "timeout" for g in gs) / len(gs)  # noqa: E731
     losses, wins = [g for g in games if g.outcome == "loss"], [g for g in games if g.outcome == "win"]
     assert on_time(losses) >= 0.10 and on_time(losses) > 1.5 * on_time(wins)  # flags far more often than opponents
-    used_me, used_opp = 0.0, 0.0
+    used_me = used_opp = trouble_me = trouble_opp = 0.0
     for g in games:
         mine = [c for i, c in enumerate(g.clocks) if g.is_my_ply(i)]
         theirs = [c for i, c in enumerate(g.clocks) if not g.is_my_ply(i)]
+        trouble_me += min(mine, default=g.base_seconds) < 0.1 * g.base_seconds
+        trouble_opp += min(theirs, default=g.base_seconds) < 0.1 * g.base_seconds
         if len(mine) >= 15 and len(theirs) >= 15:
             used_me += g.base_seconds - mine[14] + 15 * g.increment
             used_opp += g.base_seconds - theirs[14] + 15 * g.increment
-    assert used_me > 1.5 * used_opp
+    assert used_me > 1.5 * used_opp  # about twice the opponents' time on the first 15 moves
+    assert trouble_me > 1.3 * trouble_opp  # ... so it ends up in time trouble far more often

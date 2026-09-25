@@ -63,47 +63,117 @@ def _line(eco: str, slug: str, moves: str) -> OpeningLine:
 
 OPENINGS: dict[str, OpeningLine] = {
     # 1.e4 e5 2.Nf3 Nc6 systems (the player's White repertoire; also met as Black)
-    "italian_pianissimo": _line("C54", "Italian-Game-Giuoco-Pianissimo-Normal", "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6 O-O O-O"),
+    "italian_pianissimo": _line(
+        "C54",
+        "Italian-Game-Giuoco-Pianissimo-Normal",
+        "e4 e5 Nf3 Nc6 Bc4 Bc5 c3 Nf6 d3 d6 O-O O-O",
+    ),
     "italian_two_knights": _line(
-        "C55", "Italian-Game-Two-Knights-Defense-Modern-Bishops-Opening", "e4 e5 Nf3 Nc6 Bc4 Nf6 d3 Be7 O-O O-O Re1 d6"
+        "C55",
+        "Italian-Game-Two-Knights-Defense-Modern-Bishops-Opening",
+        "e4 e5 Nf3 Nc6 Bc4 Nf6 d3 Be7 O-O O-O Re1 d6",
     ),
-    "italian_anti_fried_liver": _line("C50", "Italian-Game-Anti-Fried-Liver-Defense", "e4 e5 Nf3 Nc6 Bc4 h6 O-O Nf6 d3 Bc5 c3 d6"),
+    "italian_anti_fried_liver": _line(
+        "C50",
+        "Italian-Game-Anti-Fried-Liver-Defense",
+        "e4 e5 Nf3 Nc6 Bc4 h6 O-O Nf6 d3 Bc5 c3 d6",
+    ),
     "italian_knight_attack": _line(
-        "C58", "Italian-Game-Two-Knights-Defense-Knight-Attack-Normal-Variation", "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5 exd5 Na5 Bb5+ c6"
+        "C58",
+        "Italian-Game-Two-Knights-Defense-Knight-Attack-Normal-Variation",
+        "e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5 exd5 Na5 Bb5+ c6",
     ),
-    "ruy_closed": _line("C84", "Ruy-Lopez-Opening-Morphy-Defense-Closed-Variations", "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1"),
-    "ruy_exchange": _line("C69", "Ruy-Lopez-Opening-Exchange-Variation-5.O-O-f6-6.d4", "e4 e5 Nf3 Nc6 Bb5 a6 Bxc6 dxc6 O-O f6 d4"),
-    "ruy_berlin": _line("C65", "Ruy-Lopez-Opening-Berlin-Defense-4.d3-Bc5", "e4 e5 Nf3 Nc6 Bb5 Nf6 d3 Bc5 c3 O-O O-O d6"),
+    "ruy_closed": _line(
+        "C84",
+        "Ruy-Lopez-Opening-Morphy-Defense-Closed-Variations",
+        "e4 e5 Nf3 Nc6 Bb5 a6 Ba4 Nf6 O-O Be7 Re1",
+    ),
+    "ruy_exchange": _line(
+        "C69",
+        "Ruy-Lopez-Opening-Exchange-Variation-5.O-O-f6-6.d4",
+        "e4 e5 Nf3 Nc6 Bb5 a6 Bxc6 dxc6 O-O f6 d4",
+    ),
+    "ruy_berlin": _line(
+        "C65",
+        "Ruy-Lopez-Opening-Berlin-Defense-4.d3-Bc5",
+        "e4 e5 Nf3 Nc6 Bb5 Nf6 d3 Bc5 c3 O-O O-O d6",
+    ),
     "scotch_classical": _line(
-        "C45", "Scotch-Game-Classical-Variation-5.Be3-Qf6-6.c3-Nge7", "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Bc5 Be3 Qf6 c3 Nge7"
+        "C45",
+        "Scotch-Game-Classical-Variation-5.Be3-Qf6-6.c3-Nge7",
+        "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Bc5 Be3 Qf6 c3 Nge7",
     ),
     "scotch_schmidt": _line(
-        "C45", "Scotch-Game-Schmidt-Variation-5.Nxc6-bxc6-6.e5-Qe7", "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Nf6 Nxc6 bxc6 e5 Qe7"
+        "C45",
+        "Scotch-Game-Schmidt-Variation-5.Nxc6-bxc6-6.e5-Qe7",
+        "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Nf6 Nxc6 bxc6 e5 Qe7",
     ),
-    "four_knights_scotch": _line("C47", "Four-Knights-Game-Scotch-Variation", "e4 e5 Nf3 Nc6 Nc3 Nf6 d4 exd4 Nxd4 Bb4 Nxc6 bxc6"),
-    "vienna": _line("C28", "Vienna-Game-Stanley-Variation-Three-Knights-Variation", "e4 e5 Nc3 Nf6 Bc4 Nc6 d3 Bc5 f4 d6 Nf3"),
+    "four_knights_scotch": _line(
+        "C47",
+        "Four-Knights-Game-Scotch-Variation",
+        "e4 e5 Nf3 Nc6 Nc3 Nf6 d4 exd4 Nxd4 Bb4 Nxc6 bxc6",
+    ),
+    "vienna": _line(
+        "C28",
+        "Vienna-Game-Stanley-Variation-Three-Knights-Variation",
+        "e4 e5 Nc3 Nf6 Bc4 Nc6 d3 Bc5 f4 d6 Nf3",
+    ),
     # other replies to 1.e4
     "sicilian_alapin": _line("B22", "Sicilian-Defense-Alapin-Variation-2...Nf6", "e4 c5 c3 Nf6 e5 Nd5 d4 cxd4 Nf3 Nc6"),
-    "french_advance": _line("C02", "French-Defense-Advance-Variation-3...c5-4.c3-Nc6", "e4 e6 d4 d5 e5 c5 c3 Nc6 Nf3 Qb6"),
-    "scandinavian": _line("B01", "Scandinavian-Defense-Mieses-Kotrc-Variation", "e4 d5 exd5 Qxd5 Nc3 Qa5 d4 Nf6 Nf3 c6"),
+    "french_advance": _line(
+        "C02",
+        "French-Defense-Advance-Variation-3...c5-4.c3-Nc6",
+        "e4 e6 d4 d5 e5 c5 c3 Nc6 Nf3 Qb6",
+    ),
+    "scandinavian": _line(
+        "B01",
+        "Scandinavian-Defense-Mieses-Kotrc-Variation",
+        "e4 d5 exd5 Qxd5 Nc3 Qa5 d4 Nf6 Nf3 c6",
+    ),
     "petrov": _line("C42", "Petrovs-Defense-Classical-Attack", "e4 e5 Nf3 Nf6 Nxe5 d6 Nf3 Nxe4 d4 d5 Bd3"),
     "pirc": _line("B08", "Pirc-Defense-Classical-Variation", "e4 d6 d4 Nf6 Nc3 g6 Nf3 Bg7 Be2 O-O O-O"),
     # the player's Caro-Kann (as Black)
     "caro_advance_short": _line(
-        "B12", "Caro-Kann-Defense-Advance-Variation-Short-Variation", "e4 c6 d4 d5 e5 Bf5 Nf3 e6 Be2 c5 O-O Nc6"
+        "B12",
+        "Caro-Kann-Defense-Advance-Variation-Short-Variation",
+        "e4 c6 d4 d5 e5 Bf5 Nf3 e6 Be2 c5 O-O Nc6",
     ),
-    "caro_advance_c5": _line("B12", "Caro-Kann-Defense-Advance-Variation-3...c5", "e4 c6 d4 d5 e5 c5 dxc5 e6 Be3 Nd7 Nf3 Bxc5"),
-    "caro_exchange": _line("B13", "Caro-Kann-Defense-Exchange-Variation", "e4 c6 d4 d5 exd5 cxd5 Bd3 Nc6 c3 Nf6 Bf4 Bg4"),
-    "caro_classical": _line("B18", "Caro-Kann-Defense-Classical-Variation", "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Bf5 Ng3 Bg6 Nf3 Nd7"),
+    "caro_advance_c5": _line(
+        "B12",
+        "Caro-Kann-Defense-Advance-Variation-3...c5",
+        "e4 c6 d4 d5 e5 c5 dxc5 e6 Be3 Nd7 Nf3 Bxc5",
+    ),
+    "caro_exchange": _line(
+        "B13",
+        "Caro-Kann-Defense-Exchange-Variation",
+        "e4 c6 d4 d5 exd5 cxd5 Bd3 Nc6 c3 Nf6 Bf4 Bg4",
+    ),
+    "caro_classical": _line(
+        "B18",
+        "Caro-Kann-Defense-Classical-Variation",
+        "e4 c6 d4 d5 Nc3 dxe4 Nxe4 Bf5 Ng3 Bg6 Nf3 Nd7",
+    ),
     "caro_two_knights": _line("B11", "Caro-Kann-Defense-Two-Knights-Attack", "e4 c6 Nc3 d5 Nf3 Bg4 h3 Bxf3 Qxf3 e6"),
     # the player's answers to 1.d4 / 1.c4 / 1.Nf3
     "qgd_harrwitz": _line(
-        "D37", "Queens-Gambit-Declined-Queens-Knight-Variation-4.Nf3-Be7-5.Bf4", "d4 d5 c4 e6 Nc3 Nf6 Nf3 Be7 Bf4 O-O e3 c5"
+        "D37",
+        "Queens-Gambit-Declined-Queens-Knight-Variation-4.Nf3-Be7-5.Bf4",
+        "d4 d5 c4 e6 Nc3 Nf6 Nf3 Be7 Bf4 O-O e3 c5",
     ),
-    "qgd_exchange": _line("D35", "Queens-Gambit-Declined-Exchange-Variation", "d4 d5 c4 e6 Nc3 Nf6 cxd5 exd5 Bg5 Be7 e3 O-O"),
-    "london": _line("D00", "Queens-Pawn-Opening-Accelerated-London-System", "d4 d5 Bf4 Nf6 e3 c5 c3 Nc6 Nd2 e6 Ngf3 Bd6"),
+    "qgd_exchange": _line(
+        "D35",
+        "Queens-Gambit-Declined-Exchange-Variation",
+        "d4 d5 c4 e6 Nc3 Nf6 cxd5 exd5 Bg5 Be7 e3 O-O",
+    ),
+    "london": _line(
+        "D00",
+        "Queens-Pawn-Opening-Accelerated-London-System",
+        "d4 d5 Bf4 Nf6 e3 c5 c3 Nc6 Nd2 e6 Ngf3 Bd6",
+    ),
     "english_kings": _line(
-        "A29", "English-Opening-Kings-English-Variation-Four-Knights-Variation", "c4 e5 Nc3 Nf6 Nf3 Nc6 g3 d5 cxd5 Nxd5 Bg2 Nb6"
+        "A29",
+        "English-Opening-Kings-English-Variation-Four-Knights-Variation",
+        "c4 e5 Nc3 Nf6 Nf3 Nc6 g3 d5 cxd5 Nxd5 Bg2 Nb6",
     ),
     "kings_indian_attack": _line("A07", "Kings-Indian-Attack", "Nf3 d5 g3 Nf6 Bg2 e6 O-O Be7 d3 O-O"),
 }
@@ -236,14 +306,32 @@ PLANTED_TRAITS: list[dict[str, Any]] = [
         "category": "time",
         "expect": "weakness",
         "description": "Spends far too long on the opening in blitz, gets into time trouble and loses on time",
-        "keywords": ["time trouble", "on time", "flag", "timeout", "time pressure", "low on time", "first 15", "opening moves", "slow"],
+        "keywords": [
+            "time trouble",
+            "on time",
+            "flag",
+            "timeout",
+            "time pressure",
+            "low on time",
+            "first 15",
+            "opening moves",
+            "slow",
+        ],
     },
     {
         "id": "T4-tilt",
         "category": "habits",
         "expect": "weakness",
         "description": "Scores worse in games started within 15 minutes of a loss (tilt)",
-        "keywords": ["after a loss", "after losing", "after losses", "tilt", "right after", "straight after", "losing streak"],
+        "keywords": [
+            "after a loss",
+            "after losing",
+            "after losses",
+            "tilt",
+            "right after",
+            "straight after",
+            "losing streak",
+        ],
     },
     {
         "id": "T5-late-night",
@@ -295,7 +383,8 @@ _DRAW_RATE = {"bullet": 0.05, "blitz": 0.06, "rapid": 0.08, "daily": 0.10}
 # P(a decisive game ends on the clock | player loses), P(... | player wins); blitz losses use the persona.
 _FLAG_SHARE = {"bullet": (0.35, 0.30), "blitz": (0.28, 0.08), "rapid": (0.07, 0.05), "daily": (0.0, 0.0)}
 _RESIGN_P = {"bullet": 0.20, "blitz": 0.30, "rapid": 0.40, "daily": 0.45}
-_OPENING_TIME_FRACTION = {"bullet": 0.22, "blitz": 0.20, "rapid": 0.24}  # clock share a typical player uses on moves 1-15
+# Share of the starting clock a typical player uses on moves 1-15.
+_OPENING_TIME_FRACTION = {"bullet": 0.22, "blitz": 0.20, "rapid": 0.24}
 _PLAYER_OPENING_FACTOR = {"bullet": 1.25, "rapid": 1.25}  # blitz comes from the persona (T3)
 _SESSION_SIZE_WEIGHTS = (15, 20, 20, 15, 10, 8, 6, 6)  # 1..8 games
 _BASE_ERROR_RATES = (0.030, 0.050, 0.080)  # blunder, mistake, inaccuracy per move (typical club player)
@@ -444,6 +533,8 @@ class _Plan:
     gap_after: float  # seconds before the next game of the session
     tilt: bool
     late: bool
+    keys: tuple[str, ...] = ()  # planted subsets the game belongs to: its time class plus trait contexts
+    mu: float = 0.5  # intended expected score (Elo expectation + shift)
     max_duration: Optional[float] = None  # daily games must finish inside the window
 
 
@@ -482,7 +573,8 @@ def _pick_opening(picker: _QuotaPicker, color: str, persona: Persona) -> str:
         rest_w = 1.0 - italian_w
         scale_it = persona.italian_share / italian_w if italian_w else 0.0
         scale_rest = (1.0 - persona.italian_share) / rest_w if rest_w else 0.0
-        return picker.pick("white", [(k, w * (scale_it if k in ITALIAN_LINES else scale_rest)) for k, w in _WHITE_REPERTOIRE])
+        weights = [(k, w * (scale_it if k in ITALIAN_LINES else scale_rest)) for k, w in _WHITE_REPERTOIRE]
+        return picker.pick("white", weights)
     first = picker.pick("first-move", _OPPONENT_FIRST_MOVE)
     if first == "d4":
         return picker.pick("vs-d4", _BLACK_VS_D4)
@@ -593,17 +685,18 @@ def _plan_one(
         shift += persona.baseline_shift
 
     target = _sample_target(rng, expected, shift, time_class, balancer, [time_class, *contexts])
+    # how games end is a habit too: flags and thrown wins keep a steady share (quota picks)
     finish = "board"
     if target != "draw" and time_class != "daily":
         p_loss, p_win = _FLAG_SHARE[time_class]
         if time_class == "blitz":
             p_loss = persona.blitz_flag_share
-        if rng.random() < (p_loss if target == "loss" else p_win):
-            finish = "flag"
+        p_flag = p_loss if target == "loss" else p_win
+        finish = picker.pick(f"finish:{time_class}:{target}", (("flag", p_flag), ("board", 1.0 - p_flag)))
     swing = False
     if finish == "board":
         share = persona.throw_win_share if target != "win" else persona.opponent_throw_win_share
-        swing = rng.random() < share
+        swing = picker.pick(f"swing:{target}", (("yes", share), ("no", 1.0 - share))) == "yes"
     rematch = prev_opponent is not None and rng.random() < 0.08
     return _Plan(
         index=-1,
@@ -628,6 +721,8 @@ def _plan_one(
         gap_after=0.0,
         tilt=tilt,
         late=late,
+        keys=(time_class, *contexts),
+        mu=_clamp(expected + shift, 0.03, 0.97),
     )
 
 
@@ -640,6 +735,40 @@ def _gap_after(rng: random.Random, target: str, persona: Persona) -> float:
     if rng.random() < 0.7:
         return rng.uniform(15, 10 * 60)
     return rng.uniform(11 * 60, 40 * 60)
+
+
+def _settle_subsets(plans: list[_Plan], persona: Persona, rng: random.Random) -> None:
+    """Flip a few intended results so every planted subset scores what its shifts promise.
+
+    The balancer keeps subsets close while planning, but it cannot correct a subset's last games.
+    This pass closes the remaining gap (usually one to three games per subset) by turning wins
+    into losses or back. It only touches games whose result cannot change the next game's
+    context: the last game of a session, one followed by a long pause, or a daily game.
+    Trait subsets are settled with games that carry no other trait; time classes afterwards
+    with ordinary games, so fixing one subset leaves the others alone.
+    """
+    last_of_session: dict[int, _Plan] = {}
+    for p in sorted(plans, key=lambda p: p.planned_start):
+        if p.session >= 0:
+            last_of_session[p.session] = p
+    window = persona.tilt_window_min * 60
+
+    def free(p: _Plan) -> bool:
+        return p.session < 0 or p.gap_after > window or last_of_session[p.session] is p
+
+    for key in ("caro-kann", "italian", "tilt", "late", *TIME_CONTROLS):
+        members = [p for p in plans if key in p.keys]
+        surplus = sum(_SCORE[p.target] - p.mu for p in members)
+        own_only = 1 if key in TIME_CONTROLS else 2  # the time class plus, for a trait, the trait itself
+        candidates = [p for p in members if free(p) and p.target != "draw" and len(p.keys) == own_only]
+        rng.shuffle(candidates)
+        for p in candidates:
+            if abs(surplus) <= 0.5:
+                break
+            if surplus > 0 and p.target == "win":
+                p.target, surplus = "loss", surplus - 1.0
+            elif surplus < 0 and p.target == "loss":
+                p.target, surplus = "win", surplus + 1.0
 
 
 def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end: datetime) -> list[_Plan]:
@@ -737,6 +866,7 @@ def _plan_games(n_games: int, seed: int, persona: Persona, start: datetime, end:
         plan.max_duration = (end - started).total_seconds() - 3600
         plans.append(plan)
 
+    _settle_subsets(plans, persona, rng)
     plans.sort(key=lambda p: p.planned_start)
     for i, p in enumerate(plans):
         p.index = i
@@ -935,7 +1065,7 @@ def _is_endgame(board: chess.Board) -> bool:
 class _Played:
     index: int
     sans: list[str]
-    clocks: list[int]  # [%clk] in tenths: live = mover's clock after the ply; daily = time spent / 10 (chess.com archives)
+    clocks: list[int]  # [%clk] in tenths: live = mover's clock after the ply; daily = time spent / 10
     think: list[int]  # tenths of a second spent on each ply
     final_think: int  # tenths spent by the side to move before the game ended (flag / resignation / agreement)
     end_kind: str  # a key of _TERMINATION_TEXT
@@ -989,7 +1119,7 @@ class _Director:
             if side == self.player and not endgame:
                 ramp *= 0.6  # the player tends to hold the middlegame and go wrong later (T6)
             elif side != self.player and endgame:
-                ramp *= 0.5  # opponents mostly go wrong before the endgame
+                ramp *= 0.3  # opponents mostly go wrong before the endgame
             if score >= 150:  # ahead against the script: gives it back
                 m = 2.5 + 2.5 * ramp
             elif score > -250:
@@ -1050,7 +1180,8 @@ class _GamePlayer:
             return int(_clamp(hours * 3600.0, 60.0, 23.8 * 3600.0) * 10)
         base, inc = float(plan.base), float(plan.inc)
         is_player = side == self.player
-        flagger = plan.finish == "flag" and self.director.swing_phase == 2 and not self.director.is_intended_winner(side)
+        director = self.director
+        flagger = plan.finish == "flag" and director.swing_phase == 2 and not director.is_intended_winner(side)
         seconds_left = clock / 10.0
         if move_no == 1:
             mean = min(2.0, 0.4 + base / 300.0)
@@ -1069,7 +1200,7 @@ class _GamePlayer:
         else:
             mean = seconds_left / max(8.0, 40.0 - move_no) + 0.8 * inc
             if flagger:  # does not speed up: keeps thinking as if there were time to spare
-                mean = max(2.2 * mean, 0.02 * base + 1.1 * inc)
+                mean = max(3.0 * mean, 0.025 * base + 1.1 * inc)
             elif seconds_left < 0.15 * base:  # time scramble: move fast
                 mean = min(mean, max(0.3, seconds_left / 20.0 + 0.6 * inc))
         sigma = 0.55
@@ -1089,6 +1220,7 @@ class _GamePlayer:
             context *= 0.5
         elif endgame and is_player:
             context *= self.persona.endgame_error_factor
+            blunder_role = max(blunder_role, 0.5)  # no "safe mode" in endgames, even when winning (T6, T7)
         if self.live:
             seconds_left, base = clock / 10.0, float(self.plan.base)
             low = self.persona.low_clock_error_factor if is_player else 1.3
@@ -1390,11 +1522,9 @@ def _uuid1_like(ts: float, rng: random.Random, node: int = _UUID_NODE) -> str:
     """A version-1 style UUID for timestamp ``ts``, like chess.com's game and player ids."""
     t = int((ts + _UUID_EPOCH_OFFSET) * 10_000_000) + rng.randrange(10_000_000)
     seq = rng.getrandbits(14)
-    return str(
-        uuid.UUID(
-            fields=(t & 0xFFFFFFFF, (t >> 32) & 0xFFFF, ((t >> 48) & 0x0FFF) | 0x1000, (seq >> 8) | 0x80, seq & 0xFF, node)
-        )
-    )
+    time_hi_version = ((t >> 48) & 0x0FFF) | 0x1000
+    fields = (t & 0xFFFFFFFF, (t >> 32) & 0xFFFF, time_hi_version, (seq >> 8) | 0x80, seq & 0xFF, node)
+    return str(uuid.UUID(fields=fields))
 
 
 def _player_uuid(username: str) -> str:
