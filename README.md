@@ -85,7 +85,7 @@ then analyses them and reports which planted traits it found.
 
 `fetch` → `parse` → `filter` → optional `engine` → analysis modules → ranked insights
 → HTML, Markdown and JSON report. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the
-module map and the statistical rules, and [PLAN.md](PLAN.md) for the roadmap.
+module map, [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for how every number is computed, and [PLAN.md](PLAN.md) for the roadmap.
 
 ## Development
 
