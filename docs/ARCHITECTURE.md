@@ -71,8 +71,12 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
    against both the plain Elo expectation and `stats.attenuated_expected`.
    Rating noise makes *everyone* look like they underperform against weaker
    players and overperform against stronger ones, and the true size of that
-   effect is uncertain (`stats.ATTENUATION_RANGE`). Colour comparisons use
-   `stats.colour_expected` (White's first-move edge).
+   effect is uncertain (`stats.ATTENUATION_RANGE`). Colour claims must hold for
+   every White first-move edge in `stats.WHITE_EDGE_RANGE`.
+11. **Compare subsets with the player's other games**, not only with the rating's
+   expectation. A lagging rating (an improving player) lifts every game, so an
+   opening is compared with the player's other openings of the same colour, a
+   game-length band with games of other lengths, and so on.
 9. Exclude games with fewer than 4 plies (aborted starts, instant abandons) from
    skill metrics. They still count in the results totals.
 10. Word findings as associations ("you score worse after 11 pm"), not causes.

@@ -287,20 +287,54 @@ Lichess:
 * **Game accuracy**: the average of a volatility-weighted mean and a harmonic mean
   of move accuracies.
 * **Inaccuracy / mistake / blunder**: the move loses ≥ 5 / 10 / 15 percentage
-  points of win chance. There are also mate-specific rules (a mate allowed, a mate
-  lost).
+  points of win chance, computed from the *unclamped* evaluations as Lichess does.
+  There are also mate-specific rules (a mate allowed, a mate lost). As on Lichess, a
+  move that is the engine's own first choice is never judged, and the mating move is
+  left out of game accuracy.
 * **Game phases**: Lichess's *Divider*. The middlegame starts when ≤ 10 major/minor
   pieces remain, the back rank empties, or the pieces become mixed. The endgame
-  starts when ≤ 6 remain.
+  starts when ≤ 6 remain. A move belongs to the phase of the position it creates, so
+  the move that trades into an endgame counts as an endgame move.
+* **Draws on the board** (threefold repetition, 50-move rule, stalemate,
+  insufficient material) are scored as 0.00 without a search, so the move that
+  secures a draw is never marked as a mistake.
+
+`tests/test_engine_parity.py` checks these formulas against Lichess's own test
+vectors. The few deliberate differences are pinned by `test_deviation_*` tests:
+* the start position is evaluated rather than assumed to be +0.15;
+* one move's centipawn loss is capped at 1000 (Lichess allows 2000);
+* a game that jumps straight to an endgame gets endgame moves.
+
+**How engine findings are tested.** Every engine comparison benchmarks you
+against your opponents in the same games. The unit is the *game*: blunders come
+in bursts, so counting moves as independent would overstate the evidence. Tests
+use cluster-robust (game-level) statistics and the same claim rule and strict alpha
+as the rest of the report.
+* **A phase or error type** is singled out only when its share of your errors
+  differs from your opponents'. A player who errs more everywhere gets one finding,
+  not four.
+* **Blunders when short of time** are compared within each game phase, because
+  time trouble mostly happens in endgames. An endgame weakness is not blamed on the
+  clock.
+* **Opening outcomes** (the evaluation after move 10) are measured from Stockfish's
+  evaluation of the start position, so White's normal first-move edge doesn't count
+  as a good opening. Small samples use Student's t.
 
 chess.com's own "accuracy" (CAPS2) is proprietary and uses a different scale. It
 appears only for games you ran Game Review on. The report shows it separately and
 never mixes it with engine accuracy.
 
-**Repeated mistakes** are found by keying the position before each of your
-engine-flagged errors by its EPD (the board, side to move, castling and en-passant
-rights). Transpositions are therefore counted together, and positions where you
-went wrong in two or more games are listed with the engine's preferred move.
+**Repeated mistakes.** The position before each of your engine-flagged errors (a
+move losing ≥ 8 points of win chance) is keyed by its EPD: the board, side to move,
+castling and en-passant rights. Transpositions are therefore counted together.
+* A position where you played the *same* wrong move in two or more games is listed
+  in the table with the engine's preferred move. Games you didn't send to the engine
+  count too, when they reached the position and repeated the move.
+* It becomes a weakness only after at least three such games, and only if that is
+  more often than your ordinary error rate explains. That is a one-sided binomial
+  test, Benjamini–Hochberg adjusted over the positions tested, at the strict alpha.
+* `--puzzles` exports your costliest mistakes (up to 300, worst first) as a PGN you
+  can import into a Lichess study (64 chapters per study) or any chess GUI.
 
 ## 4. What is excluded
 

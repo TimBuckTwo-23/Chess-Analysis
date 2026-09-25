@@ -94,7 +94,7 @@ analyses new games (150 cached games load in about a second). Use `--engine-game
 | `--since 2025-01 --until 2025-12` | Only this period; also `--since 2024` or `--since 2025-03-15` |
 | `--rated-only` | Skip casual games |
 | `--rules all` | Include variants (default: standard chess only; or e.g. `--rules chess,chess960`) |
-| `--tz America/New_York` | Your time zone, for time-of-day stats and the `--since`/`--until` day boundaries (default UTC) |
+| `--tz America/New_York` | Your time zone (recommended): local time-of-day stats, the late-night check and the `--since`/`--until` day boundaries. Without it, times are shown in UTC |
 | `--offline` | Use the local cache only |
 | `--pgn games.pgn` | Analyse PGN files, a folder of them or a wildcard (`C:\games\*.pgn`) instead of the API; PGNs from other sites or over-the-board games work too |
 | `--json archive.json` | Analyse saved chess.com API responses (files, a folder or a wildcard) |

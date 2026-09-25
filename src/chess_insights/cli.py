@@ -182,8 +182,8 @@ def _timezone_name(text: str) -> str:
     return text.strip()
 
 
-def _tz(name: str) -> tzinfo:
-    if name == "UTC":
+def _tz(name: Optional[str]) -> tzinfo:
+    if name is None or name == "UTC":  # unknown time zone: date boundaries fall back to UTC
         return timezone.utc
     from zoneinfo import ZoneInfo
 
@@ -256,8 +256,9 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
     sp.add_argument("--rules", default="chess", help="variant filter, default 'chess' (use 'all' for everything)")
     sp.add_argument("--rated-only", action="store_true", help="skip casual (unrated) games")
     sp.add_argument(
-        "--tz", type=_timezone_name, default="UTC",
-        help="IANA time zone, e.g. America/New_York: time-of-day stats and --since/--until boundaries (default UTC)",
+        "--tz", type=_timezone_name, default=None,
+        help="your IANA time zone, e.g. America/New_York (recommended): local time-of-day stats, the late-night "
+        "check and --since/--until boundaries. Without it, times are shown in UTC and tested more strictly",
     )
     sp.add_argument("--engine", action="store_true", help="run Stockfish analysis (slower, much deeper insights)")
     sp.add_argument("--stockfish", help="path to the Stockfish program or its folder (default: auto-detect)")
@@ -682,6 +683,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
         _say(f"generated in {time.time() - t0:.0f}s" + ("" if temp else f" -> {cache_dir}"))
 
         games = parse_games([g for key in sorted(archives) for g in archives[key]], persona.username)
+        if args.tz is None:
+            args.tz = "Etc/UTC"  # the synthetic player's clock times are UTC
         report = analyse_and_write(games, persona.username, args, cache_dir)
     finally:
         if temp:
