@@ -1,4 +1,9 @@
-"""Turn every module's insights into one ranked summary and a study plan."""
+"""Turn every module's insights into one ranked summary and a study plan.
+
+Whether something is a strength or weakness at all is decided by each module under the
+project-wide significance rule in ``stats`` (``significance``, ``ALPHA``, ``STRICT_ALPHA``);
+this module only ranks, dedupes and diversifies what passed.
+"""
 
 from __future__ import annotations
 
@@ -124,15 +129,26 @@ def _diverse_top(insights: list[Insight], top_n: int, per_category: int) -> list
     return sorted(picked, key=lambda i: (-i.priority, i.id))
 
 
+# Every strength/weakness a module emits has passed the project-wide rule (stats.significance:
+# enough games and an adjusted p-value at or below stats.ALPHA / STRICT_ALPHA), which always gives
+# a confidence of at least 0.55. The floor below is a safety net: anything under it cannot have
+# passed the rule (e.g. a module still using a looser threshold) and stays out of the headline lists.
+MIN_CONFIDENCE = 0.5
+
+
 def rank_insights(
     modules: Iterable[ModuleResult],
     *,
     top_n: int = 5,
-    min_confidence: float = 0.3,
+    min_confidence: float = MIN_CONFIDENCE,
     min_priority: float = 0.05,
     per_category: int = 2,
 ) -> tuple[list[Insight], list[Insight]]:
-    """(top strengths, top weaknesses) across all modules."""
+    """(top strengths, top weaknesses) across all modules.
+
+    Observations never rank. The report's false-claim rate on data without real effects is
+    checked by tests/test_null_calibration.py, and its power by tests/test_power.py.
+    """
     pool = [
         i
         for i in _dedupe(all_insights(modules))
