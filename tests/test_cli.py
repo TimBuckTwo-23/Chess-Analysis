@@ -425,3 +425,20 @@ def test_engine_cache_goes_under_the_expanded_cache_dir(chesscom, run, tmp_path,
                           "--formats", "json", cache=False)
     assert code == 0, stderr
     assert seen["cache_dir"] == home / "cc" / "testerbob" / "evals"
+
+
+# --------------------------------------------------------------------------- README accuracy
+def test_every_documented_command_and_option_parses():
+    import re
+    import shlex
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    commands = [m.strip() for m in re.findall(r"chess-insights ((?:fetch|report|demo)\b[^`#\n]*)", readme)]
+    options = re.findall(r"^\| `(--[^`]+|-v)` \|", readme, re.M)
+    assert len(commands) >= 4 and len(options) >= 8
+    parser = cli.build_parser()
+    for text in commands + [f"report someone {o}" for o in options]:
+        if "..." in text or "--help" in text:
+            continue
+        argv = [a.strip('"') for a in shlex.split(text.replace("YOUR_USERNAME", "someone"), posix=False)]
+        parser.parse_args(argv)  # raises SystemExit on anything undocumented or malformed
