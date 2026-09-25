@@ -231,13 +231,15 @@ _BLACK_VS_D4 = (("qgd_harrwitz", 0.35), ("qgd_exchange", 0.30), ("london", 0.35)
 class Persona:
     """A fictional chess.com player and the traits planted in their games.
 
-    ``*_shift`` values are points per game added to the Elo expectation when a game's intended
-    result is drawn. They add up where contexts overlap (a late-night Caro-Kann straight after a
-    loss gets three), and games with none of the planted contexts get ``baseline_shift``: a real
-    player's rating already prices in their weaknesses, so their ordinary games sit a little above
-    expectation and the rating stays roughly stable. The defaults are calibrated so the planted
-    subsets land near: Caro-Kann -0.18, Italian +0.12, after a loss -0.12, late night -0.13,
-    rapid +0.09 (blitz -0.03, bullet -0.04).
+    ``*_shift`` values are points per game added to a game's expected score when its intended
+    result is drawn; the expectation is the Elo formula plus the usual White edge
+    (``stats.WHITE_EDGE``), which is what the analyses compare against. Shifts add up where
+    contexts overlap (a late-night Caro-Kann straight after a loss gets three), and games with
+    none of the planted contexts get ``baseline_shift``: a real player's rating already prices in
+    their weaknesses, so their ordinary games sit a little above expectation and the rating stays
+    roughly stable. The defaults are calibrated so the played-out subsets land near: Caro-Kann
+    -0.18, Italian +0.12, after a loss -0.12, late night -0.13, rapid +0.09 (blitz -0.03,
+    bullet -0.04).
     """
 
     username: str = "demo_player"
