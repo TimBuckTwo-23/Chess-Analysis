@@ -286,6 +286,17 @@ class Kpi:
 
 
 @dataclass
+class Diagram:
+    """A chess position to show in the report (e.g. a position you keep getting wrong)."""
+
+    title: str
+    fen: str
+    svg: str  # rendered by chess.svg from ``fen`` in our own code — trusted markup, never user text
+    caption: str = ""
+    link: str = ""  # chess.com game URL
+
+
+@dataclass
 class ModuleResult:
     key: str  # "results", "openings", ...
     title: str  # section heading
@@ -295,6 +306,7 @@ class ModuleResult:
     charts: list[Chart] = field(default_factory=list)
     insights: list[Insight] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)  # machine-readable numbers (JSON export)
+    diagrams: list[Diagram] = field(default_factory=list)
 
 
 @dataclass

@@ -85,6 +85,7 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
     sp.add_argument("--depth", type=int, default=12, help="Stockfish depth per position (default 12)")
     sp.add_argument("--engine-games", type=int, default=150, help="analyse the N most recent games (default 150)")
     sp.add_argument("--workers", type=int, default=0, help="parallel engine processes (default: CPUs - 1)")
+    sp.add_argument("--puzzles", action="store_true", help="with --engine: export your mistakes as a PGN puzzle file")
     sp.add_argument("--out", type=Path, default=Path(default_out) if default_out else None, help="output path stem (default reports/<username>)")
     sp.add_argument("--formats", default="html,md,json", help="comma list of html, md, json")
 
@@ -149,10 +150,23 @@ def analyse_and_write(games: list[Game], username: str, args: argparse.Namespace
     out = args.out or Path("reports") / username.lower()
     formats = tuple(f.strip() for f in args.formats.split(",") if f.strip())
     paths = write_report(report, out, formats=formats)
+    if getattr(args, "puzzles", False) and evals:
+        paths.append(write_puzzles(selected, evals, out))
     print_summary(report)
     for p in paths:
         _say(f"wrote {p}")
     return report
+
+
+def write_puzzles(games: list[Game], evals: dict, out: Path) -> Path:
+    from .analysis.mistakes import build_puzzles, puzzles_to_pgn
+
+    path = Path(str(Path(out).with_suffix("")) + "-puzzles.pgn")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    puzzles = build_puzzles(games, evals)
+    path.write_text(puzzles_to_pgn(puzzles), encoding="utf-8")
+    _say(f"{len(puzzles)} puzzles from your own mistakes (import into a Lichess study or any chess GUI)")
+    return path
 
 
 def run_engine(games: list[Game], username: str, args: argparse.Namespace, cache_dir: Optional[Path]):

@@ -22,6 +22,7 @@ MODULES: list[tuple[str, str]] = [
     ("endings", "How your games end"),
     ("habits", "Habits & tilt"),
     ("engine_stats", "Engine review"),
+    ("mistakes", "Positions you keep getting wrong"),
 ]
 
 

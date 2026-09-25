@@ -93,7 +93,7 @@ def test_pipeline_with_no_games(monkeypatch):
 
 def test_default_module_list_names_real_modules():
     names = [n for n, _ in pipeline.MODULES]
-    assert names == ["results", "openings", "time_mgmt", "endings", "habits", "engine_stats"]
+    assert names == ["results", "openings", "time_mgmt", "endings", "habits", "engine_stats", "mistakes"]
 
 
 @pytest.mark.parametrize("argv", [["report", "someone", "--offline"], ["fetch", "someone"], ["demo", "--games", "5"]])
