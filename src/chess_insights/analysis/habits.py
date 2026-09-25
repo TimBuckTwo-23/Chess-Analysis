@@ -10,9 +10,10 @@ against all your other games (a difference test), so a player whose rating lags
 behind their strength isn't flagged just for scoring above expectation elsewhere.
 
 Claims follow the project-wide rule (``stats.significance``). Two hypotheses are
-fixed in advance and tested on their own at ``stats.ALPHA``: playing on straight
-after a loss, and late-night play (games started 23:00-03:00 in the player's time
-zone, the one time-of-day effect with a strong prior). Everything else is an
+fixed in advance, with their direction, and tested on their own at ``stats.ALPHA``
+with a one-sided p-value: scoring worse straight after a loss, and scoring worse late
+at night (games started 23:00-03:00 in the player's time zone, the one time-of-day
+effect with a strong prior). Everything else is an
 exploratory scan at ``stats.STRICT_ALPHA``: the six 4-hour blocks of the day
 (Benjamini-Hochberg adjusted because six are tested at once) and session length.
 Games with fewer than 4 plies stay on the timeline (they still end a session or
@@ -38,6 +39,7 @@ from ..stats import (
     bh_adjust,
     clamp,
     difference_test,
+    one_sided,
     pct,
     sample_confidence,
     severity_from_points,
@@ -93,7 +95,7 @@ class Thresholds:
     min_split_games: int = 25  # rated games in the after-a-loss / late-in-session group
     min_bucket_games: int = 25  # rated games in a time-of-day block
     min_effect: float = 0.06  # points per game
-    alpha: float = ALPHA  # after a loss, late night: pre-specified primary claims
+    alpha: float = ALPHA  # after a loss, late night: pre-specified primary claims (one-sided)
     strict_alpha: float = STRICT_ALPHA  # time-of-day blocks, session length: exploratory scans
     fatigue_splits: tuple[int, ...] = (4, 7)  # "late in a session" = from this game number on
     min_rematches: int = 5
@@ -268,7 +270,7 @@ def tilt_insight(
     test = difference_test(a.test, r.test)
     if a.n_rated < th.min_split_games or r.n_rated < th.min_split_games:
         return None, test, a, r
-    significant, confidence = significance(test, th.min_split_games, alpha=th.alpha)
+    significant, confidence = significance(one_sided(test, -1), th.min_split_games, alpha=th.alpha)
     if test.mean > -th.min_effect or a.test.mean >= 0 or not significant:
         return None, test, a, r
     w = f"{th.tilt_window_min:g}"
@@ -295,6 +297,7 @@ def tilt_insight(
                 "rest_n": r.n_rated,
                 "gap": test.mean,
                 "p_value": test.p_value,
+                "p_value_one_sided": one_sided(test, -1).p_value,
             },
             study=[
                 f"Stop rule: after any loss, wait at least {w} minutes before starting another game.",
@@ -453,7 +456,9 @@ def late_night_insight(
     stats = {"n": s.n_rated, "delta": s.delta, "rest_delta": rest.delta, "gap": test.mean, "p_value": test.p_value}
     if s.n_rated < th.min_bucket_games or rest.n_rated < th.min_bucket_games:
         return None, stats
-    significant, confidence = significance(test, th.min_bucket_games, alpha=th.alpha)
+    directional = one_sided(test, -1)
+    stats["p_value_one_sided"] = directional.p_value
+    significant, confidence = significance(directional, th.min_bucket_games, alpha=th.alpha)
     if test.mean > -th.min_effect or s.test.mean >= 0 or not significant:
         return None, stats
     start, end = LATE_NIGHT
@@ -481,6 +486,7 @@ def late_night_insight(
                 "rest_delta": rest.delta,
                 "gap": test.mean,
                 "p_value": test.p_value,
+                "p_value_one_sided": directional.p_value,
             },
             study=[
                 f"Stop starting rated games after {start}; play puzzles or unrated games instead.",

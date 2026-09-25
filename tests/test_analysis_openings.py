@@ -351,3 +351,27 @@ def test_real_chesscom_games_every_player(fixtures_dir):
         games = parse.parse_games(raws, user)  # unfiltered: variants, chess960, daily, casual all included
         mr = run(games)
         assert mr.stats["n"] + mr.stats["excluded_custom"] + mr.stats["excluded_short"] == len(games)
+
+
+# --------------------------------------------------------------------------- calibration: claims that used to fire on noise
+def test_sharp_openings_are_not_early_loss_weaknesses():
+    # Quick losses AND quick wins in the French: a sharp opening, not a weakness. The old test compared
+    # the French losses with your *other* losses (all long here) and flagged it.
+    long_moves = CARO * 6  # 30 moves
+    french = [make_game(outcome=o, termination="resignation", **OPENING_KW["french"]) for o in ["win", "loss"] * 12]
+    caro = play("caro", 12, 12, moves_san=long_moves)
+    mr = run(french + caro)
+    assert not [i for i in mr.insights if "early-losses" in i.id and i.kind != "observation"]
+    tests = mr.stats["early_loss_tests"]["black:French Defense"]
+    assert tests["short_loss_share"] == 1.0 and tests["short_win_share"] == 1.0 and not tests["significant"]
+
+
+def test_openings_are_judged_against_the_colour_adjusted_expectation():
+    # Black scoring 2 points per 100 games below the Elo formula and White 2 above is simply normal.
+    black = play("caro", 24, 26)  # 48%
+    white = play("italian", 26, 24)  # 52%
+    mr = run(black + white)
+    tests = mr.stats["family_tests"]
+    assert tests["black:Caro-Kann Defense"]["colour_adjusted_delta"] == pytest.approx(0.0)
+    assert tests["white:Italian Game"]["colour_adjusted_delta"] == pytest.approx(0.0)
+    assert mr.stats["families"]["black:Caro-Kann Defense"]["delta"] == pytest.approx(-0.02)  # tables stay plain Elo

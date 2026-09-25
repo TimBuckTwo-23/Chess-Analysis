@@ -270,3 +270,24 @@ def test_noise_false_claim_rate_matches_the_significance_bar():
     # Every claim needs an adjusted p <= 0.05; with three kinds of test, a handful of runs in 60 may show one.
     runs_with_claims = sum(1 for seed in range(60) if claims(run(noise_games(100 + seed))))
     assert runs_with_claims <= 8
+
+
+def test_late_night_window_spanning_two_blocks_is_one_finding():
+    # Bad results at 23:30 and 01:30 UTC: the 23:00-03:00 window catches both, while each 4-hour block
+    # (20-24, 00-04) only holds half of them. One late-night finding, not a block claim as well.
+    rng = random.Random(8)
+    games = []
+    for d in range(60):
+        day = T0 + timedelta(days=d)
+        for hour in (14, 18, 20):
+            games.append(game_at(day.replace(hour=hour), outcome=rng.choice(["win", "loss"])))
+        games.append(game_at(day.replace(hour=23, minute=30), outcome="loss" if rng.random() < 0.72 else "win"))
+        games.append(game_at(day.replace(hour=1, minute=30) + timedelta(days=1), outcome="loss" if rng.random() < 0.72 else "win"))
+    mr = run(games)
+    ins = insight(mr, "habits.weakness.late-night")
+    assert ins and ins.title == "You score below your rating in late-night games (23:00–03:00)"
+    assert "In 120 games started between 23:00 and 03:00 (UTC)" in ins.detail
+    assert claims(mr) == ["habits.weakness.late-night"]
+    assert mr.stats["late_night"]["n"] == 120
+    # in a time zone where those games fall in the afternoon there is no late-night finding
+    assert insight(run(games, tz="Asia/Tokyo"), "habits.weakness.late-night") is None

@@ -1,9 +1,15 @@
-"""engine.py: Lichess formulas, phases, Stockfish analysis of real short games, caching and workers."""
+"""engine.py: Lichess formulas, phases, per-ply semantics, Stockfish runs, caching and workers.
 
-import concurrent.futures
+Formula-by-formula parity with lila / scalachess lives in test_engine_parity.py.
+"""
+
 import json
 import os
-from concurrent.futures.process import BrokenProcessPool
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 
 import chess
 import chess.engine
@@ -14,8 +20,10 @@ from chess_insights.engine import (
     CP_LOSS_CAP,
     MATE_CP,
     EngineConfig,
+    PositionEval,
     analyze_game,
     analyze_games,
+    build_game_eval,
     cache_file_name,
     engine_name,
     find_stockfish,
@@ -32,16 +40,46 @@ from chess_insights.parse import parse_games
 from factories import make_game, make_game_eval, make_ply_eval
 
 SCHOLARS_MATE = ["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qxf7#"]
-# White sets up Qxf7# (after 5...Nf6??) and then plays 4.Qf3 instead.
+# White sets up Qxf7# (after 3...Nf6??) and then plays 4.Qf3 instead.
 MISSED_MATE = ["e4", "e5", "Bc4", "Nc6", "Qh5", "Nf6", "Qf3", "Bc5", "Nh3", "d6"]
 QUEENS_GAMBIT = ["d4", "d5", "c4", "e6", "Nc3", "Nf6", "Bg5", "Be7", "e3", "O-O"]
-SICILIAN = ["e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6"]
+SICILIAN = ["e4", "c5", "Nf3", "d6", "d4", "cxd4", "Nxd4", "Nf6", "Nc3", "a6", "Be3", "e5"]
 ILLEGAL = ["e4", "e5", "Ke3", "Ke6", "Nf3", "Nf6", "Nc3", "Nc6", "d3", "d6"]
+SRC = Path(engine.__file__).resolve().parent.parent
+TESTS = Path(__file__).resolve().parent
 
 
 def white_pov(cps):
     """Lichess test helper: the start position (cp 15) plus White's cp after each ply, as win %."""
     return [win_percent(15)] + [win_percent(c) for c in cps]
+
+
+# --------------------------------------------------------------------------- a scripted stand-in for Stockfish
+class ScriptedEngine:
+    """Scores the position after k plies with ``scores[k]`` (White's POV: cp, or ("mate", n)) and gives
+    ``bests[k]`` (SAN) as its best move. Counts calls; closing it is recorded."""
+
+    def __init__(self, scores, bests=None, name="Scripted 1"):
+        self.scores, self.bests = scores, dict(bests or {})
+        self.id = {"name": name}
+        self.calls, self.closed = 0, False
+
+    def analyse(self, board, limit, **kw):
+        self.calls += 1
+        k = len(board.move_stack)
+        s = self.scores[k]
+        score = chess.engine.Mate(s[1]) if isinstance(s, tuple) else chess.engine.Cp(s)
+        info = {"score": chess.engine.PovScore(score, chess.WHITE)}
+        if self.bests.get(k):
+            info["pv"] = [board.parse_san(self.bests[k])]
+        return info
+
+    def close(self):
+        self.closed = True
+
+
+def scripted(game, scores, bests=None):
+    return analyze_game(game, ScriptedEngine(scores, bests), EngineConfig(depth=12))
 
 
 # --------------------------------------------------------------------------- win % / accuracy / judgements
@@ -105,7 +143,6 @@ def test_game_accuracy_flat_and_lichess_vectors():
     flat = white_pov([15] * 20)
     assert game_accuracy(flat, "white") == pytest.approx(100.0)
     assert game_accuracy(flat, "black") == pytest.approx(100.0)
-    # lila AccuracyPercentTest: "50 average moves (65 cpl)" and "(150 cpl)" -> 76 +- 8 and 54 +- 8
     avg = white_pov([-50, 15] * 50)
     assert game_accuracy(avg, "white") == pytest.approx(77.38, abs=0.05)
     assert game_accuracy(avg, "black") == pytest.approx(77.38, abs=0.05)
@@ -117,10 +154,8 @@ def test_game_accuracy_volatile_sequence_and_edge_cases():
     white = game_accuracy(blunder, "white")
     assert white == pytest.approx(50.0, abs=5.0)
     assert game_accuracy(blunder, "black") == pytest.approx(100.0, abs=1.0)
-    # one bad move weighs more in a volatile game than the plain mean of move accuracies would suggest
     per_move = [move_accuracy(blunder[i], blunder[i + 1]) for i in range(0, len(blunder) - 1, 2)]
     assert white < sum(per_move) / len(per_move)
-    # Black moves first (a set-up position)
     black_first = white_pov([900, 900])
     assert game_accuracy(black_first, "black", white_moves_first=False) == pytest.approx(12.30, abs=0.05)
     assert game_accuracy(black_first, "white", white_moves_first=False) == pytest.approx(100.0)
@@ -133,11 +168,10 @@ def test_game_accuracy_volatile_sequence_and_edge_cases():
 def test_game_phases_opening_middlegame_endgame():
     start = game_phases(make_game())
     assert len(start) == 20 and start[0] == "opening"
-    # White's back rank empties to 3 pieces (Ra1, Ke1, Rh1) after Qd2 -> middlegame from ply 13
+    # White's back rank drops to 3 pieces (Ra1, Ke1, Rh1) with 7.Qd2: that move is the first middlegame move
     developed = "e4 e5 Nf3 Nc6 Bc4 Bc5 Nc3 Nf6 d3 d6 Be3 Be6 Qd2 Qd7 O-O O-O".split()
     phases = game_phases(make_game(moves_san=developed))
-    assert phases[:13] == ["opening"] * 13 and phases[13:] == ["middlegame"] * 3
-    # queens and knights traded -> middlegame
+    assert phases[:12] == ["opening"] * 12 and phases[12:] == ["middlegame"] * 4
     traded = "e4 e5 Nf3 Nc6 d4 exd4 Nxd4 Nxd4 Qxd4 Qf6 Qxf6 Nxf6 Bc4 Bc5 Be3 Bxe3 fxe3 Nxe4".split()
     assert game_phases(make_game(moves_san=traded))[-1] == "middlegame"
     rook_ending = make_game(initial_fen="8/8/8/4k3/8/8/8/R3K3 w - - 0 1", moves_san=["Ra7", "Kd5", "Ke2", "Ke5"])
@@ -151,10 +185,133 @@ def test_game_phases_never_raise():
 
 
 def test_divide_matches_scalachess_on_boards():
-    boards = [chess.Board()]
-    assert engine.divide(boards) == (None, None)
+    assert engine.divide([chess.Board()]) == (None, None)
     lone = chess.Board("8/8/8/4k3/8/8/8/R3K3 w - - 0 1")
     assert engine.divide([lone]) == (None, 0)  # middlegame skipped: straight into the endgame
+
+
+# --------------------------------------------------------------------------- per-ply semantics (scripted engine)
+# White-POV scores of the 13 positions of SICILIAN, and what each ply should be tagged with.
+SCRIPT = [15, 20, ("mate", 3), 200, 180, 300, 300, -100, -100, -450, 500, 0, 0]
+SCRIPT_BESTS = {6: "Qxd4", 9: "Nxe4"}  # 4.Nxd4 missed 4.Qxd4; after 5.Nc3?? Black wins the e4 pawn with a capture
+SCRIPT_TAGS = {1: ["allowed_mate"], 2: ["missed_mate"], 6: ["missed_tactic"], 8: ["hung_material"],
+               9: ["missed_tactic", "thrown_win"], 10: ["thrown_win"]}  # 5...a6?? missed 5...Nxe4 too
+
+
+def test_ply_evals_line_up_with_positions_and_use_the_movers_point_of_view():
+    game = make_game(color="black", moves_san=SICILIAN)
+    ev = scripted(game, SCRIPT, SCRIPT_BESTS)
+    assert [p.ply for p in ev.plies] == list(range(12)) and [p.san for p in ev.plies] == SICILIAN
+    assert [p.mover for p in ev.plies] == ["white", "black"] * 6
+    assert [p.is_user for p in ev.plies] == [False, True] * 6
+    for i, p in enumerate(ev.plies):
+        before, after = SCRIPT[i], SCRIPT[i + 1]
+        white_cp = lambda s: (MATE_CP if s[1] > 0 else -MATE_CP) if isinstance(s, tuple) else s  # noqa: E731
+        assert (p.cp_before, p.cp_after) == (white_cp(before), white_cp(after))  # White's POV, position i then i+1
+        assert p.mate_before == (before[1] if isinstance(before, tuple) else None)
+        sign = 1 if p.mover == "white" else -1
+        assert p.win_before == pytest.approx(win_percent(sign * p.cp_before))  # the mover's POV
+        assert p.win_after == pytest.approx(win_percent(sign * p.cp_after))
+        assert p.cp_loss == min(CP_LOSS_CAP, max(0, sign * (p.cp_before - p.cp_after)))
+        assert p.accuracy == pytest.approx(move_accuracy(p.win_before, p.win_after))
+    assert ev.plies[6].best_san == "Qxd4" and ev.plies[9].best_san == "Nxe4"  # best move of the position BEFORE
+    assert ev.plies[0].best_san is None  # no PV from the engine
+    for a, b in zip(ev.plies, ev.plies[1:]):  # one evaluation per position: after(i) == before(i + 1)
+        assert (a.cp_after, a.mate_after) == (b.cp_before, b.mate_before)
+
+
+def test_tags_on_constructed_positions():
+    ev = scripted(make_game(moves_san=SICILIAN), SCRIPT, SCRIPT_BESTS)
+    assert {p.ply: p.tags for p in ev.plies if p.tags} == SCRIPT_TAGS
+    judgements = [p.judgement for p in ev.plies]
+    assert judgements[1] == "blunder"  # 1...c5 allows a forced mate (MateCreated from an even position)
+    assert judgements[2] == "blunder"  # 2.Nf3 throws away mate in 3 for +2 (MateLost, not crushing)
+    assert judgements[6] == judgements[8] == judgements[9] == judgements[10] == "blunder"
+    assert judgements[0] is None and judgements[3] is None and judgements[11] is None
+
+
+def test_mate_signs_for_black_and_mate_in_n():
+    # White-POV mate scores: negative = Black mates. 2...d6 gives Black mate in 2; 3...cxd4?? lets it go.
+    scores = [15, 20, 25, 30, ("mate", -2), ("mate", -1), -300, ("mate", -3), -2000, -2000, -2000, -2000, -2000]
+    ev = scripted(make_game(moves_san=SICILIAN), scores)
+    doomed = ev.plies[4]  # 3.d4: White is being mated before and after
+    assert doomed.mover == "white" and (doomed.mate_before, doomed.mate_after) == (-2, -1)
+    assert doomed.tags == [] and doomed.judgement is None  # already lost: nothing new was allowed
+    lost = ev.plies[5]  # 3...cxd4: Black had mate in 1 (mover POV +1) and played for +3 pawns
+    assert lost.mover == "black" and lost.mate_before == -1 and lost.tags == ["missed_mate"]
+    assert lost.win_before == pytest.approx(win_percent(MATE_CP)) and lost.win_after == pytest.approx(win_percent(300))
+    assert lost.judgement == "blunder"  # MateLost, and +3 is not crushing (<= 700 cp)
+    allowed = ev.plies[6]  # 4.Nxd4: from -3 pawns into a forced mate
+    assert allowed.mover == "white" and allowed.mate_after == -3 and allowed.tags == ["allowed_mate"]
+    assert allowed.win_after == pytest.approx(win_percent(-MATE_CP)) and allowed.judgement == "blunder"
+    still_crushing = ev.plies[7]  # 4...Nf6: mate in 3 let go, but still +20 pawns
+    assert still_crushing.tags == ["missed_mate"] and still_crushing.judgement == "inaccuracy"
+
+
+def test_moves_the_engine_itself_prefers_get_no_judgement_and_no_tags():
+    """The engine's own best move can't be a mistake (Lichess only judges moves that differ from it), so an eval
+    that collapses after it must not produce allowed_mate / thrown_win / missed_mate tags either."""
+    scores = [15, 20, 500, ("mate", -3), -300, 0, 0, 0, 0, 0, 0, 0, 0]
+    ev = scripted(make_game(moves_san=SICILIAN), scores, {2: "Nf3", 3: "d6"})
+    nf3, d6 = ev.plies[2], ev.plies[3]
+    assert nf3.best_san == "Nf3" and nf3.judgement is None and nf3.tags == []
+    assert d6.best_san == "d6" and d6.judgement is None and d6.tags == []
+
+
+def test_judgement_uses_unclamped_centipawns():
+    """Lichess's CpAdvice compares winning chances of the raw centipawns: +20 -> +4.5 pawns loses 0.319 (a blunder);
+    with both clamped at +10 pawns it would be 0.27 (a mistake). Stored cps stay clamped at +-MATE_CP."""
+    scores = [15, 20, 25, 2000, 2000, 450, -2000, -2000, -450, -450, -450, -450, -450]
+    ev = scripted(make_game(moves_san=SICILIAN), scores)
+    white, black = ev.plies[4], ev.plies[7]  # 3.d4 and 4...Nf6
+    assert (white.cp_before, white.cp_after) == (MATE_CP, 450)
+    assert white.judgement == "blunder" and black.judgement == "blunder"
+    assert [p.judgement for p in ev.plies[2:4]] == [None, None]
+
+
+def test_checkmate_on_the_board_and_game_accuracy():
+    scores = [15, 30, 25, 40, 20, 60, ("mate", 1), None]
+    ev = scripted(make_game(color="black", moves_san=SCHOLARS_MATE), scores)
+    mating = ev.plies[6]
+    assert mating.cp_after == MATE_CP and mating.mate_after is None and mating.judgement is None
+    assert mating.accuracy == 100.0 and mating.tags == [] and mating.cp_loss == 0
+    wp = [win_percent(c) for c in (15, 30, 25, 40, 20, 60, MATE_CP)]  # the checkmate position is left out
+    assert ev.opp_accuracy == pytest.approx(game_accuracy(wp, "white"))
+    assert ev.my_accuracy == pytest.approx(game_accuracy(wp, "black"))
+
+
+def test_time_spent_with_increment_first_moves_and_gaps():
+    # 3+2: chess.com's clock after a move already includes the increment; the first moves are close to free
+    clocks = [182.0, 181.5, 175.0, 170.5, None, 168.0, 160.0, 165.0, 150.0, 140.0, 141.0, 130.0]
+    game = make_game(moves_san=SICILIAN, time_control="180+2", base_seconds=180, increment=2, clocks=clocks)
+    spent = [p.time_spent for p in scripted(game, [0] * 13).plies]
+    assert spent[:4] == [0.0, pytest.approx(0.5), 9.0, pytest.approx(13.0)]
+    assert spent[4] is None and spent[6] is None  # no clock for ply 4: neither it nor ply 6 can be measured
+    assert spent[5] == pytest.approx(4.5) and spent[7] == pytest.approx(5.0)
+    assert spent[9] == pytest.approx(27.0)  # 165 - 140 + 2
+    assert spent[8] == pytest.approx(12.0) and spent[10] == pytest.approx(11.0) and spent[11] == pytest.approx(12.0)
+    assert all(s is None or s >= 0 for s in spent)
+    daily = make_game(moves_san=SICILIAN, time_class="daily", time_control="1/86400", base_seconds=86400)
+    assert all(p.time_spent is None for p in scripted(daily, [0] * 13).plies)
+
+
+def test_black_to_move_first_from_a_set_up_position():
+    fen = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 3 3"
+    moves = ["Nf6", "Nc3", "Bc5", "Bc4", "d6", "d3", "O-O", "O-O", "h6", "h3"]
+    game = make_game(color="black", initial_fen=fen, moves_san=moves)
+    ev = scripted(game, [15, -20, 0, 10, 5, 20, 30, 25, 20, 30, 40])
+    assert [p.mover for p in ev.plies[:2]] == ["black", "white"] and ev.plies[0].is_user
+    assert ev.my_accuracy == pytest.approx(game_accuracy([win_percent(c) for c in
+                                                           (15, -20, 0, 10, 5, 20, 30, 25, 20, 30, 40)],
+                                                          "black", white_moves_first=False))
+
+
+def test_build_game_eval_rejects_positions_that_do_not_fit_the_game():
+    game = make_game(moves_san=QUEENS_GAMBIT)
+    assert build_game_eval(game, [PositionEval(cp=0)] * 10) is None  # 11 positions needed
+    assert build_game_eval(make_game(moves_san=ILLEGAL), [PositionEval(cp=0)] * 11) is None
+    ev = build_game_eval(game, [PositionEval(cp=0, best="e2e5")] * 11)  # an illegal "best move" is ignored
+    assert ev is not None and all(p.best_san is None for p in ev.plies)
 
 
 # --------------------------------------------------------------------------- config / discovery / cache names
@@ -163,6 +320,7 @@ def test_engine_config_key_and_limit():
     assert EngineConfig(depth=None, nodes=200000).key() == "sf-n200000"
     assert EngineConfig(depth=None).key() == "sf-d12"
     assert EngineConfig(depth=None, movetime=0.5).key() == "sf-t0.5"
+    assert EngineConfig(threads=2, hash_mb=16).key() == "sf-d12-th2-h16"  # settings that change the numbers
     assert EngineConfig(depth=None).limit().depth == 12
     lim = EngineConfig(depth=None, nodes=5000).limit()
     assert lim.nodes == 5000 and lim.depth is None
@@ -191,12 +349,29 @@ def test_engine_name_falls_back_to_the_file_name(tmp_path):
     assert engine_name(str(not_an_engine)) == "my-engine"
 
 
-def test_cache_file_names_are_safe_and_distinct():
+WINDOWS_RESERVED = ("CON", "con", "PRN", "AUX", "NUL", "COM1", "lpt9", "CON.x")
+
+
+def test_cache_file_names_are_safe_and_distinct_on_windows_and_macos():
     uuid = "0a1b2c3d-0000-11ef-8000-000000000001"
     assert cache_file_name(uuid) == f"{uuid}.json"
-    a = cache_file_name("https://www.chess.com/game/live/123")
-    b = cache_file_name("https://www.chess.com/game/live/123?x")
-    assert a != b and "/" not in a and ":" not in a
+    ids = ["https://www.chess.com/game/live/123", "https://www.chess.com/game/live/123?x", "pgn:2024.01.01:a:b",
+           "ABC", "abc", "Abc", "a b", "a_b", "...", "", "x" * 300, *WINDOWS_RESERVED]
+    names = [cache_file_name(i) for i in ids]
+    assert len({n.lower() for n in names}) == len(ids)  # distinct even on case-insensitive file systems
+    for name in names:
+        stem = name[: -len(".json")]
+        assert name.endswith(".json") and 5 < len(name) <= 120
+        assert not set(name) & set('<>:"/\\|?* ') and not stem.endswith((".", " "))
+        assert stem.split(".")[0].upper() not in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)),
+                                                  *(f"LPT{i}" for i in range(10))}
+
+
+def test_engine_labels_become_directory_names(tmp_path):
+    cfg = EngineConfig(depth=12)
+    assert engine.cache_root(tmp_path, cfg, "Stockfish 16") == tmp_path / "stockfish-16" / "sf-d12"
+    assert engine.cache_root(tmp_path, cfg, "Stockfish 16.1") != engine.cache_root(tmp_path, cfg, "Stockfish 16")
+    assert engine.cache_root(tmp_path, cfg, "Stockfish dev-20240101-abc:1").parent.name.isascii()
 
 
 def test_dict_round_trip_through_json():
@@ -210,81 +385,207 @@ def test_dict_round_trip_through_json():
     assert game_eval_from_dict(game_eval_to_dict(make_game_eval("g2", []))).plies == []
 
 
-# --------------------------------------------------------------------------- orchestration without Stockfish
-class FakeEngine:
-    id = {"name": "Fake 1"}
+def test_position_evals_round_trip_through_json():
+    evs = [PositionEval(cp=35, best="e2e4"), PositionEval(mate=-3, best="g8f6"), PositionEval(cp=-1000, checkmate=True),
+           PositionEval(cp=0)]
+    assert [PositionEval.from_json(json.loads(json.dumps(e.to_json()))) for e in evs] == evs
+    with pytest.raises((TypeError, ValueError, KeyError)):
+        PositionEval.from_json({"cp": "lots"})
 
-    def __init__(self, log):
-        self.log = log
+
+# --------------------------------------------------------------------------- orchestration with fake engines
+class FakeEngine:
+    """Any position: +20 cp for the side to move, best move = first legal move. Records open / close."""
+
+    delay = 0.0  # seconds per search
+
+    def __init__(self, log, name="Fake 1"):
+        self.log, self.id = log, {"name": name}
+        self.calls = 0
+        log.append("opened")
+
+    def analyse(self, board, limit, **kw):
+        self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
+        move = min(board.legal_moves, key=lambda m: m.uci())
+        return {"score": chess.engine.PovScore(chess.engine.Cp(20), board.turn), "pv": [move]}
 
     def close(self):
         self.log.append("closed")
 
 
-def test_in_process_run_isolates_failures_restarts_and_always_closes(monkeypatch, tmp_path):
-    log = []
-    monkeypatch.setattr(engine, "open_engine", lambda cfg: (log.append("opened"), FakeEngine(log))[1])
+@pytest.fixture
+def fake_engines(monkeypatch):
+    """open_engine / engine_name replaced: returns the list of (event) log and a dict to change the name."""
+    log, state = [], {"name": "Fake 1"}
+    monkeypatch.setattr(engine, "open_engine", lambda cfg: FakeEngine(log, state["name"]))
+    monkeypatch.setattr(engine, "engine_name", lambda path: state["name"])
+    return log, state
+
+
+def cfg_fake(**kw):
+    return EngineConfig(**{"path": "/fake/stockfish", "depth": 6, "workers": 1, **kw})
+
+
+def test_in_process_run_isolates_failures_restarts_and_always_closes(fake_engines, monkeypatch, tmp_path):
+    log, _ = fake_engines
     good1, bad, good2 = (make_game(moves_san=QUEENS_GAMBIT) for _ in range(3))
     crashed = set()
+    real = engine.evaluate_game
 
-    def fake_analyze(game, eng, cfg):
+    def flaky(game, eng, cfg):
         if game is bad:
             raise RuntimeError("corrupt record")
-        if game is good2 and game.game_id not in crashed:  # engine dies once: restarted, game retried
+        if game is good2 and game.game_id not in crashed:  # the engine dies once: restarted, game retried
             crashed.add(game.game_id)
             raise chess.engine.EngineTerminatedError("engine died")
-        return make_game_eval(game.game_id, [], engine=eng.id["name"])
+        return real(game, eng, cfg)
 
-    monkeypatch.setattr(engine, "analyze_game", fake_analyze)
-    cfg = EngineConfig(path="/not/used", depth=6, workers=1)
+    monkeypatch.setattr(engine, "evaluate_game", flaky)
     progress = []
-    res = analyze_games([good1, bad, good2], cfg, cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)))
-    assert set(res) == {good1.game_id, good2.game_id}
-    assert progress[-1] == (3, 3)
+    res = analyze_games([good1, bad, good2], cfg_fake(), cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)))
+    assert set(res) == {good1.game_id, good2.game_id} and res[good1.game_id].engine == "Fake 1"
+    assert progress == [(1, 3), (2, 3), (3, 3)]
     assert log == ["opened", "closed", "opened", "closed"]
 
     def interrupted(game, eng, cfg):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(engine, "analyze_game", interrupted)
+    monkeypatch.setattr(engine, "evaluate_game", interrupted)
     log.clear()
     with pytest.raises(KeyboardInterrupt):
-        analyze_games([make_game(moves_san=SICILIAN)], cfg)
+        analyze_games([make_game(moves_san=SICILIAN)], cfg_fake())
     assert log == ["opened", "closed"]
 
 
-class BrokenPool:
-    """Stands in for ProcessPoolExecutor when worker processes die (or can't start)."""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def submit(self, fn, *args):
-        fut = concurrent.futures.Future()
-        fut.set_exception(BrokenProcessPool("worker died"))
-        return fut
-
-    def shutdown(self, wait=True, cancel_futures=False):
-        pass
-
-
-def test_broken_worker_pool_falls_back_to_one_engine_in_process(monkeypatch):
-    log = []
-    monkeypatch.setattr(engine, "ProcessPoolExecutor", BrokenPool)
-    monkeypatch.setattr(engine, "open_engine", lambda cfg: (log.append("opened"), FakeEngine(log))[1])
-    monkeypatch.setattr(engine, "analyze_game", lambda game, eng, cfg: make_game_eval(game.game_id, []))
-    games = [make_game(moves_san=QUEENS_GAMBIT) for _ in range(3)]
-    res = analyze_games(games, EngineConfig(path="/not/used", workers=2))
-    assert list(res) == [g.game_id for g in games]
-    assert log == ["opened", "closed"]
+def test_worker_threads_analyse_in_parallel_and_close_every_engine(fake_engines, tmp_path, monkeypatch):
+    log, _ = fake_engines
+    monkeypatch.setattr(FakeEngine, "delay", 0.003)
+    games = [make_game(moves_san=QUEENS_GAMBIT) for _ in range(7)]
+    progress = []
+    res = analyze_games(games, cfg_fake(workers=3), cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)))
+    assert list(res) == [g.game_id for g in games]  # oldest first, like the input
+    assert [d for d, _ in progress] == list(range(1, 8)) and {t for _, t in progress} == {7}
+    assert log.count("opened") == 3 and log.count("closed") == 3
+    serial = analyze_games(games, cfg_fake(), cache_dir=None)
+    assert serial == res  # same numbers whichever engine analysed which game
+    assert not [t for t in threading.enumerate() if t.name.startswith("stockfish-worker")]
 
 
-def test_analyze_games_without_stockfish(monkeypatch):
+def test_worker_threads_stop_and_close_engines_on_keyboard_interrupt(fake_engines):
+    log, _ = fake_engines
+    games = [make_game(moves_san=QUEENS_GAMBIT) for _ in range(30)]
+
+    def stop(done, total):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        analyze_games(games, cfg_fake(workers=3), progress=stop)
+    assert log.count("opened") == log.count("closed") >= 1
+    deadline = time.time() + 2
+    while time.time() < deadline and [t for t in threading.enumerate() if t.name.startswith("stockfish-worker")]:
+        time.sleep(0.01)
+    assert not [t for t in threading.enumerate() if t.name.startswith("stockfish-worker")]
+
+
+def test_an_engine_that_cannot_start_fails_every_game_once_not_per_retry(monkeypatch, caplog):
+    starts = []
+
+    def broken(cfg):
+        starts.append(1)
+        raise FileNotFoundError("no such file: /fake/stockfish")
+
+    monkeypatch.setattr(engine, "open_engine", broken)
+    monkeypatch.setattr(engine, "engine_name", lambda path: "stockfish")
+    games = [make_game(moves_san=QUEENS_GAMBIT) for _ in range(6)]
+    assert analyze_games(games, cfg_fake(workers=2)) == {}
+    assert len(starts) <= 2  # one start attempt per worker, not one per game
+    assert len([r for r in caplog.records if r.levelname == "WARNING" and "no such file" in r.getMessage()]) == 1
+
+
+def test_analyze_games_without_stockfish(monkeypatch, tmp_path):
     monkeypatch.setattr(engine, "find_stockfish", lambda explicit=None: None)
     assert analyze_games([], EngineConfig()) == {}
     assert analyze_games([make_game(moves_san=SICILIAN[:6])], EngineConfig()) == {}  # too short: nothing to do
     with pytest.raises(FileNotFoundError):
         analyze_games([make_game(moves_san=SICILIAN)], EngineConfig())
+
+
+def test_cached_games_load_without_stockfish(fake_engines, monkeypatch, tmp_path):
+    games = [make_game(moves_san=SICILIAN) for _ in range(2)]
+    first = analyze_games(games, cfg_fake(), cache_dir=tmp_path)
+    monkeypatch.setattr(engine, "find_stockfish", lambda explicit=None: None)
+    again = analyze_games(games, EngineConfig(depth=6), cache_dir=tmp_path)
+    assert again == first and again[games[0].game_id].engine == "Fake 1"
+    with pytest.raises(FileNotFoundError):  # a game that isn't cached still needs the engine
+        analyze_games(games + [make_game(moves_san=SICILIAN)], EngineConfig(depth=6), cache_dir=tmp_path)
+
+
+def test_max_games_takes_the_most_recent_analysable_games(fake_engines):
+    old, mid, new = (make_game(moves_san=SICILIAN, minutes_ago=m) for m in (300, 200, 100))
+    newest_illegal = make_game(moves_san=ILLEGAL, minutes_ago=10)
+    newest_short = make_game(moves_san=SICILIAN[:4], minutes_ago=5)
+    newest_variant = make_game(moves_san=SICILIAN, rules="crazyhouse", minutes_ago=1)
+    progress = []
+    res = analyze_games([new, old, newest_illegal, mid, newest_short, newest_variant], cfg_fake(), max_games=2,
+                        progress=lambda d, t: progress.append((d, t)))
+    assert list(res) == [mid.game_id, new.game_id]
+    assert progress[-1] == (2, 2)
+    assert analyze_games([old, new], cfg_fake(), max_games=0) == {}
+
+
+def test_cache_is_keyed_by_engine_version(fake_engines, tmp_path):
+    log, state = fake_engines
+    game = make_game(moves_san=SICILIAN)
+    assert analyze_games([game], cfg_fake(), cache_dir=tmp_path)[game.game_id].engine == "Fake 1"
+    log.clear()
+    assert analyze_games([game], cfg_fake(), cache_dir=tmp_path)[game.game_id].engine == "Fake 1"
+    assert log == []  # cached
+    state["name"] = "Fake 2"  # Stockfish upgraded: its numbers differ, so the old analysis is not reused
+    assert analyze_games([game], cfg_fake(), cache_dir=tmp_path)[game.game_id].engine == "Fake 2"
+    assert log == ["opened", "closed"]
+    assert analyze_games([game], cfg_fake(depth=8), cache_dir=tmp_path) and log.count("opened") == 2  # other limit
+
+
+def test_cache_stores_engine_output_and_rebuilds_game_specific_fields(fake_engines, tmp_path):
+    log, _ = fake_engines
+    game = make_game(color="black", moves_san=SICILIAN)
+    first = analyze_games([game], cfg_fake(), cache_dir=tmp_path)[game.game_id]
+    log.clear()
+    # the same game re-parsed with other clocks, and seen from White's side: nothing stale comes back
+    other = make_game(game_id=game.game_id, color="white", moves_san=SICILIAN, clocks=[290.0 - i for i in range(12)])
+    again = analyze_games([other], cfg_fake(), cache_dir=tmp_path)[game.game_id]
+    assert log == []
+    assert [p.clock_after for p in again.plies] == other.clocks
+    assert [p.time_spent for p in again.plies][2:4] == [pytest.approx(2.0)] * 2
+    assert [p.is_user for p in again.plies[:2]] == [True, False]
+    assert (again.my_accuracy, again.opp_accuracy) == (first.opp_accuracy, first.my_accuracy)
+    assert [p.cp_after for p in again.plies] == [p.cp_after for p in first.plies]
+
+
+def test_corrupt_truncated_and_foreign_cache_files_are_ignored(fake_engines, tmp_path):
+    log, _ = fake_engines
+    games = [make_game(moves_san=SICILIAN) for _ in range(4)]
+    first = analyze_games(games, cfg_fake(), cache_dir=tmp_path)
+    files = sorted(tmp_path.rglob("*.json"))
+    assert len(files) == 4
+    payloads = [json.loads(f.read_text()) for f in files]
+    files[0].write_text("{not json")
+    files[1].write_text(json.dumps([1, 2, 3]))
+    data = payloads[2]
+    key = "positions" if "positions" in data else "eval"
+    if key == "positions":
+        data["positions"] = data["positions"][:-3]
+    else:
+        data["eval"]["plies"] = data["eval"]["plies"][:-3]
+    files[2].write_text(json.dumps(data))
+    files[3].write_bytes(b"\xff\xfe\x00garbage")
+    log.clear()
+    again = analyze_games(games, cfg_fake(), cache_dir=tmp_path)
+    assert again == first and log == ["opened", "closed"]
+    assert all(len(ev.plies) == 12 for ev in again.values())
+    assert not [p for p in tmp_path.rglob("*") if p.name.startswith(".tmp")]  # atomic writes leave no temp files
 
 
 # --------------------------------------------------------------------------- real Stockfish (tiny, depth 6)
@@ -369,6 +670,8 @@ def test_chess960_and_illegal_games(sf, fixtures_dir):
     assert ev is not None and len(ev.plies) == c960.plies
     assert analyze_game(make_game(moves_san=ILLEGAL), eng, cfg) is None
     assert analyze_game(make_game(moves_san=["e4", "--", "d4"]), eng, cfg) is None  # null moves aren't chess
+    no_king = make_game(initial_fen="8/8/8/8/8/8/4P3/4K3 w - - 0 1", moves_san=["e4", "Kd2"] * 5)
+    assert analyze_game(no_king, eng, cfg) is None  # would crash Stockfish
 
 
 @pytest.mark.engine
@@ -379,18 +682,24 @@ def test_analyze_games_parallel_cache_and_reuse(stockfish_path, tmp_path, monkey
     illegal = make_game(moves_san=ILLEGAL)
     variant = make_game(rules="crazyhouse", moves_san=SICILIAN)
     short = make_game(moves_san=SICILIAN[:8])
-    corrupt = make_game(moves_san=QUEENS_GAMBIT)
-    corrupt.clocks = None  # breaks inside the worker: that game is lost, the run is not
+    broken = make_game(moves_san=QUEENS_GAMBIT)
     good = [italian, gambit, sicilian]
-    games = [italian, gambit, sicilian, illegal, variant, short, corrupt]
+    games = [italian, gambit, sicilian, illegal, variant, short, broken]
     cfg = EngineConfig(path=stockfish_path, depth=6, hash_mb=16, workers=2)
+    real = engine.evaluate_game
 
+    def evaluate(game, eng, cfg):
+        if game is broken:
+            raise RuntimeError("fails inside a worker: that game is lost, the run is not")
+        return real(game, eng, cfg)
+
+    monkeypatch.setattr(engine, "evaluate_game", evaluate)
     progress = []
     first = analyze_games(games, cfg, cache_dir=tmp_path, progress=lambda d, t: progress.append((d, t)))
     assert list(first) == [g.game_id for g in good]
-    assert progress[-1] == (5, 5)  # candidates: the three good games, the illegal one and the corrupt one
-    files = sorted(p.name for p in (tmp_path / "sf-d6").glob("*.json"))
-    assert files == sorted(cache_file_name(g.game_id) for g in good)
+    assert progress[-1] == (4, 4)  # the three good games and the broken one; illegal / variant / short: skipped
+    root = engine.cache_root(tmp_path, cfg, engine_name(stockfish_path))
+    assert sorted(p.name for p in root.glob("*.json")) == sorted(cache_file_name(g.game_id) for g in good)
     assert first[gambit.game_id].plies[1].is_user and not first[gambit.game_id].plies[0].is_user
 
     def no_engine(*args, **kwargs):
@@ -402,13 +711,89 @@ def test_analyze_games_parallel_cache_and_reuse(stockfish_path, tmp_path, monkey
     assert second == first
     assert list(analyze_games(good, cfg, cache_dir=tmp_path, max_games=2)) == [gambit.game_id, sicilian.game_id]
 
-    # the same game seen from the other player's side reuses the cache with the perspective swapped
     flipped = make_game(game_id=gambit.game_id, color="white", moves_san=QUEENS_GAMBIT)
     ev = analyze_games([flipped], cfg, cache_dir=tmp_path)[gambit.game_id]
     assert ev.my_accuracy == first[gambit.game_id].opp_accuracy
     assert [p.is_user for p in ev.plies[:2]] == [True, False]
 
-    # a cache file written for different moves is ignored (the game gets re-analysed)
-    changed = make_game(game_id=sicilian.game_id, moves_san=SICILIAN[:-1] + ["e6"])
+    changed = make_game(game_id=sicilian.game_id, moves_san=SICILIAN[:-1] + ["Nc6"])
     with pytest.raises(AssertionError, match="must not start an engine"):
         analyze_games([changed], cfg, cache_dir=tmp_path)
+
+
+def _stockfish_descendants() -> list[int]:
+    """Live (non-zombie) Stockfish processes started by this process or its children (Linux only)."""
+    parents, names = {}, {}
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            stat = (d / "stat").read_text()
+        except OSError:
+            continue
+        name = stat[stat.index("(") + 1 : stat.rindex(")")]
+        state, ppid = stat[stat.rindex(")") + 2 :].split()[:2]
+        if state != "Z":
+            parents[int(d.name)], names[int(d.name)] = int(ppid), name
+    ours, frontier = set(), {os.getpid()}
+    while frontier:
+        frontier = {pid for pid, ppid in parents.items() if ppid in frontier} - ours
+        ours |= frontier
+    return sorted(pid for pid in ours if "stockfish" in names[pid].lower())
+
+
+@pytest.mark.engine
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_keyboard_interrupt_leaves_no_stockfish_running(stockfish_path):
+    before = _stockfish_descendants()
+    games = [make_game(moves_san=SICILIAN * 1) for _ in range(6)]
+
+    def interrupt(done, total):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        analyze_games(games, EngineConfig(path=stockfish_path, depth=8, hash_mb=16, workers=3), progress=interrupt)
+    assert _stockfish_descendants() == before
+
+
+@pytest.mark.engine
+def test_parallel_run_from_a_script_without_a_main_guard(stockfish_path, tmp_path):
+    """Windows and macOS start worker processes with "spawn", which re-runs an unguarded script in every
+    worker. Analysis must work (and print nothing alarming) when called from such a script."""
+    script = tmp_path / "unguarded.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path[:0] = [{str(SRC)!r}, {str(TESTS)!r}]\n"
+        "from chess_insights.engine import EngineConfig, analyze_games\n"
+        "from factories import make_game\n"
+        f"games = [make_game(moves_san={QUEENS_GAMBIT!r}) for _ in range(3)]\n"
+        f"res = analyze_games(games, EngineConfig(path={stockfish_path!r}, depth=4, hash_mb=16, workers=2))\n"
+        "print('RESULT', len(res))\n"
+    )
+    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["RESULT", "3"]
+    assert "Traceback" not in out.stderr and "Error" not in out.stderr
+
+
+@pytest.mark.engine
+def test_ctrl_c_during_a_parallel_run_is_quiet_and_leaves_nothing_running(stockfish_path, tmp_path):
+    """What a user sees after Ctrl+C: the KeyboardInterrupt, nothing else (no asyncio "Future exception was
+    never retrieved" noise from the engines being killed mid-search), and the interpreter exits promptly."""
+    script = tmp_path / "interrupted.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path[:0] = [{str(SRC)!r}, {str(TESTS)!r}]\n"
+        "from chess_insights.engine import EngineConfig, analyze_games\n"
+        "from factories import make_game\n"
+        f"games = [make_game(moves_san={SICILIAN!r}) for _ in range(8)]\n"
+        "def stop(done, total):\n"
+        "    raise KeyboardInterrupt\n"
+        "try:\n"
+        f"    analyze_games(games, EngineConfig(path={stockfish_path!r}, depth=10, hash_mb=16, workers=3), progress=stop)\n"
+        "except KeyboardInterrupt:\n"
+        "    print('INTERRUPTED')\n"
+    )
+    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.split() == ["INTERRUPTED"]
+    assert out.stderr == ""

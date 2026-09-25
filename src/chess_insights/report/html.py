@@ -15,11 +15,13 @@ import html as _html
 import math
 import numbers
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Optional, Sequence
 from urllib.parse import urlsplit
+from xml.etree import ElementTree
 
 from ..insights import STUDY_LIBRARY
 from ..models import VALUE_FORMATS, Chart, Diagram, Insight, Kpi, ModuleResult, Report, StudyItem, Table
@@ -31,6 +33,7 @@ NUMERIC_FORMATS = frozenset(f for f in VALUE_FORMATS if f not in ("text", "url")
 _PCT_FORMATS = frozenset({"pct", "signed_pct"})
 _SIGNED_FORMATS = frozenset({"signed_pct", "signed_int"})
 _URL_RE = re.compile(r"^https?://", re.I)
+HUGE = 1e15  # beyond this, numbers are shown in scientific notation (1.5e+18) instead of 19 grouped digits
 
 
 def is_missing(value: Any) -> bool:
@@ -92,7 +95,10 @@ def _quantize(x: float | Decimal, digits: int) -> Decimal:
 
 
 def _number_text(d: Decimal, digits: int, *, grouping: bool = True, signed: bool = False) -> str:
-    body = format(abs(d), f"{',' if grouping else ''}.{digits}f")
+    if abs(d) >= HUGE:
+        body = format(float(abs(d)), ".3g")
+    else:
+        body = format(abs(d), f"{',' if grouping else ''}.{digits}f")
     if d < 0:
         return MINUS + body
     if signed and d > 0:
@@ -107,14 +113,19 @@ def _percent(x: float, *, signed: bool) -> str:
     else:  # one decimal below 10%
         digits = 1 if x != 0 and abs(x) < 0.1 else 0
     d = _quantize(scaled, digits)
+    if digits and abs(d) >= 10:  # 9.96% rounds up to 10.0%: whole percent like every other value >= 10%
+        digits, d = 0, _quantize(scaled, 0)
     if d == 0:
-        return "0%"
+        # a real but tiny rate (a blunder rate of 0.04%) is not "0%"
+        return "<0.1%" if x > 0 and not signed else "0%"
     return _number_text(d, digits, signed=signed) + "%"
 
 
 def _clock(seconds: float) -> str:
     """Whole seconds as m:ss or h:mm:ss (sign kept)."""
     sign = MINUS if seconds < 0 else ""
+    if abs(seconds) >= HUGE:
+        return sign + format(abs(seconds), ".3g") + "s"
     total = int(_quantize(abs(seconds), 0))
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
@@ -331,7 +342,8 @@ class ChartData:
     labels: list[str]
     series: list[tuple[str, list[Optional[float]]]]
     fmt: Optional[str]  # a numeric VALUE_FORMAT, or None to infer per value
-    reference: Optional[float]
+    reference: Optional[float]  # never 0: a reference at zero is the emphasised zero baseline instead
+    emphasise_zero: bool = False
 
     @property
     def has_values(self) -> bool:
@@ -350,8 +362,73 @@ def chart_data(chart: Chart) -> ChartData:
         values += [None] * (n - len(values))
         name = _plain_text(s.name) if not is_missing(s.name) else ("Value" if len(series_in) == 1 else f"Series {i + 1}")
         series.append((name, [to_number(v) for v in values]))
+    roles = result_roles([name for name, _ in series])
+    if roles:  # wins, then draws, then losses (stable within each role)
+        order = sorted(range(len(series)), key=lambda k: _ROLE_ORDER[roles[k]])
+        series = [series[k] for k in order]
     fmt = chart.value_format if chart.value_format in NUMERIC_FORMATS else None
-    return ChartData(labels, series, fmt, to_number(chart.reference))
+    reference = to_number(chart.reference)
+    if reference == 0:  # the zero line is already drawn: emphasise it rather than dashing over it
+        return ChartData(labels, series, fmt, None, emphasise_zero=True)
+    return ChartData(labels, series, fmt, reference)
+
+
+# ---- series colours: by identity, never by position -------------------------------------------
+# Results (wins / draws / losses) get a diverging scheme: a green arm, a neutral grey draw and a
+# red arm, strongest at the ends ("Won by checkmate", "Lost by checkmate"), lightest next to the
+# draws. Up to RESULT_STEPS series per arm; anything else uses the categorical slots 1-8.
+RESULT_STEPS = 4
+_ROLE_ORDER = {"win": 0, "draw": 1, "loss": 2}
+_ROLE_RES = (
+    ("win", re.compile(r"^(?:wins?|won|victor(?:y|ies))\b", re.I)),
+    ("draw", re.compile(r"^(?:draws?|drawn)\b", re.I)),
+    ("loss", re.compile(r"^(?:loss(?:es)?|lost|lose|defeats?)\b", re.I)),
+)
+# Well-known series that recur across charts and reports keep one colour wherever they appear,
+# so a filter that removes bullet does not repaint blitz.
+IDENTITY_SLOTS = {"bullet": "1", "blitz": "2", "rapid": "3", "daily": "4"}
+
+
+def result_roles(names: Sequence[str]) -> Optional[list[str]]:
+    """["win", "draw", "loss", ...] when every series is a result series (and there are 2+ roles), else None."""
+    roles = []
+    for name in names:
+        role = next((r for r, rx in _ROLE_RES if rx.match(str(name).strip())), None)
+        if role is None:
+            return None
+        roles.append(role)
+    if len(set(roles)) < 2 or roles.count("draw") > 1:
+        return None
+    if roles.count("win") > RESULT_STEPS or roles.count("loss") > RESULT_STEPS:
+        return None
+    return roles
+
+
+def series_slots(names: Sequence[str]) -> list[str]:
+    """Colour slot per series: "w1".."w4" / "d" / "l1".."l4" for results, fixed slots for known
+    series (time classes), else "1".."8" in order."""
+    roles = result_roles(names)
+    if roles:
+        n_win, n_loss = roles.count("win"), roles.count("loss")
+        slots, seen = [], {"win": 0, "loss": 0}
+        for role in roles:
+            if role == "draw":
+                slots.append("d")
+                continue
+            seen[role] += 1
+            # wins run strongest -> lightest towards the draws; losses lightest -> strongest away from them
+            step = seen["win"] if role == "win" else n_loss - seen["loss"] + 1
+            slots.append(f"{role[0]}{step}")
+        return slots
+    known = [IDENTITY_SLOTS.get(str(name).strip().lower()) for name in names]
+    if names and all(known) and len(set(known)) == len(known):
+        return [str(k) for k in known]
+    return [str(j % MAX_SERIES + 1) for j in range(len(names))]
+
+
+def _cls(prefix: str, slot: str) -> str:
+    """CSS class for a series slot: f1 / k1 / sw1 for categorical slots, f-w1 / sw-d for result slots."""
+    return f"{prefix}{slot}" if slot.isdigit() else f"{prefix}-{slot}"
 
 
 def chart_table(chart: Chart) -> Table:
@@ -371,7 +448,21 @@ VB_W = 400.0  # viewBox width; charts scale to their container
 PLOT_H = 170.0
 LABEL_PX = 13.0
 TICK_PX = 12.0
-EM = 0.58  # average glyph advance of the UI sans, in em (for label fitting)
+# Glyph advances in em for fitting labels: the wider of DejaVu Sans (what system-ui resolves to
+# on Linux) and Liberation Sans/Arial, so a label that fits here also fits in IBM Plex Sans,
+# San Francisco and Roboto. An average-width guess clipped "−20%" and "+10%" at chart edges.
+_ADVANCE = {
+    ch: w
+    for chars, w in (
+        ("'ijl", 0.28), ("I", 0.3), (" ,.", 0.32), ("/:;\\|", 0.34), ("-f", 0.36), ("()[]", 0.39), ("t", 0.4),
+        ("!r", 0.41), ('"', 0.46), ("*J`", 0.5), ("sz", 0.53), ("c", 0.55), ("?L_", 0.56), ("k", 0.58), ("vxy", 0.6),
+        ("FT", 0.61), ("aeo", 0.62), ("$0123456789bdghnpqu{}", 0.64), ("EKPSY", 0.67), ("ABVXZ", 0.69), ("CR", 0.73),
+        ("U", 0.74), ("N", 0.75), ("H", 0.76), ("D", 0.77), ("&G", 0.78), ("OQ", 0.79), ("w", 0.82),
+        ("#+<=>^~−±≤≥×↗", 0.84), ("M", 0.87), ("%", 0.95), ("m", 0.98), ("W", 0.99), ("@—…→", 1.02),
+        ("–", 0.56), ("·’", 0.34), ("“”", 0.52),
+    )
+    for ch in chars
+}
 BAR_MAX = 20.0  # <= 24 CSS px at typical desktop scale
 GAP = 2.0  # surface gap between touching marks
 RADIUS = 4.0
@@ -389,31 +480,53 @@ def _n(x: float) -> str:
     return s[:-2] if s.endswith(".0") else s
 
 
+def _advance(ch: str) -> float:
+    w = _ADVANCE.get(ch)
+    if w is not None:
+        return w
+    if unicodedata.combining(ch):
+        return 0.0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 1.0
+    return 0.84 if 0x2000 <= ord(ch) < 0x2E80 else 0.7  # symbols / other letters
+
+
 def _tw(text: str, size: float = LABEL_PX) -> float:
-    return len(text) * size * EM
+    """Estimated rendered width of ``text`` at ``size`` (viewBox units == px at 1:1)."""
+    return size * sum(_advance(ch) for ch in text)
+
+
+def _fit(text: str, max_w: float, size: float) -> str:
+    """The longest prefix of ``text`` that fits in ``max_w`` (at least one character)."""
+    acc, out = 0.0, []
+    for ch in text:
+        acc += size * _advance(ch)
+        if acc > max_w and out:
+            break
+        out.append(ch)
+    return "".join(out)
 
 
 def _ellipsize(text: str, max_w: float, size: float = LABEL_PX) -> str:
     if _tw(text, size) <= max_w:
         return text
-    keep = max(1, int(max_w / (size * EM)) - 1)
-    return text[:keep].rstrip() + "…"
+    return _fit(text, max_w - _tw("…", size), size).rstrip() + "…"
 
 
 def _wrap(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 2) -> list[str]:
     """Greedy word wrap into at most ``max_lines`` lines; the last line is ellipsized if needed."""
-    max_chars = max(3, int(max_w / (size * EM)))
     lines: list[str] = []
     cur = ""
     for word in text.split():
-        while len(word) > max_chars:
+        while _tw(word, size) > max_w and len(word) > 1:
             if cur:
                 lines.append(cur)
                 cur = ""
-            lines.append(word[:max_chars])
-            word = word[max_chars:]
+            head = _fit(word, max_w, size)
+            lines.append(head)
+            word = word[len(head) :]
         candidate = f"{cur} {word}" if cur else word
-        if len(candidate) <= max_chars:
+        if _tw(candidate, size) <= max_w:
             cur = candidate
         else:
             if cur:
@@ -426,6 +539,26 @@ def _wrap(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 2) -
     if len(lines) > max_lines:
         lines = lines[: max_lines - 1] + [_ellipsize(" ".join(lines[max_lines - 1 :]), max_w, size)]
     return lines
+
+
+def _wrap_exact(text: str, max_w: float, size: float = LABEL_PX, max_lines: int = 4) -> Optional[list[str]]:
+    """Word wrap that never cuts: lines break at spaces or after a dash/slash ("00:00–" / "04:00").
+    None when the text needs more than ``max_lines`` lines or a single piece is wider than ``max_w``."""
+    lines: list[str] = []
+    cur = ""
+    for word in text.split():
+        for k, piece in enumerate(re.split(r"(?<=[–—/])(?=.)", word)):
+            if _tw(piece, size) > max_w:
+                return None
+            candidate = cur + ("" if k else " ") + piece if cur else piece
+            if _tw(candidate, size) <= max_w:
+                cur = candidate
+            else:
+                lines.append(cur)
+                cur = piece
+    if cur:
+        lines.append(cur)
+    return lines if 0 < len(lines) <= max_lines else None
 
 
 def _nice_step(raw: float, integer: bool) -> float:
@@ -566,12 +699,23 @@ def reference_text(ref: float, fmt: Optional[str]) -> str:
     return f"Reference {format_value(ref, fmt)}"
 
 
-def _zero_class(fmt: Optional[str], values: Sequence[float]) -> str:
-    return "zero" if fmt in _SIGNED_FORMATS or any(v < 0 for v in values) else "base"
+def _zero_class(data: ChartData, values: Sequence[float]) -> str:
+    return "zero" if data.emphasise_zero or data.fmt in _SIGNED_FORMATS or any(v < 0 for v in values) else "base"
 
 
-def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]], title: str, stacked: bool) -> str:
-    """Vertical bars: grouped when there are several series, or stacked."""
+def _svg_columns(
+    data: ChartData,
+    series: list[tuple[str, list[Optional[float]]]],
+    slots: Sequence[str],
+    title: str,
+    stacked: bool,
+    allow_horizontal: bool = False,
+) -> Optional[str]:
+    """Vertical bars: grouped when there are several series, or stacked.
+
+    With ``allow_horizontal``, returns None instead of rotating long category labels: the caller
+    then draws horizontal bars, where labels have room to wrap.
+    """
     fmt, labels, n, ref = data.fmt, data.labels, len(data.labels), data.reference
     if stacked:
         extent = []
@@ -590,15 +734,26 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
     shown = labels
     thin = 1
     rotate = widest > band - 4
-    if rotate and n >= 10 and widest <= 8 * LABEL_PX * EM:  # e.g. hours 00-23: every k-th label, upright
+    line_h = LABEL_PX * 1.2
+    multiline: Optional[list[list[str]]] = None
+    if rotate and n >= 10 and widest <= 60:  # e.g. hours 00-23: every k-th label, upright
         thin, rotate = math.ceil((widest + 8) / band), False
+    if rotate:  # upright on up to four lines reads better than 40° text on a phone, if nothing is cut
+        wrapped = [_wrap_exact(label, band - 6) for label in labels]
+        if all(w is not None for w in wrapped):
+            multiline, rotate = wrapped, False  # type: ignore[assignment]
+    if rotate and allow_horizontal:
+        return None
     if rotate:
-        shown = [_ellipsize(label, 18 * LABEL_PX * EM) for label in labels]
+        shown = [_ellipsize(label, 175) for label in labels]
         max_w = max(_tw(t) for t in shown)
-        left = max(left, max_w * math.cos(_ROT) - band / 2 + 4)
+        # the first label runs down-left from its band centre; its glyph height adds LABEL_PX * sin
+        left = max(left, max_w * math.cos(_ROT) + LABEL_PX * math.sin(_ROT) - band / 2 + 2)
         band = (VB_W - left - right) / n
         thin = max(1, math.ceil(LABEL_PX * 1.3 / band))
         x_band = 14 + max_w * math.sin(_ROT) + LABEL_PX * math.cos(_ROT)
+    elif multiline:
+        x_band = 12 + max(len(lines) for lines in multiline) * line_h
     else:
         x_band = 26.0
 
@@ -606,7 +761,7 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
     cap_txt: list[str] = []
     if single and n <= 16:
         cap_txt = [format_value(v, fmt) if v is not None else "" for v in series[0][1]]
-        if any(_tw(t, TICK_PX) > band + 6 for t in cap_txt):
+        if any(_tw(t, TICK_PX) > band - 2 for t in cap_txt):  # neighbouring bars of similar height would collide
             cap_txt = []
     neg_room = 16.0 if cap_txt and has_neg else 0.0
     top = 20.0
@@ -644,7 +799,7 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
                     neg_acc += v
                     first_neg, is_end = False, k == last_neg
                 if abs(y_start - y_end) >= 0.5 and (y_end < y_start) == (v > 0):
-                    out.append(f'<path class="bar f{j % MAX_SERIES + 1}" d="{_vbar(bx, bw, y_start, y_end, is_end)}"/>')
+                    out.append(f'<path class="bar {_cls("f", slots[j])}" d="{_vbar(bx, bw, y_start, y_end, is_end)}"/>')
         else:
             s = len(series)
             gw = min(band * 0.72, s * BAR_MAX + (s - 1) * GAP)
@@ -654,14 +809,14 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
                 v = vals[i]
                 if v is None:
                     continue
-                out.append(f'<path class="bar f{j % MAX_SERIES + 1}" d="{_vbar(bx + j * (bw + GAP), bw, base_y, y(v))}"/>')
+                out.append(f'<path class="bar {_cls("f", slots[j])}" d="{_vbar(bx + j * (bw + GAP), bw, base_y, y(v))}"/>')
         out.append("</g>")
         if cap_txt and cap_txt[i]:
             v = series[0][1][i] or 0.0
             ty = y(v) - 6 if v >= 0 else y(v) + 15
             out.append(f'<text class="t-val" x="{_n(x0 + band / 2)}" y="{_n(ty)}" text-anchor="middle">{_esc(cap_txt[i])}</text>')
 
-    out.append(_hline(_zero_class(fmt, extent), left, x_right, base_y))
+    out.append(_hline(_zero_class(data, extent), left, x_right, base_y))
     if ref is not None:
         out.append(_hline("ref", left, x_right, y(ref)))
 
@@ -675,13 +830,19 @@ def _svg_columns(data: ChartData, series: list[tuple[str, list[Optional[float]]]
                 f'<text class="t-x" x="{_n(cx)}" y="{_n(label_y)}" dy=".32em" text-anchor="end" '
                 f'transform="rotate(-40 {_n(cx)} {_n(label_y)})">{_esc(text)}</text>'
             )
+        elif multiline:
+            spans = "".join(
+                f'<tspan class="t-x" x="{_n(cx)}" y="{_n(label_y + k * line_h)}">{_esc(line)}</tspan>'
+                for k, line in enumerate(multiline[i])
+            )
+            out.append(f'<text class="t-x" text-anchor="middle">{spans}</text>')
         else:
             out.append(f'<text class="t-x" x="{_n(cx)}" y="{_n(label_y)}" text-anchor="middle">{_esc(text)}</text>')
     out.append("</svg>")
     return "".join(out)
 
 
-def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], title: str) -> str:
+def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], title: str) -> str:
     """Horizontal bars, labels on the left (long opening names wrap to two lines)."""
     fmt, labels, n, ref = data.fmt, data.labels, len(data.labels), data.reference
     values = [v for _, vals in series for v in vals if v is not None]
@@ -746,7 +907,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
             if v is None:
                 continue
             by = cy - group / 2 + j * (bh + GAP)
-            out.append(f'<path class="bar f{j % MAX_SERIES + 1}" d="{_hbar(by, bh, x(0.0), x(v))}"/>')
+            out.append(f'<path class="bar {_cls("f", slots[j])}" d="{_hbar(by, bh, x(0.0), x(v))}"/>')
         out.append("</g>")
         if single:
             v = series[0][1][i]
@@ -760,18 +921,36 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
                 cls = "t-val" if v is not None else "t-tick"
                 out.append(f'<text class="{cls}" x="{_n(tx)}" y="{_n(cy)}" dy=".32em">{_esc(val_txt[i])}</text>')
 
-    out.append(_vline(_zero_class(fmt, values), x(0.0), top - 2, rows_bottom))
+    out.append(_vline(_zero_class(data, values), x(0.0), top - 2, rows_bottom))
     if ref is not None:
         out.append(_vline("ref", x(ref), top - 4, rows_bottom))
     out.append("</svg>")
     return "".join(out)
 
 
-def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], title: str) -> str:
-    """Lines over a category x-axis (e.g. months); None values break the line."""
+_MONTH_RE = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
+
+
+def month_positions(labels: Sequence[str]) -> Optional[list[int]]:
+    """Calendar month numbers when every label is "YYYY-MM" in increasing order, else None."""
+    out = []
+    for label in labels:
+        m = _MONTH_RE.match(label.strip())
+        if not m:
+            return None
+        out.append(int(m.group(1)) * 12 + int(m.group(2)) - 1)
+    if len(out) < 2 or any(b <= a for a, b in zip(out, out[1:])):
+        return None
+    return out
+
+
+def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], title: str) -> str:
+    """Lines over a category x-axis. "YYYY-MM" labels get a calendar scale, because monthly series
+    only list months with games. A missing value or month breaks the line; a thin dashed bridge
+    keeps the series readable across the gap."""
     fmt, labels, n, ref = data.fmt, data.labels, len(data.labels), data.reference
     values = [v for _, vals in series for v in vals if v is not None]
-    include_zero = fmt in _SIGNED_FORMATS or (min(values) < 0 < max(values))
+    include_zero = data.emphasise_zero or fmt in _SIGNED_FORMATS or (min(values) < 0 < max(values))
     ticks, tick_txt = _axis_ticks(values, fmt, include_zero=include_zero, extra=ref)
     left = max(_tw(t, TICK_PX) for t in tick_txt) + 10
     single = len(series) == 1
@@ -779,14 +958,15 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     end_txt = format_value(series[0][1][last_idx[0]], fmt) if single and last_idx[0] >= 0 else ""
     right = _tw(end_txt, TICK_PX) + 16 if end_txt else 10.0
     x_from, x_to = left + 8, VB_W - right
-    xs = [(x_from + x_to) / 2] if n == 1 else [x_from + i * (x_to - x_from) / (n - 1) for i in range(n)]
-
     width = x_to - x_from
+    months = month_positions(labels)
+    if n == 1:
+        xs = [(x_from + x_to) / 2]
+    elif months:
+        xs = [x_from + (m - months[0]) * width / (months[-1] - months[0]) for m in months]
+    else:
+        xs = [x_from + i * width / (n - 1) for i in range(n)]
     shown_txt = [_ellipsize(label, max(width / 2, 40.0)) for label in labels]
-    max_w = max(_tw(t) for t in shown_txt)
-    spacing = width / (n - 1) if n > 1 else VB_W
-    thin = max(1, math.ceil((max_w + 10) / spacing))
-    shown = set(range(n - 1, -1, -thin))  # always label the most recent point
 
     top = 14.0
     height = top + PLOT_H + 28
@@ -801,30 +981,35 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
             out.append(_hline("grid", left, VB_W - 4, y(t)))
         out.append(f'<text class="t-tick" x="{_n(left - 8)}" y="{_n(y(t))}" dy=".32em" text-anchor="end">{_esc(txt)}</text>')
     if zero_drawn:
-        out.append(_hline(_zero_class(fmt, values), left, VB_W - 4, y(0.0)))
+        out.append(_hline(_zero_class(data, values), left, VB_W - 4, y(0.0)))
     if ref is not None:
         out.append(_hline("ref", left, VB_W - 4, y(ref)))
 
     for j, (_, vals) in enumerate(series):
-        cls = j % MAX_SERIES + 1
+        slot = slots[j]
         segments: list[list[int]] = []
         for i, v in enumerate(vals):
             if v is None:
                 continue
-            if segments and segments[-1][-1] == i - 1:
+            prev = segments[-1][-1] if segments else None
+            if prev == i - 1 and (not months or months[i] == months[prev] + 1):
                 segments[-1].append(i)
             else:
                 segments.append([i])
-        d = " ".join("M" + " L".join(f"{_n(xs[i])},{_n(y(vals[i]))}" for i in seg) for seg in segments)
+        pt = lambda i: f"{_n(xs[i])},{_n(y(vals[i]))}"  # noqa: E731
+        bridges = " ".join(f"M{pt(a[-1])} L{pt(b[0])}" for a, b in zip(segments, segments[1:]))
+        if bridges:
+            out.append(f'<path class="ln ln--gap {_cls("k", slot)}" d="{bridges}"/>')
+        d = " ".join("M" + " L".join(pt(i) for i in seg) for seg in segments)
         if d:
-            out.append(f'<path class="ln k{cls}" d="{d}"/>')
+            out.append(f'<path class="ln {_cls("k", slot)}" d="{d}"/>')
         dots = {seg[0] for seg in segments if len(seg) == 1} | ({last_idx[j]} if last_idx[j] >= 0 else set())
         for i in sorted(dots):
             v = vals[i]
             if v is None:
                 continue
             out.append(f'<circle class="ring" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="7"/>')
-            out.append(f'<circle class="dot f{cls}" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="5"/>')
+            out.append(f'<circle class="dot {_cls("f", slot)}" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="5"/>')
 
     for i in range(n):
         lo_x = left if i == 0 else (xs[i - 1] + xs[i]) / 2
@@ -837,7 +1022,7 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
             v = vals[i]
             if v is not None:
                 out.append(f'<circle class="hd ring" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="6"/>')
-                out.append(f'<circle class="hd f{j % MAX_SERIES + 1}" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="4"/>')
+                out.append(f'<circle class="hd {_cls("f", slots[j])}" cx="{_n(xs[i])}" cy="{_n(y(v))}" r="4"/>')
         out.append("</g>")
 
     if end_txt:
@@ -845,9 +1030,13 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         out.append(
             f'<text class="t-val" x="{_n(xs[i] + 10)}" y="{_n(y(series[0][1][i] or 0.0))}" dy=".32em">{_esc(end_txt)}</text>'
         )
-    for i in sorted(shown):
+    placed: list[tuple[int, float, float, float]] = []  # (index, centre, left, right)
+    for i in [n - 1, 0] + list(range(n - 2, 0, -1)):  # the most recent and the first point, then any with room
         half = _tw(shown_txt[i]) / 2
-        cx = min(max(xs[i], half + 2), VB_W - half - 2)
+        cx = min(max(xs[i], half + 2), VB_W - half - 2)  # edge labels are pulled inside the chart
+        if i not in {p[0] for p in placed} and all(cx + half + 6 <= lo or cx - half - 6 >= hi for _, _, lo, hi in placed):
+            placed.append((i, cx, cx - half, cx + half))
+    for i, cx, _, _ in sorted(placed):
         out.append(f'<text class="t-x" x="{_n(cx)}" y="{_n(top + PLOT_H + 20)}" text-anchor="middle">{_esc(shown_txt[i])}</text>')
     out.append("</svg>")
     return "".join(out)
@@ -926,11 +1115,11 @@ def _table_html(table: Table, *, show_title: bool = True) -> str:
     return "".join(parts)
 
 
-def _legend(series: list[tuple[str, list[Optional[float]]]], kind: str, reference: str) -> str:
+def _legend(series: list[tuple[str, list[Optional[float]]]], slots: Sequence[str], kind: str, reference: str) -> str:
     """Series keys (only when there are 2+ series) plus the dashed reference-line key."""
     key = "key key--line" if kind == "line" else "key"
     items = [
-        f'<li><span class="{key} sw{j % MAX_SERIES + 1}" aria-hidden="true"></span>{_esc(name)}</li>'
+        f'<li><span class="{key} {_cls("sw", slots[j])}" aria-hidden="true"></span>{_esc(name)}</li>'
         for j, (name, _) in enumerate(series)
     ] if len(series) >= 2 else []
     if reference:
@@ -954,7 +1143,7 @@ def _chart_html(chart: Chart) -> str:
 
     series = data.series
     notes = [text_or_empty(chart.note)]
-    if len(series) > MAX_SERIES:
+    if len(series) > MAX_SERIES and not result_roles([name for name, _ in series]):
         if kind == "stacked_bar":
             series = _fold_series(series)
         else:
@@ -965,15 +1154,19 @@ def _chart_html(chart: Chart) -> str:
     if kind == "table":
         parts.append(_table_html(chart_table(chart), show_title=False))
     else:
+        slots = series_slots([name for name, _ in series])
         ref_label = reference_text(data.reference, data.fmt) if data.reference is not None else ""
         if len(series) >= 2 or ref_label:
-            parts.append(_legend(series, kind, ref_label))
+            parts.append(_legend(series, slots, kind, ref_label))
         if kind == "hbar":
-            parts.append(_svg_hbar(data, series, title))
+            parts.append(_svg_hbar(data, series, slots, title))
         elif kind == "line":
-            parts.append(_svg_line(data, series, title))
+            parts.append(_svg_line(data, series, slots, title))
         else:
-            parts.append(_svg_columns(data, series, title, stacked=kind == "stacked_bar"))
+            svg = _svg_columns(
+                data, series, slots, title, stacked=kind == "stacked_bar", allow_horizontal=kind == "bar" and len(data.labels) <= 12
+            )
+            parts.append(svg if svg is not None else _svg_hbar(data, series, slots, title))
     for note in notes:
         if note:
             parts.append(f'<p class="note">{_esc(note)}</p>')
@@ -1109,12 +1302,157 @@ def lichess_analysis_url(fen: str) -> Optional[str]:
     return "https://lichess.org/analysis/" + fen.replace(" ", "_")
 
 
-def _diagram_html(d: Diagram) -> str:
-    # The SVG is produced by chess.svg in our own code from a FEN (never user text);
-    # still refuse anything that isn't a bare <svg> element.
-    svg = d.svg.strip() if isinstance(d.svg, str) else ""
-    if not svg.startswith("<svg") or "<script" in svg.lower() or "javascript:" in svg.lower():
-        svg = ""
+# --------------------------------------------------------------------------- board diagrams
+# Diagram.svg is meant to be python-chess output, but it is still data: rather than trusting it,
+# it is parsed and re-written from an allowlist of the elements and attributes python-chess
+# draws with. Anything else (scripts, event handlers, foreignObject, external references,
+# CSS url(), comments/CDATA that HTML and XML parse differently) rejects the whole SVG, and the
+# board is redrawn from the FEN instead. Ids get a per-diagram prefix so several boards on one
+# page never share ids (python-chess reuses "white-pawn", "check_gradient", ...).
+_SVG_NS = "http://www.w3.org/2000/svg"
+_XLINK_NS = "http://www.w3.org/1999/xlink"
+_SVG_MAX_CHARS = 400_000
+_SVG_MAX_DEPTH = 24
+_SVG_TAGS = frozenset(
+    {"svg", "defs", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "use",
+     "radialGradient", "linearGradient", "stop", "text", "tspan", "title"}
+)
+_SVG_TEXT_TAGS = frozenset({"text", "tspan", "title"})
+_SVG_DROP = frozenset({"desc", "metadata"})  # python-chess puts an ASCII board (<pre>) in <desc>
+_SVG_NUMS = re.compile(r"^[\d\s.,eE+\-%]{1,200}$")
+_SVG_PATH = re.compile(r"^[\d\s.,eE+\-MmLlHhVvCcSsQqTtAaZz]{0,20000}$")
+_SVG_TRANSFORM = re.compile(r"^(?:\s*(?:matrix|translate|scale|rotate|skewX|skewY)\s*\([\d\s.,eE+\-]*\)\s*,?)*\s*$")
+_SVG_PAINT = re.compile(r"^(?:#[0-9a-fA-F]{3,8}|[a-zA-Z]{1,20}|rgba?\([\d\s.,%]+\)|url\(#[A-Za-z][\w.-]{0,63}\))$")
+_SVG_KEYWORD = re.compile(r"^[a-zA-Z-]{1,24}$")
+_SVG_ID = re.compile(r"^[A-Za-z][\w.-]{0,63}$")
+_SVG_CLASS = re.compile(r"^[\w\s-]{0,120}$")
+_SVG_REF = re.compile(r"^#([A-Za-z][\w.-]{0,63})$")
+_SVG_ATTRS: dict[str, re.Pattern[str]] = {
+    **{a: _SVG_NUMS for a in (
+        "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "fx", "fy",
+        "offset", "opacity", "fill-opacity", "stroke-opacity", "stop-opacity", "stroke-width", "stroke-dasharray",
+        "stroke-miterlimit", "font-size", "points", "dx", "dy")},
+    **{a: _SVG_PAINT for a in ("fill", "stroke", "stop-color")},
+    **{a: _SVG_KEYWORD for a in (
+        "fill-rule", "clip-rule", "stroke-linecap", "stroke-linejoin", "text-anchor", "dominant-baseline",
+        "alignment-baseline", "font-weight", "font-family", "gradientUnits", "visibility", "version")},
+    "d": _SVG_PATH,
+    "transform": _SVG_TRANSFORM,
+    "gradientTransform": _SVG_TRANSFORM,
+    "class": _SVG_CLASS,
+}
+_SVG_STYLE_PROPS = {k: v for k, v in _SVG_ATTRS.items() if k not in ("d", "class", "points", "viewBox", "version")}
+
+
+class _UnsafeSvg(ValueError):
+    pass
+
+
+def _svg_local(name: str) -> tuple[str, str]:
+    if name.startswith("{"):
+        ns, _, local = name[1:].partition("}")
+        return ns, local
+    return "", name
+
+
+def _svg_attr(name: str, value: str, prefix: str) -> tuple[str, str]:
+    ns, local = _svg_local(name)
+    if ns == _XLINK_NS and local == "href":
+        name = "xlink:href"
+    elif ns:
+        raise _UnsafeSvg(name)
+    else:
+        name = local
+    value = value.strip()
+    if name in ("href", "xlink:href"):
+        ref = _SVG_REF.match(value)
+        if not ref:
+            raise _UnsafeSvg(f"{name}={value[:40]!r}")
+        return name, f"#{prefix}{ref.group(1)}"
+    if name == "id":
+        if not _SVG_ID.match(value):
+            raise _UnsafeSvg(f"id={value[:40]!r}")
+        return name, prefix + value
+    if name == "style":
+        decls = []
+        for decl in value.split(";"):
+            if not decl.strip():
+                continue
+            prop, sep, val = decl.partition(":")
+            prop, val = prop.strip().lower(), val.strip()
+            rule = _SVG_STYLE_PROPS.get(prop)
+            if not sep or rule is None or not rule.match(val):
+                raise _UnsafeSvg(f"style {decl[:40]!r}")
+            decls.append(f"{prop}:{_svg_prefix_urls(val, prefix)}")
+        return name, ";".join(decls)
+    rule = _SVG_ATTRS.get(name)
+    if rule is None or not rule.match(value):
+        raise _UnsafeSvg(f"{name}={value[:40]!r}")
+    return name, _svg_prefix_urls(value, prefix)
+
+
+def _svg_prefix_urls(value: str, prefix: str) -> str:
+    return re.sub(r"url\(#([\w.-]+)\)", lambda m: f"url(#{prefix}{m.group(1)})", value)
+
+
+def _svg_write(el: ElementTree.Element, prefix: str, out: list[str], depth: int) -> None:
+    ns, tag = _svg_local(el.tag if isinstance(el.tag, str) else "")
+    if ns not in ("", _SVG_NS) or depth > _SVG_MAX_DEPTH:
+        raise _UnsafeSvg(tag)
+    if tag in _SVG_DROP:
+        return
+    if tag not in _SVG_TAGS:
+        raise _UnsafeSvg(tag)
+    attrs = "".join(f' {k}="{_esc(v)}"' for k, v in (_svg_attr(n, v, prefix) for n, v in el.attrib.items()))
+    if depth == 0:
+        attrs = f' xmlns="{_SVG_NS}" xmlns:xlink="{_XLINK_NS}"' + attrs
+    out.append(f"<{tag}{attrs}>")
+    if el.text and el.text.strip():
+        if tag not in _SVG_TEXT_TAGS:
+            raise _UnsafeSvg(f"text in <{tag}>")
+        out.append(_esc(el.text))
+    for child in el:
+        _svg_write(child, prefix, out, depth + 1)
+        if child.tail and child.tail.strip():
+            raise _UnsafeSvg("stray text")
+    out.append(f"</{tag}>")
+
+
+def sanitize_board_svg(svg: Any, prefix: str = "") -> str:
+    """Re-serialise a board SVG through the allowlist; "" if it contains anything else."""
+    if not isinstance(svg, str):
+        return ""
+    text = svg.strip()
+    if text.startswith("<?xml"):
+        text = text[text.find("?>") + 2 :].lstrip()
+    # no comments, CDATA, doctypes/entities or processing instructions: HTML and XML disagree on them
+    if not text.startswith("<svg") or len(text) > _SVG_MAX_CHARS or "<!" in text or "<?" in text:
+        return ""
+    try:
+        root = ElementTree.fromstring(text)
+        if _svg_local(root.tag)[1] != "svg":
+            return ""
+        out: list[str] = []
+        _svg_write(root, prefix, out, 0)
+    except (ElementTree.ParseError, _UnsafeSvg, ValueError):
+        return ""
+    return "".join(out)
+
+
+def _board_from_fen(fen: Any) -> str:
+    """A plain python-chess board for a FEN (used when the supplied SVG is rejected)."""
+    try:
+        import chess
+        import chess.svg
+
+        board = chess.Board(str(fen).strip())
+        return chess.svg.board(board, size=280)
+    except Exception:  # noqa: BLE001 — invalid FEN (or python-chess missing): no board
+        return ""
+
+
+def _diagram_html(d: Diagram, id_prefix: str = "b-") -> str:
+    svg = sanitize_board_svg(d.svg, id_prefix) or sanitize_board_svg(_board_from_fen(d.fen), id_prefix)
     links = []
     game = safe_url(d.link)
     if game:
@@ -1122,9 +1460,10 @@ def _diagram_html(d: Diagram) -> str:
     analysis = lichess_analysis_url(d.fen)
     if analysis:
         links.append(_link(analysis, "Analyse on Lichess"))
+    board = f'<div class="board-svg" role="img" aria-label="{_esc(d.title)}">{svg}</div>' if svg else ""
     return (
         '<figure class="board-fig">'
-        f'<div class="board-svg" role="img" aria-label="{_esc(d.title)}">{svg}</div>'
+        f"{board}"
         f'<figcaption><span class="block-title">{_esc(d.title)}</span>'
         + (f'<span class="board-cap">{_esc(d.caption)}</span>' if text_or_empty(d.caption) else "")
         + (f'<span class="board-links">{" ".join(links)}</span>' if links else "")
@@ -1144,7 +1483,11 @@ def _module_html(module: ModuleResult, anchor: str) -> str:
     if module.charts:
         parts.append('<div class="charts">' + "".join(_chart_html(c) for c in module.charts) + "</div>")
     if getattr(module, "diagrams", None):
-        parts.append('<div class="boards">' + "".join(_diagram_html(d) for d in module.diagrams) + "</div>")
+        parts.append(
+            '<div class="boards">'
+            + "".join(_diagram_html(d, f"{anchor}-b{i}-") for i, d in enumerate(module.diagrams, 1))
+            + "</div>"
+        )
     for table in module.tables or []:
         parts.append(_table_html(table))
     if module.insights:
@@ -1258,7 +1601,7 @@ _LIGHT = {
     "surface": "#FCFCFB",
     "ink": "#16181D",
     "ink-2": "#4E535C",
-    "muted": "#8A8E96",
+    "muted": "#676B73",  # >= 4.5:1 on paper and surface: notes, hints and ticks are text too
     "hairline": "#E1E0D9",
     "axis": "#C3C2B7",
     "accent": "#3E6B4F",
@@ -1267,12 +1610,13 @@ _LIGHT = {
     "board-dark": "#7D8F6E",
     "good": "#1F7A3A",
     "good-wash": "#E2EFE4",
-    "bad": "#C43D3D",
+    "bad": "#B83535",
     "bad-wash": "#F7E4E2",
     "neutral": "#4E535C",
     "neutral-wash": "#ECECE7",
     "tip-bg": "#16181D",
     "tip-ink": "#F2F2EF",
+    "scroll-shadow": "rgba(22,24,29,.22)",
     "s1": "#2a78d6",
     "s2": "#eb6834",
     "s3": "#1baf7a",
@@ -1281,6 +1625,16 @@ _LIGHT = {
     "s6": "#008300",
     "s7": "#4a3aa7",
     "s8": "#e34948",
+    # results: diverging green / grey / red, validated for colour-vision deficiency on adjacent pairs
+    "s-w1": "#016d5e",
+    "s-w2": "#008874",
+    "s-w3": "#3e9f8c",
+    "s-w4": "#63baa8",
+    "s-d": "#808284",
+    "s-l1": "#b6322d",
+    "s-l2": "#ca564d",
+    "s-l3": "#db786e",
+    "s-l4": "#e8978d",
 }
 _DARK = {
     "paper": "#0F1113",
@@ -1302,6 +1656,7 @@ _DARK = {
     "neutral-wash": "#25272A",
     "tip-bg": "#F2F2EF",
     "tip-ink": "#16181D",
+    "scroll-shadow": "rgba(242,242,239,.2)",
     "s1": "#3987e5",
     "s2": "#d95926",
     "s3": "#199e70",
@@ -1310,6 +1665,15 @@ _DARK = {
     "s6": "#008300",
     "s7": "#9085e9",
     "s8": "#e66767",
+    "s-w1": "#2ac8ae",
+    "s-w2": "#15ad95",
+    "s-w3": "#1f8f7c",
+    "s-w4": "#047463",
+    "s-d": "#86888a",
+    "s-l1": "#fc7b6f",
+    "s-l2": "#d55f56",
+    "s-l3": "#aa4941",
+    "s-l4": "#81332d",
 }
 
 _BASE_CSS = """
@@ -1422,6 +1786,7 @@ details.study[open] summary{margin-bottom:8px}
 .ci-chart .ref{stroke:var(--ink-2);stroke-width:1.5px;stroke-dasharray:5 4;vector-effect:non-scaling-stroke}
 .ci-chart .hit{fill:transparent}
 .ci-chart .ln{fill:none;stroke-width:2px;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
+.ci-chart .ln--gap{stroke-width:1.5px;stroke-dasharray:2 4;opacity:.6}
 .ci-chart .ring{fill:var(--surface)}
 .ci-chart .xh{stroke:var(--axis);stroke-width:1px;vector-effect:non-scaling-stroke;opacity:0}
 .ci-chart .hd{opacity:0}
@@ -1429,7 +1794,8 @@ details.study[open] summary{margin-bottom:8px}
 .ci-chart .mk:hover .bar{opacity:.78}
 .chart-data .table-wrap{margin-top:8px}
 .table-block{display:grid;gap:8px;min-width:0}
-.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.table-wrap{--wrap-bg:var(--paper);overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;background:linear-gradient(to right,var(--wrap-bg) 40%,transparent) left center/28px 100% no-repeat local,linear-gradient(to left,var(--wrap-bg) 40%,transparent) right center/28px 100% no-repeat local,radial-gradient(farthest-side at 0 50%,var(--scroll-shadow),transparent) left center/10px 100% no-repeat scroll,radial-gradient(farthest-side at 100% 50%,var(--scroll-shadow),transparent) right center/10px 100% no-repeat scroll}
+.ci-chart .table-wrap{--wrap-bg:var(--surface)}
 .ci table{border-collapse:collapse;width:100%;font-size:14px;line-height:1.4;font-variant-numeric:tabular-nums}
 .ci th,.ci td{padding:7px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--hairline)}
 .ci th{font:600 13px/1.3 var(--font-cond);letter-spacing:.03em;color:var(--ink-2);border-bottom-color:var(--axis);vertical-align:bottom}
@@ -1437,6 +1803,7 @@ details.study[open] summary{margin-bottom:8px}
 .ci th:last-child,.ci td:last-child{padding-right:0}
 .ci td{min-width:6ch}
 .ci td.wide{min-width:18ch}
+.ci td:first-child:not(.num){min-width:13ch}
 .ci .num{text-align:right;white-space:nowrap}
 .ci td.mono{font-family:var(--font-mono);font-size:13px}
 .ci tbody tr:hover{background:var(--accent-wash)}
@@ -1517,9 +1884,14 @@ def build_css(standalone: bool = True) -> str:
         '--font-cond:"IBM Plex Sans Condensed","Roboto Condensed","Arial Narrow","IBM Plex Sans",system-ui,sans-serif;'
         '--font-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;'
     )
+    slots = [str(i) for i in range(1, MAX_SERIES + 1)] + [
+        f"{role}{k}" for role in ("w", "l") for k in range(1, RESULT_STEPS + 1)
+    ] + ["d"]
     series = "".join(
-        f".ci-chart .f{i}{{fill:var(--s{i})}}.ci-chart .k{i}{{stroke:var(--s{i})}}.sw{i}{{background:var(--s{i})}}"
-        for i in range(1, MAX_SERIES + 1)
+        f".ci-chart .{_cls('f', s)}{{fill:var(--s{'' if s.isdigit() else '-'}{s})}}"
+        f".ci-chart .{_cls('k', s)}{{stroke:var(--s{'' if s.isdigit() else '-'}{s})}}"
+        f".{_cls('sw', s)}{{background:var(--s{'' if s.isdigit() else '-'}{s})}}"
+        for s in slots
     )
     dark = _tokens(_DARK) + "color-scheme:dark;"
     safe_area = (

@@ -13,8 +13,9 @@ same games* (rating-matched players on the same clock):
 * think time: average seconds per move by move number.
 
 Each claim is one test per time class, BH-adjusted over the time classes, under the
-project-wide rule ``stats.significance``: time trouble and flagging at ``stats.ALPHA``
-(primary claims), a slow opening and good clock handling at ``stats.STRICT_ALPHA``.
+project-wide rule ``stats.significance`` at ``stats.STRICT_ALPHA``: the paired tests
+against your opponents in the same games have plenty of power for clock habits that
+matter, so the strict level costs little.
 
 ``time_spent`` is the shared definition of the seconds spent on one ply
 (``engine.py`` computes the same thing independently).
@@ -31,7 +32,6 @@ from typing import Any, Optional, Sequence
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Color, Game, Insight, Kpi, ModuleResult, Series, Table
 from ..stats import (
-    ALPHA,
     STRICT_ALPHA,
     MeanTest,
     ScoreSummary,
@@ -71,8 +71,7 @@ class Thresholds:
     """Minimum sample sizes and effect sizes; override with ``ctx.options["time.<name>"]``."""
 
     min_games: int = 15  # live games with clocks in a time class before it is reported
-    alpha: float = ALPHA  # time trouble, flagging: primary claims
-    strict_alpha: float = STRICT_ALPHA  # slow opening, good clock handling
+    strict_alpha: float = STRICT_ALPHA  # every clock claim (see the module docstring)
     min_trouble_gap: float = 0.10  # your time-trouble rate minus your opponents' in the same games
     min_losses: int = 20  # losses in a time class before judging how many were on time
     min_timeouts: int = 10  # games decided on time (either way) before comparing who flags whom
@@ -356,7 +355,7 @@ def _slowest_first(clocks: Sequence[GameClock]) -> list[str]:
 
 
 def trouble_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
-    significant, confidence = significance(cs.trouble_test, th.min_games, p_adj, alpha=th.alpha)
+    significant, confidence = significance(cs.trouble_test, th.min_games, p_adj, alpha=th.strict_alpha)
     gap = cs.trouble_rate - cs.opp_trouble_rate
     if cs.n < th.min_games or gap < th.min_trouble_gap or not significant:
         return None
@@ -406,7 +405,7 @@ def trouble_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[In
 def flag_insight(cs: ClassStats, p_adj: float, th: Thresholds) -> Optional[Insight]:
     if cs.losses < th.min_losses:
         return None
-    significant, confidence = significance(cs.flag_test, th.min_timeouts, p_adj, alpha=th.alpha)
+    significant, confidence = significance(cs.flag_test, th.min_timeouts, p_adj, alpha=th.strict_alpha)
     share = cs.flag_loss_share or 0.0
     if cs.flag_test.mean < th.min_flag_balance or share < th.min_flag_share or not significant:
         return None

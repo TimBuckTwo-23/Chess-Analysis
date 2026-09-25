@@ -109,6 +109,18 @@ def two_proportion_test(x1: float, n1: int, x2: float, n2: int) -> MeanTest:
     return MeanTest(n1 + n2, p1 - p2, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
 
 
+def one_sided(test: MeanTest, direction: int) -> MeanTest:
+    """``test`` with a one-sided p-value for H1: mean > 0 (``direction`` = +1) or mean < 0 (-1).
+
+    Only for hypotheses whose direction is fixed in advance (the tool only ever claims
+    "you play *worse* after a loss"); a result in the other direction gets p >= 0.5.
+    """
+    if not math.isfinite(test.se) or test.n == 0:
+        return dataclasses.replace(test, p_value=1.0)
+    p = 1.0 - normal_cdf(test.z) if direction > 0 else normal_cdf(test.z)
+    return dataclasses.replace(test, p_value=clamp(p))
+
+
 def bh_adjust(p_values: Sequence[float]) -> list[float]:
     """Benjamini-Hochberg adjusted p-values (same order as the input).
 
@@ -203,20 +215,23 @@ def combined_confidence(test: MeanTest, min_n: int) -> float:
 #   enough data (n >= min_n)  AND  (multiple-testing adjusted) p <= alpha  AND  a big enough effect
 #
 # The effect-size bar stays with each module (it is domain knowledge); this is the statistical
-# part. A report runs a few dozen tests, each family of tests (every opening family, every
-# time class...) is Benjamini-Hochberg adjusted, and under pure noise each family then makes a
-# false claim with probability about alpha (alpha / 2 for one-directional claims such as
-# "you play worse after a loss"). The families are split into two tiers so that the whole
-# report stays below ~0.25 false claims on data with no real effects (tests/test_null_calibration.py)
-# while still finding realistic effects (tests/test_power.py):
+# part. A report runs a few dozen tests. Each family of tests (every opening family, every
+# time class...) is Benjamini-Hochberg adjusted, so under pure noise a family makes a false
+# claim with probability about alpha when it can claim either direction, and alpha / 2 when
+# it only ever claims one (a two-sided p-value). The expected number of false claims per
+# report is roughly the sum over families, so the families are split into two tiers that keep
+# it near 0.2 on data with no real effects (tests/test_null_calibration.py) while still
+# finding realistic effects (tests/test_power.py):
 #
-# * ALPHA (0.05) for the handful of claims players most need and that are hardest to detect:
-#   colour, opening families, playing on after a loss, late-night play, time trouble and
-#   flagging.
-# * STRICT_ALPHA (0.01) for everything else: exploratory scans (other times of day, game
-#   length, time controls, opponent strength, session length), claims with a less direct
-#   reading (how losses end) and effects that are large when real (slow openings, quick
-#   losses in one opening).
+# * ALPHA (0.05): the four claims that are both most useful and hardest to detect, because
+#   the effects are modest (5-15 points per 100 games) and only part of the games carry them:
+#   colour, opening families, playing on straight after a loss and late-night play. The last
+#   two are fixed in advance with their direction, so they use a one-sided p-value
+#   (``one_sided``).
+# * STRICT_ALPHA (0.01): everything else. Exploratory scans (other times of day, game length,
+#   time controls, opponent strength, session length), claims with a less direct reading (how
+#   losses end), and clock habits and quick losses in one opening, whose effects are large when
+#   they are real (paired or mirror tests with plenty of power).
 ALPHA = 0.05
 STRICT_ALPHA = 0.01
 

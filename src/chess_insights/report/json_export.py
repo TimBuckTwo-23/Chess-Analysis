@@ -54,7 +54,7 @@ def jsonable(obj: Any, _depth: int = 0) -> Any:
     if isinstance(obj, timedelta):
         return obj.total_seconds()
     if isinstance(obj, Decimal):
-        return _finite(float(obj))
+        return _finite(float(obj)) if obj.is_finite() else None  # float(Decimal("sNaN")) raises
     if isinstance(obj, Enum):
         return jsonable(obj.value, _depth + 1)
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):

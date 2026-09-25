@@ -393,3 +393,33 @@ def test_real_chesscom_games_every_player(fixtures_dir):
         games = parse.parse_games(raws, user)  # unfiltered: variants, chess960, daily, casual all included
         mr = run(games)
         assert mr.stats["n"] == len(games)
+
+
+# --------------------------------------------------------------------------- calibration: claims that used to fire on noise
+def test_opponent_claim_must_hold_for_the_plain_elo_formula_too():
+    # 85% against opponents 300 points weaker: exactly what the plain Elo formula predicts (85%), but
+    # well above the pessimistic attenuated expectation (76%). Rating noise alone can explain that, so
+    # no "you reliably beat lower-rated players" (the old attenuated-only test claimed it).
+    games = games_by(255, 45, my_rating=1500, opp_rating=1200) + games_by(60, 60)
+    mr = run(games)
+    lower = mr.stats["opponent_groups"]["lower"]
+    assert lower["delta"] > 0.07 and lower["p_adjusted"] < 0.001  # significant against the attenuated expectation
+    assert abs(lower["elo_delta"]) < 0.01  # ... but not against plain Elo
+    assert not [i for i in mr.insights if i.category == "opponents"]
+
+
+def test_time_controls_are_compared_one_against_the_rest_not_best_against_worst():
+    # Three pools, each near its own expectation; rapid looks a bit better. The old best-vs-worst
+    # comparison (selection-biased) called rapid the best and blitz the weakest time control.
+    rapid = games_by(16, 9, time_class="rapid", time_control="600", base_seconds=600)
+    blitz = games_by(12, 13)
+    bullet = games_by(13, 12, time_class="bullet", time_control="60", base_seconds=60)
+    mr = run(rapid + blitz + bullet)
+    assert not [i for i in mr.insights if "time-control" in i.id]
+    tests = mr.stats["time_control_comparison"]["tests"]
+    assert set(tests) == {"Rapid", "Blitz", "Bullet"} and all(t["p_adjusted"] >= t["p_value"] - 1e-12 for t in tests.values())
+    # a real gap against the other two still counts
+    strong = games_by(34, 6, time_class="rapid", time_control="600", base_seconds=600)
+    mr = run(strong + games_by(20, 20) + bullet)
+    ins = next(i for i in mr.insights if i.id == "results.strength.time-control-rapid")
+    assert ins.kind == "strength" and "other time controls" in ins.detail

@@ -28,12 +28,13 @@ their clocks / how they end):
 ``"colour": ("black", -0.08)``
     points per game with that colour (on top of White's normal edge).
 ``"baseline": 0.03``
-    points per game for every game that no planted effect shifts. The null world
-    anchors each game's true expectation to the *current* rating, so on its own a
-    planted weakness makes the player underperform their rating on average (and the
-    rating slides); a real player's rating has already priced their weaknesses in,
-    which puts their ordinary games a little above expectation. About
-    ``-share * effect / (1 - share)`` models that.
+    points per game added to every game. The null world anchors each game's true
+    expectation to the *current* rating, so on its own a planted weakness makes the
+    player underperform their rating on average (and the rating keeps sliding); a real
+    player's rating has already priced their weaknesses in, which lifts every game a
+    little relative to that rating. ``-share * effect`` (the share of games the effect
+    touches) models this: the planted gap between affected and other games stays the
+    same, the affected games' shortfall against the rating shrinks by ``share``.
 
 Without ``planted`` every random draw happens exactly as it always did, so a
 seed gives the same games, results, openings, clocks and lengths as before; the
@@ -213,7 +214,7 @@ def null_games(
             if spec and prng.random() < spec[0]:
                 trouble = True
                 shift += spec[1]
-            e_true += shift if shift else planted.get("baseline", 0.0)
+            e_true += shift + planted.get("baseline", 0.0)
 
         p_win = max(0.0, min(1.0 - P_DRAW, e_true - P_DRAW / 2))
         u = rng.random()

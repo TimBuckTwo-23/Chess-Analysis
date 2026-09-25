@@ -38,10 +38,13 @@ from .html import (
     valid_urls,
 )
 
-_SPECIAL = re.compile(r"([\\`*\[\]<>|~])")
+_SPECIAL = re.compile(r"([\\`*\[\]<>|~$])")  # $ starts GitHub maths
 _UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")  # intraword _ is literal in GFM
 _ENTITY = re.compile(r"&(?=#?[A-Za-z0-9]+;)")
-_BLOCK_START = re.compile(r"^(#{1,6}\s|[-+=]\s|>|\d+[.)]\s)")
+_HASH = re.compile(r"(?:(?<=\s)|^)#")  # headings, and the optional closing #s of a heading
+# a list bullet ("- x", "+ x"), or a line of only - / = (thematic break "---", setext underline "===")
+_LEADING_MARK = re.compile(r"^(?:[-+](?=\s|$)|[-=](?=[-=\s]*$))")
+_ORDERED = re.compile(r"^(\d{1,9})([.)])(?=\s|$)")  # "1. e4": escape the dot, not the digit
 
 
 def md_text(value: Any) -> str:
@@ -50,9 +53,19 @@ def md_text(value: Any) -> str:
     text = _SPECIAL.sub(r"\\\1", text)
     text = _UNDERSCORE.sub(r"\\_", text)
     text = _ENTITY.sub("&amp;", text)
-    if _BLOCK_START.match(text):  # would start a heading, list or quote at the start of a line
-        text = "\\" + text
-    return text
+    text = _HASH.sub(r"\\#", text)
+    text = _LEADING_MARK.sub(lambda m: "\\" + m.group(0), text)
+    return _ORDERED.sub(r"\1\\\2", text)
+
+
+def md_code(value: Any) -> str:
+    """Inline code span that no backtick in the text can close early (backslashes are literal in code)."""
+    text = " ".join(text_or_empty(value).split())
+    if not text:
+        return ""
+    fence = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 def md_link(url: Any, label: str) -> str:
@@ -60,7 +73,9 @@ def md_link(url: Any, label: str) -> str:
     safe = safe_url(url)
     if not safe:
         return md_text(url)
-    target = safe.replace("(", "%28").replace(")", "%29").replace("<", "%3C").replace(">", "%3E")
+    target = safe
+    for char, code in (("\\", "%5C"), ("(", "%28"), (")", "%29"), ("<", "%3C"), (">", "%3E")):
+        target = target.replace(char, code)
     return f"[{md_text(label)}]({target})"
 
 
@@ -175,7 +190,7 @@ def _module(module: ModuleResult) -> list[str]:
         lines += _chart(chart)
     for d in getattr(module, "diagrams", None) or []:
         links = [md_link(u, t) for u, t in ((d.link, "game"), (lichess_analysis_url(d.fen), "analyse on Lichess")) if u]
-        lines += [f"- **{md_text(d.title)}**: {md_text(d.caption)} `{md_text(d.fen)}` " + " · ".join(links), ""]
+        lines += [f"- **{md_text(d.title)}**: {md_text(d.caption)} {md_code(d.fen)} " + " · ".join(links), ""]
     for table in module.tables or []:
         if text_or_empty(table.title):
             lines += [f"#### {md_text(table.title)}", ""]

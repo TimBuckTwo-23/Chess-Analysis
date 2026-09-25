@@ -83,3 +83,71 @@ def test_mean_test_min_sd_keeps_small_streaky_samples_honest():
     assert naive.p_value < 1e-6  # zero variance -> fake certainty
     assert 0.001 < floored.p_value < 0.01
     assert stats.mean_test([0.3, -0.7] * 40, min_sd=0.01).se == stats.mean_test([0.3, -0.7] * 40).se
+
+
+# --------------------------------------------------------------------------- significance policy & group maths
+def test_significance_needs_min_n_finite_se_and_adjusted_p():
+    strong = stats.mean_test([-0.2, -0.3, -0.1, -0.25] * 20)  # n = 80, p ~ 0
+    ok, conf = stats.significance(strong, min_n=20)
+    assert ok and conf > 0.99
+    assert stats.significance(strong, min_n=100) == (False, 0.0)  # too few samples
+    ok, conf = stats.significance(strong, min_n=20, p_adjusted=0.03)
+    assert ok and conf == pytest.approx(0.97)
+    assert not stats.significance(strong, min_n=20, p_adjusted=0.03, alpha=stats.STRICT_ALPHA)[0]
+    assert not stats.significance(strong, min_n=20, p_adjusted=0.06)[0]
+    assert not stats.is_significant(stats.MeanTest(30, -0.5, float("inf"), 0.0, 0.0), min_n=10)
+    assert stats.STRICT_ALPHA < stats.ALPHA == 0.05
+
+
+def test_significant_claims_always_clear_the_ranking_floor():
+    from chess_insights.insights import MIN_CONFIDENCE
+
+    borderline = stats.MeanTest(20, -0.2, 0.1, -1.97, 0.049)  # just significant at the minimum sample size
+    ok, conf = stats.significance(borderline, min_n=20)
+    assert ok and conf >= MIN_CONFIDENCE
+
+
+def test_weighted_bh_gives_big_groups_more_of_the_budget():
+    p = [0.012, 0.012, 0.5, 0.5, 0.5]
+    plain = stats.bh_adjust(p)
+    assert plain[0] == pytest.approx(0.03)
+    weighted = stats.weighted_bh_adjust(p, [3, 1, 1, 1, 1])  # the first group has 3x the games
+    assert weighted[0] < plain[0] < weighted[1]
+    assert stats.weighted_bh_adjust(p, [1] * 5) == pytest.approx(plain)
+    assert all(a >= q for a, q in zip(stats.weighted_bh_adjust([0.9, 0.001], [10, 1]), [0.9, 0.001]))
+    assert stats.weighted_bh_adjust([], []) == [] and stats.weighted_bh_adjust([0.2], [0]) == [0.2]
+
+
+def test_weighted_bh_keeps_the_family_error_rate_under_the_null():
+    import random
+
+    rng = random.Random(4)
+    hits = 0
+    for _ in range(4000):
+        p = [rng.random() for _ in range(8)]
+        hits += min(stats.weighted_bh_adjust(p, [5, 1, 1, 1, 2, 3, 1, 1])) <= 0.05
+    assert hits / 4000 < 0.06
+
+
+def test_colour_expected_and_colour_adjusted_summaries():
+    from factories import make_game
+
+    assert stats.colour_expected(0.5, "white") == pytest.approx(0.52)
+    assert stats.colour_expected(0.5, "black") == pytest.approx(0.48)
+    assert stats.colour_expected(0.995, "white") == 0.99
+    games = [make_game(color="black", outcome=o) for o in ["win", "loss"] * 10]
+    plain, adjusted = stats.summarize(games), stats.summarize(games, colour_adjust=True)
+    assert plain.delta == pytest.approx(0.0) and adjusted.delta == pytest.approx(0.02)
+    raw = stats.summarize([make_game(opp_rating=1700)], attenuate=1.0)
+    att = stats.summarize([make_game(opp_rating=1700)], attenuate=True)
+    assert raw.expected == pytest.approx(stats.expected_score(1500, 1700))
+    assert att.expected == pytest.approx(stats.attenuated_expected(raw.expected))
+    assert stats.ATTENUATION_RANGE == (stats.RATING_NOISE_ATTENUATION, 1.0)
+
+
+def test_group_helpers_are_still_importable_from_results():
+    from chess_insights.analysis import results
+
+    assert results.summarize is stats.summarize and results.ScoreSummary is stats.ScoreSummary
+    assert results.difference_test is stats.difference_test and results.with_p_value is stats.with_p_value
+    assert results.WHITE_EDGE == stats.WHITE_EDGE

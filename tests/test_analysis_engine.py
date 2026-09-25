@@ -378,3 +378,88 @@ def test_accuracy_trend_and_accuracy_by_result():
     assert ins.evidence["games"] == 12
     wins = [a.my_accuracy for g, a in pairs if g.outcome == "win"]
     assert ins.evidence["win"] == pytest.approx(sum(wins) / len(wins))
+
+
+# --------------------------------------------------------------------------- statistics: games are the unit
+def clustered_world(seed: int, *, n_games: int = 120, n: int = 60, shape: float = 0.3, my_factor: float = 1.0):
+    """Games whose errors come in bursts (one bad game holds several blunders), as real games do.
+
+    Each side of each game gets its own error intensity from a Gamma(shape) distribution (small shape = heavy
+    clustering); you and your opponents share it unless ``my_factor`` scales yours.
+    """
+    import math
+    import random
+
+    from chess_insights.models import PlyEval
+
+    rng = random.Random(seed)
+    pairs = []
+    for _ in range(n_games):
+        color = rng.choice(("white", "black"))
+        game = make_game(color=color, moves_san=[SANS[i % len(SANS)] for i in range(n)],
+                         outcome=rng.choice(("win", "draw", "loss")))
+        rates = {}
+        for side in ("white", "black"):
+            base = rng.gammavariate(shape, 1.0 / shape)  # mean 1
+            rates[side] = min(9.0, base * (my_factor if side == color else 1.0))  # error probability <= 0.9
+        plies = []
+        for i in range(n):
+            mover = "white" if i % 2 == 0 else "black"
+            lam = rates[mover]
+            judgement = None
+            u = rng.random()
+            if u < 0.03 * lam:
+                judgement = "blunder"
+            elif u < 0.06 * lam:
+                judgement = "mistake"
+            elif u < 0.10 * lam:
+                judgement = "inaccuracy"
+            tags = []
+            if judgement == "blunder" and rng.random() < 0.5:
+                tags.append("missed_tactic")
+            if judgement in ("blunder", "mistake") and rng.random() < 0.4:
+                tags.append("hung_material")
+            plies.append(PlyEval(
+                ply=i, mover=mover, is_user=mover == color, san=game.moves_san[i], best_san=None, cp_before=0,
+                cp_after=0, mate_before=None, mate_after=None, win_before=50.0, win_after=50.0,
+                accuracy=90.0, cp_loss=150 if judgement else 10, judgement=judgement,
+                phase=default_phase(i, n), clock_after=None, time_spent=None, tags=tags,
+            ))
+        pairs.append((game, make_game_eval(game.game_id, plies, my_accuracy=80.0, opp_accuracy=80.0)))
+    return pairs
+
+
+def test_clustered_errors_do_not_produce_false_claims():
+    """You and your opponents err at the same rate, but in bursts: counting moves as independent observations
+    (or deflating them by a fixed factor) makes chance differences look significant."""
+    runs = 30
+    false_claims = []
+    for seed in range(runs):
+        mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in clustered_world(seed)],
+                                                  evals={ev.game_id: ev for _, ev in clustered_world(seed)}))
+        false_claims.append(len(claims(mr)))
+    assert sum(false_claims) / runs <= 0.2, false_claims
+
+
+def test_clustered_errors_still_detect_a_real_difference():
+    found = 0
+    runs = 12
+    for seed in range(runs):
+        pairs = clustered_world(1000 + seed, n_games=150, my_factor=2.0)
+        mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs}))
+        found += insight(mr, "engine.weakness.blunder-rate") is not None
+    assert found >= 0.75 * runs
+
+
+def test_rate_test_uses_games_as_the_unit():
+    """Same totals, different spread over games: bursts (all errors in a few games) are weaker evidence."""
+    spread = [engine_stats.Tally(moves=30, blunders=2) for _ in range(20)]
+    bursty = [engine_stats.Tally(moves=30, blunders=20 if i < 2 else 0) for i in range(20)]
+    opp = [engine_stats.Tally(moves=30, blunders=1) for _ in range(20)]
+    even = engine_stats.clustered_rate_test(spread, opp, lambda t: t.blunders)
+    burst = engine_stats.clustered_rate_test(bursty, opp, lambda t: t.blunders)
+    assert even.mean == pytest.approx(burst.mean) == pytest.approx(1 / 30)
+    assert even.n == burst.n == 20  # games, not moves
+    assert burst.p_value > 0.1 > even.p_value
+    empty = engine_stats.clustered_rate_test([], [], lambda t: t.blunders)
+    assert empty.p_value == 1.0 and empty.n == 0

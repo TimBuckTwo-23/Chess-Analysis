@@ -617,8 +617,9 @@ def test_html_charts(report):
     assert 'class="zero"' in html  # signed charts emphasise the zero line
     assert 'class="ln k1"' in html and 'class="ln k2"' in html
     rating_line = next(s for s in svgs if "Rating by month" in s)
-    assert re.search(r'class="ln k1" d="M[^"]* M', rating_line)  # None splits the line
-    assert "rotate(-40" in next(s for s in svgs if "Score in different situations" in s)
+    assert re.search(r'class="ln k2" d="M[^"]* M', rating_line)  # None splits the line (Blitz keeps its own colour)
+    situations = next(s for s in svgs if "Score in different situations" in s)
+    assert "rotate(" not in situations and "Late-night games (after 23:00)" in situations.replace("</tspan>", " ")  # long labels: bars turn horizontal
     black = next(s for s in svgs if "(Black)" in s)
     assert black.count("<tspan") > 6  # long opening names wrap onto a second line
     assert "Caro-Kann Defense: Advance Variation, Short Variation\n" in black  # full name in tooltip
@@ -1045,6 +1046,10 @@ def test_markdown_code_spans_links_and_block_markers():
     assert md_text("---") != "---" and md_text("***").count("\\") == 3
     assert md_text("Game #1 #").endswith("\\#")
     assert md_text("$x$") == "\\$x\\$"
+    # a leading move number is escaped at the dot: a backslash before a digit would be shown literally
+    assert md_text("1. e4 e5 2. Nf3") == "1\\. e4 e5 2. Nf3" and md_text("12) x") == "12\\) x"
+    assert md_text("+ 5 points").startswith("\\+") and md_text("- x").startswith("\\-") and md_text("===") != "==="
+    assert md_text("+5 points") == "+5 points" and md_text("-3 = bad") == "-3 = bad"  # not block markers
 
 
 def test_json_never_crashes_on_signalling_nan_decimal():
@@ -1054,3 +1059,134 @@ def test_json_never_crashes_on_signalling_nan_decimal():
     rep.modules[0].stats = {"snan": Decimal("sNaN"), "nan": Decimal("NaN"), "x": Decimal("1.5")}
     stats = json.loads(to_json(rep))["modules"][0]["stats"]
     assert stats == {"snan": None, "nan": None, "x": 1.5}
+
+
+# Advance widths in em of DejaVu Sans, the widest common fallback for system-ui (Linux Chromium,
+# measured); the IBM Plex / San Francisco / Roboto faces are narrower, so fitting these fits them too.
+DEJAVU_EM = {"−20%": 3.058, "+10%": 3.058, "100%": 2.858, "+5.0%": 3.378, "much lower (< −150)": 10.844, "2020-05": 4.177, "Won by checkmate": 9.62}
+
+
+@pytest.mark.parametrize("text", list(DEJAVU_EM))
+def test_label_width_estimate_is_not_below_real_fallback_font(text):
+    from chess_insights.report.html import _tw
+
+    assert _tw(text, 100) >= DEJAVU_EM[text] * 100 - 1
+
+
+def test_chart_labels_stay_inside_the_svg():
+    """Tick labels are right-aligned in the left margin, value labels sit right of hbars: both need real widths."""
+    from chess_insights.report.html import _tw
+
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind="bar", title="signed", labels=["Bullet", "Blitz", "Rapid"], series=[Series("Δ", [-0.18, 0.04, 0.61])], value_format="signed_pct"),
+        Chart(kind="hbar", title="openings", labels=["Italian Game", "Sicilian Defense"], series=[Series("Δ", [0.1, -0.05])], value_format="signed_pct"),
+    ]
+    svgs = re.findall(r"<svg .*?</svg>", render_html(rep), re.S)
+    for svg in svgs:
+        for x, anchor, txt in re.findall(r'<text class="t-(?:tick|val)" x="([\d.-]+)"[^>]*?(?:text-anchor="(\w+)")?[^>]*>([^<]*)</text>', svg):
+            import html as _h
+
+            w, x = _tw(_h.unescape(txt), 12), float(x)
+            left, right = {"end": (x - w, x), "middle": (x - w / 2, x + w / 2)}.get(anchor, (x, x + w))
+            assert left >= -0.5 and right <= 400.5, (txt, left, right)
+
+
+def _css_tokens(style: str, block: str) -> dict[str, str]:
+    body = re.search(block, style).group(1)
+    return dict(re.findall(r"--([\w-]+):(#[0-9A-Fa-f]{6})", body))
+
+
+def _contrast(a: str, b: str) -> float:
+    def lum(h: str) -> float:
+        r, g, b_ = (int(h[i : i + 2], 16) / 255 for i in (1, 3, 5))
+        f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4  # noqa: E731
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b_)
+
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_text_colours_meet_wcag_aa_in_both_themes():
+    style = re.search(r"<style>(.*?)</style>", render_html(empty_report()), re.S).group(1)
+    light = _css_tokens(style, r"^:root\{(.*?)\}")
+    dark = _css_tokens(style, r':root\[data-theme="dark"\]\{(.*?)\}')
+    for theme in (light, dark):
+        for fg in ("ink", "ink-2", "muted", "accent"):
+            for bg in ("paper", "surface"):
+                assert _contrast(theme[fg], theme[bg]) >= 4.5, (fg, bg, theme[fg], theme[bg])
+        for fg, bg in (("good", "good-wash"), ("bad", "bad-wash"), ("neutral", "neutral-wash"), ("tip-ink", "tip-bg")):
+            assert _contrast(theme[fg], theme[bg]) >= 4.5, (fg, bg)
+
+
+def test_column_labels_wrap_upright_before_rotating():
+    rep = empty_report()
+    labels = ["much lower (< −150)", "lower (−150 to −50)", "similar (±50)", "higher (+50 to +150)", "much higher (> +150)"]
+    rep.modules[0].charts = [Chart(kind="bar", title="t", labels=labels, series=[Series("Δ", [0.02, -0.03, 0.01, 0.05, None])], value_format="signed_pct")]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    assert "rotate(" not in svg
+    import html as _h
+
+    shown = " ".join(_h.unescape(t) for t in re.findall(r'<tspan class="t-x"[^>]*>([^<]*)</tspan>', svg))
+    assert all(word in shown.split() for label in labels for word in label.split())  # nothing ellipsized
+
+
+def test_long_labels_turn_columns_into_horizontal_bars():
+    labels = ["Within 15 min of a loss", "Within 15 min of a win", "Within 15 min of a draw", "15–30 min after the previous game", "After a break (> 30 min) or first game"]
+    rep = empty_report()
+    rep.modules[0].charts = [
+        Chart(kind="bar", title="after", labels=labels, series=[Series("Score − expected", [-0.04, 0.02, 0.0, 0.01, -0.01])], value_format="signed_pct"),
+        Chart(kind="stacked_bar", title="stacked", labels=labels, series=[Series("Wins", [1, 2, 3, 4, 5]), Series("Losses", [1, 2, 3, 4, 5])]),
+    ]
+    html = render_html(rep)
+    svgs = re.findall(r"<svg .*?</svg>", html, re.S)
+    import html as _h
+
+    shown = _h.unescape(re.sub(r"</tspan><tspan[^>]*>", " ", svgs[0]))
+    assert "rotate(" not in svgs[0] and all(label in shown for label in labels)
+    assert 'data-kind="bar"' in html
+    assert "rotate(-40" in svgs[1]  # no horizontal stacked bars: long labels still rotate there
+
+
+def test_month_axis_is_drawn_to_scale_and_bridges_gaps():
+    """Monthly labels skip inactive months: x must follow the calendar, and a gap must look like one."""
+    rep = empty_report()
+    labels = ["2017-12", "2018-02", "2021-07", "2021-08", "2021-09"]
+    rep.modules[0].charts = [Chart(kind="line", title="Rating by month", labels=labels, series=[Series("Blitz", [760, 780, 1260, 1200, 1310])], value_format="rating")]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    xs = sorted({float(x) for x in re.findall(r'<line class="xh" x1="([\d.]+)"', svg)})
+    months = [0, 2, 43, 44, 45]
+    step = (xs[-1] - xs[0]) / 45
+    assert all(abs(x - (xs[0] + m * step)) < 0.2 for x, m in zip(xs, months)), xs
+    solid = re.search(r'<path class="ln k2" d="([^"]*)"', svg).group(1)
+    assert solid.count("M") == 3  # 2017-12 | 2018-02 | 2021-07..09: no line across missing months
+    assert re.search(r'<path class="ln ln--gap k2" d="M[^"]+"', svg)  # a dashed bridge shows the gap
+
+
+def test_category_line_bridges_missing_values_with_a_dashed_connector():
+    rep = empty_report()
+    rep.modules[0].charts = [Chart(kind="line", title="t", labels=list("abcde"), series=[Series("x", [1, 2, None, 4, 5])])]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    assert re.search(r'<path class="ln k1" d="M[^"]* M', svg)
+    gap = re.search(r'<path class="ln ln--gap k1" d="([^"]*)"', svg).group(1)
+    assert gap.count("M") == 1 and gap.count("L") == 1
+
+
+def test_wide_tables_show_they_scroll_and_keep_row_labels_readable():
+    style = re.search(r"<style>(.*?)</style>", render_html(empty_report()), re.S).group(1)
+    wrap = re.search(r"(?:^|\n)\.table-wrap\{([^}]*)\}", style).group(1)
+    assert "overflow-x:auto" in wrap and wrap.count(" local") == 2 and wrap.count(" scroll") == 2  # scroll shadows
+    assert ".ci-chart .table-wrap{--wrap-bg:var(--surface)}" in style  # covers match the chart card
+    assert re.search(r"\.ci td:first-child:not\(\.num\)\{min-width:1[2-4]ch\}", style)
+    assert style.count("--scroll-shadow:") == 3
+
+
+def test_line_chart_labels_the_first_and_last_point():
+    labels = ["2017-12", "2018-02", "2021-07", "2022-09", "2023-06", "2023-08", "2023-09", "2023-10"]
+    rep = empty_report()
+    rep.modules[0].charts = [Chart(kind="line", title="r", labels=labels, series=[Series("Blitz", [700 + 50 * i for i in range(8)]), Series("Daily", [1300 - 40 * i for i in range(8)])], value_format="rating")]
+    svg = re.search(r"<svg .*?</svg>", render_html(rep), re.S).group(0)
+    shown = re.findall(r'<text class="t-x"[^>]*>([^<]*)</text>', svg)
+    assert shown[0] == "2017-12" and shown[-1] == "2023-10"
+    boxes = _x_label_boxes(svg)
+    assert all(a[1] + 2 <= b[0] for a, b in zip(boxes, boxes[1:]))
