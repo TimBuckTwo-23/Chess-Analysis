@@ -434,17 +434,19 @@ def test_clustered_errors_do_not_produce_false_claims():
     runs = 30
     false_claims = []
     for seed in range(runs):
-        mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in clustered_world(seed)],
-                                                  evals={ev.game_id: ev for _, ev in clustered_world(seed)}))
+        pairs = clustered_world(seed, shape=0.3 if seed % 2 else 1.0)
+        mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in pairs],
+                                                  evals={ev.game_id: ev for _, ev in pairs}))
         false_claims.append(len(claims(mr)))
-    assert sum(false_claims) / runs <= 0.2, false_claims
+    # the old move-level test (moves deflated by a fixed factor of 2, alpha 0.05) averaged 0.3 false claims here
+    assert sum(false_claims) / runs <= 0.1, false_claims
 
 
 def test_clustered_errors_still_detect_a_real_difference():
     found = 0
     runs = 12
     for seed in range(runs):
-        pairs = clustered_world(1000 + seed, n_games=150, my_factor=2.0)
+        pairs = clustered_world(1000 + seed, n_games=150, my_factor=2.0, shape=1.0)
         mr = engine_stats.analyze(AnalysisContext("tester", [g for g, _ in pairs], evals={ev.game_id: ev for _, ev in pairs}))
         found += insight(mr, "engine.weakness.blunder-rate") is not None
     assert found >= 0.75 * runs
@@ -462,3 +464,21 @@ def test_rate_test_uses_games_as_the_unit():
     assert burst.p_value > 0.1 > even.p_value
     empty = engine_stats.clustered_rate_test([], [], lambda t: t.blunders)
     assert empty.p_value == 1.0 and empty.n == 0
+
+
+def test_opening_evals_are_measured_from_the_start_position():
+    """Stockfish gives White about +0.3 at move 0. A +0.65 average after move 10 is then only a +0.35 edge for
+    White (no strength), and -0.65 for Black only -0.35 (no weakness): colour alone must not make claims."""
+    def spec(i, user):
+        fields = {"cp_after": 65} if i == 19 else {}
+        if i == 0:
+            fields["cp_before"] = 30
+        return fields
+
+    whites = [analysed(spec, color="white", opening_family="Italian Game") for _ in range(40)]
+    blacks = [analysed(spec, color="black", opening_family="Sicilian Defense") for _ in range(40)]
+    mr = run(whites + blacks)
+    rows = {(r[0], r[1]): r for r in table(mr, "Where your openings leave you (engine eval after move 10)").rows}
+    assert rows[("Italian Game", "White")][3] == pytest.approx(35.0)
+    assert rows[("Sicilian Defense", "Black")][3] == pytest.approx(-35.0)
+    assert [i.id for i in mr.insights if i.category == "openings"] == []

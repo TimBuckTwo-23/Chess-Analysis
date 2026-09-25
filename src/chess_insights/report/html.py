@@ -409,7 +409,7 @@ def series_slots(names: Sequence[str]) -> list[str]:
     series (time classes), else "1".."8" in order."""
     roles = result_roles(names)
     if roles:
-        n_win, n_loss = roles.count("win"), roles.count("loss")
+        n_loss = roles.count("loss")
         slots, seen = [], {"win": 0, "loss": 0}
         for role in roles:
             if role == "draw":

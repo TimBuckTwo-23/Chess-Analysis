@@ -4,10 +4,14 @@ Each test plants one effect in the null world (tests/null_world.py) and checks t
 the report's top lists name it, as the right kind (weakness) and category, without
 contradicting it. The detection rates behind these fixed seeds, measured over 32
 seeds at 400 and 600 games, are in docs/METHODOLOGY.md (section 2): at 600 games
-every effect below except the colour one is found in 72-100% of seeds, at 400
+every effect below except the colour one is found in 78-100% of seeds, at 400
 games tilt, late night and time trouble are (colour needs about 1,000 games).
+
+POWER_RUNS=32 (optionally POWER_GAMES=400) re-measures those rates; it takes a few
+minutes per effect, so it only runs when asked for.
 """
 
+import os
 from functools import lru_cache
 
 import pytest
@@ -63,3 +67,21 @@ def test_planted_effects_are_described_with_their_numbers():
     assert tilt.evidence["gap"] < -0.06 and tilt.evidence["p_value_one_sided"] <= 0.05
     late = found(report_for("late_night"), "habits", ("night",))[0]
     assert "23:00" in late.title or "00:00" in late.title
+
+
+POWER_RUNS = int(os.environ.get("POWER_RUNS", "0"))
+POWER_GAMES = int(os.environ.get("POWER_GAMES", str(GAMES)))
+MIN_DETECTION = 0.7  # at 600 games; colour is below it (information-limited, see the methodology)
+
+
+@pytest.mark.skipif(POWER_RUNS == 0, reason="set POWER_RUNS to measure detection rates over many seeds")
+@pytest.mark.parametrize("name", [n for n in EFFECTS if n != "colour"])
+def test_detection_rate(name):
+    planted, category, keywords = EFFECTS[name]
+    hits = sum(
+        bool(found(run_analysis(null_games(POWER_GAMES, seed=s, planted=planted), "nullplayer"), category, keywords))
+        for s in range(POWER_RUNS)
+    )
+    print(f"{name}: detected in {hits}/{POWER_RUNS} worlds of {POWER_GAMES} games")
+    if POWER_GAMES >= 600:
+        assert hits / POWER_RUNS >= MIN_DETECTION

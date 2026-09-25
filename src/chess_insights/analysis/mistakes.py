@@ -62,8 +62,8 @@ class MistakeEvent:
 @dataclass
 class RepeatedMistake:
     epd: str
-    events: list[MistakeEvent]
-    reached: int = 0  # games (analysed or not) in which you reached the position
+    events: list[MistakeEvent]  # one per game (your costliest error there in that game), most recent first
+    reached: int = 0  # games (analysed or not) in which you reached the position with the move
     games_reached: list[str] = field(default_factory=list)
 
     @property
@@ -72,6 +72,7 @@ class RepeatedMistake:
 
     @property
     def errors(self) -> int:
+        """Games in which you went wrong here."""
         return len(self.events)
 
     @property
@@ -124,8 +125,16 @@ def _board(game: Game) -> chess.Board:
     return chess.Board(game.initial_fen or chess.STARTING_FEN, chess960=game.rules == "chess960")
 
 
+def _pieces(epd: str) -> int:
+    return sum(ch.isalpha() for ch in epd.split(" ", 1)[0])
+
+
 def collect_errors(games: Iterable[Game], evals: dict[str, GameEval], min_drop: float = MIN_DROP) -> list[MistakeEvent]:
-    """Every move of yours that lost at least ``min_drop`` win-% points, with the position before it."""
+    """Every move of yours that lost at least ``min_drop`` win-% points, with the position before it.
+
+    A move the engine itself prefers is never an error, however much the evaluation drops after it
+    (the position was already worse than it looked at the engine's depth).
+    """
     by_id = {g.game_id: g for g in games}
     events: list[MistakeEvent] = []
     for gid, ev in evals.items():
@@ -135,13 +144,16 @@ def collect_errors(games: Iterable[Game], evals: dict[str, GameEval], min_drop: 
         wanted = {
             p.ply: p
             for p in ev.plies
-            if p.is_user and p.ply < game.plies and (p.win_before - p.win_after) >= min_drop
+            if p.is_user
+            and 0 <= p.ply < game.plies
+            and (p.win_before - p.win_after) >= min_drop
+            and not (p.best_san and p.best_san == game.moves_san[p.ply])
         }
         if not wanted:
             continue
-        board = _board(game)
         last = max(wanted)
         try:
+            board = _board(game)
             for ply, san in enumerate(game.moves_san[: last + 1]):
                 if ply in wanted:
                     p = wanted[ply]
@@ -166,23 +178,33 @@ def collect_errors(games: Iterable[Game], evals: dict[str, GameEval], min_drop: 
 def find_repeated(
     events: list[MistakeEvent], games: Iterable[Game], min_repeats: int = MIN_REPEATS
 ) -> list[RepeatedMistake]:
-    groups: dict[str, list[MistakeEvent]] = defaultdict(list)
+    """Positions (by EPD, so transpositions merge) where you went wrong in at least ``min_repeats`` games.
+
+    A game counts once per position, with your costliest error there, even if the position came up
+    (and went wrong) more than once in it.
+    """
+    groups: dict[str, dict[str, MistakeEvent]] = defaultdict(dict)  # epd -> game id -> costliest error
     for e in events:
-        groups[e.epd].append(e)
+        current = groups[e.epd].get(e.game.game_id)
+        if current is None or e.drop > current.drop:
+            groups[e.epd][e.game.game_id] = e
     repeated = {
-        epd: RepeatedMistake(epd=epd, events=sorted(evs, key=lambda e: e.game.end_time, reverse=True))
-        for epd, evs in groups.items()
-        if len({e.game.game_id for e in evs}) >= min_repeats
+        epd: RepeatedMistake(epd=epd, events=sorted(by_game.values(), key=lambda e: e.game.end_time, reverse=True))
+        for epd, by_game in groups.items()
+        if len(by_game) >= min_repeats
     }
     if not repeated:
         return []
-    # How often did you reach each of these positions (analysed or not)?
-    max_ply = max(e.ply for r in repeated.values() for e in r.events)
+    # How often did you reach each of these positions (analysed or not), at any move number? Captures are
+    # irreversible, so a game can stop being searched once fewer pieces are left than in every position.
+    fewest = min(_pieces(epd) for epd in repeated)
     for game in games:
-        board = _board(game)
         seen: set[str] = set()
         try:
-            for ply, san in enumerate(game.moves_san[: max_ply + 1]):
+            board = _board(game)
+            for ply, san in enumerate(game.moves_san):
+                if chess.popcount(board.occupied) < fewest:
+                    break
                 if game.is_my_ply(ply):
                     epd = board.epd()
                     if epd in repeated and epd not in seen:
@@ -190,7 +212,7 @@ def find_repeated(
                         repeated[epd].reached += 1
                         repeated[epd].games_reached.append(game.url)
                 board.push_san(san)
-        except ValueError:
+        except ValueError:  # unreadable start position or illegal move: keep what was counted
             continue
     out = list(repeated.values())
     for r in out:
@@ -353,7 +375,11 @@ def _pgn_escape(text: str) -> str:
 
 
 def puzzles_to_pgn(events: list[MistakeEvent]) -> str:
-    """One PGN game per puzzle: the position before your mistake, solution = engine move."""
+    """One PGN game per puzzle: the position before your mistake (``SetUp`` / ``FEN``), solution = engine move.
+
+    Each game has result ``*`` and a ``Variant`` header for Chess960, as Lichess's study import expects.
+    A Lichess study holds at most 64 chapters, so a longer file is imported in several studies.
+    """
     chunks = []
     for i, e in enumerate(events, 1):
         g = e.game
@@ -365,6 +391,7 @@ def puzzles_to_pgn(events: list[MistakeEvent]) -> str:
             ("White", white),
             ("Black", black),
             ("Result", "*"),
+            *([("Variant", "Chess960")] if g.rules == "chess960" else []),  # castling rules (and moves) differ
             ("SetUp", "1"),
             ("FEN", e.fen),
             ("Annotator", "chess-insights"),

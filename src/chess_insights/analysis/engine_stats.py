@@ -5,15 +5,18 @@ benchmarked against the OPPONENTS' moves in the same games: they are rating-matc
 players facing the same positions on the same clock, which controls for position
 difficulty and playing strength far better than any fixed "good accuracy" number.
 
-Moves within one game are not independent (a bad game produces several errors), so
-move-level rate comparisons count each move as ``1 / MOVE_DESIGN_EFFECT`` of an
-observation before testing. Comparisons repeated over groups (phases, time classes,
-openings) are Benjamini-Hochberg adjusted.
+Games, not moves, are the unit of every significance test. Errors cluster within games
+(one bad game holds several blunders), so move-level rates are compared with a
+cluster-robust test over per-game counts (:func:`clustered_rate_test`); game-level
+measures (conversion, opening evaluations) are tested per game directly. Claims follow
+the project-wide rule (``stats.significance``), and comparisons repeated over groups
+(phases, time classes, openings, tactic types) are Benjamini-Hochberg adjusted.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -22,23 +25,24 @@ from ..context import AnalysisContext
 from ..engine import PHASES
 from ..models import TIME_CLASSES, Chart, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Series, Table
 from ..stats import (
+    STRICT_ALPHA,
     MeanTest,
     bh_adjust,
     clamp,
-    combined_confidence,
     mean_test,
+    normal_cdf,
     pct,
     sample_confidence,
+    significance,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, fmt_signed, slugify, with_p_value
+from .results import MAX_EXAMPLES, fmt_signed, slugify
 
 KEY = "engine"
 TITLE = "Engine review"
 
 MIN_PLIES = 4  # shorter games are aborted starts, not skill
-MOVE_DESIGN_EFFECT = 2.0  # errors cluster within games: count each move as half an independent observation
-OPENING_PLY = 20  # opening outcome = eval after both players' 10th move
+OPENING_PLY = 20  # opening outcome = eval after both players' 10th move, relative to the start position
 OPENING_CP_CAP = 500  # per-game cap on that eval, so one early blunder doesn't dominate an average
 OPENING_EVAL_SD = 150.0  # floor on the per-game spread of the move-10 eval (cp) for the significance test
 PIECES = (("K", "King"), ("Q", "Queen"), ("R", "Rook"), ("B", "Bishop"), ("N", "Knight"), ("P", "Pawn"))
@@ -55,9 +59,9 @@ MOVE_BUCKETS: tuple[tuple[str, int, Optional[int]], ...] = (
 class Thresholds:
     """Minimum sample sizes and effect sizes; override with ``ctx.options["engine.<name>"]``."""
 
-    min_games: int = 10  # analysed games before any strength / weakness is claimed
-    min_confidence: float = 0.4  # combined_confidence needed for a strength / weakness
-    max_p_value: float = 0.05  # ... and the (adjusted) test must be significant at this level
+    min_games: int = 10  # analysed games before any strength / weakness is claimed (the tests' unit)
+    min_confidence: float = 0.5  # confidence needed for a strength / weakness (insights.MIN_CONFIDENCE)
+    max_p_value: float = STRICT_ALPHA  # ... and the (adjusted) test must be significant at this level (stats policy)
     min_moves: int = 300  # your analysed moves before overall blunder / tactics comparisons
     blunder_ratio: float = 1.25  # your blunder rate vs your opponents' (or the inverse, for a strength)
     min_phase_moves: int = 150  # your moves in a phase before judging it
@@ -75,7 +79,7 @@ class Thresholds:
     min_anatomy_blunders: int = 10  # blunders before describing which pieces / moves they come from
     min_opening_games: int = 5  # analysed games for an opening row
     min_opening_insight_games: int = 8  # ... and for an opening strength / weakness
-    opening_eval_threshold: float = 60.0  # average move-10 eval (cp) that counts as a clearly good / bad opening
+    opening_eval_threshold: float = 60.0  # average eval gained / lost by move 10 (cp): a clearly good / bad opening
     min_month_games: int = 3  # analysed games for a point on the accuracy trend
 
     @classmethod
@@ -121,6 +125,9 @@ class Tally:
     @property
     def acpl(self) -> Optional[float]:
         return self.cp_loss / self.moves if self.moves else None
+
+    def __add__(self, other: "Tally") -> "Tally":
+        return Tally(*(getattr(self, f.name) + getattr(other, f.name) for f in dataclasses.fields(Tally)))
 
 
 @dataclass
@@ -171,10 +178,50 @@ def tally(
     return t
 
 
-def rate_test(x1: int, n1: int, x2: int, n2: int) -> MeanTest:
-    """two_proportion_test on move counts, deflated by MOVE_DESIGN_EFFECT (moves cluster within games)."""
-    d = MOVE_DESIGN_EFFECT
-    return two_proportion_test(x1 / d, round(n1 / d), x2 / d, round(n2 / d))
+def per_game(
+    records: Iterable[Analysed], mine: bool, pred: Callable[[Analysed, PlyEval], bool] = lambda r, p: True
+) -> list[Tally]:
+    """Like :func:`tally`, but one Tally per game (in ``records`` order): the input of the significance tests."""
+    return [tally([r], mine, pred) for r in records]
+
+
+def total(tallies: Iterable[Tally]) -> Tally:
+    return sum(tallies, Tally())
+
+
+def clustered_rate_test(a: Sequence[Tally], b: Sequence[Tally], count: Callable[[Tally], int]) -> MeanTest:
+    """z-test of rate(a) - rate(b), where rate = sum(count) / sum(moves), with GAMES as the unit.
+
+    ``a[i]`` and ``b[i]`` are the same game (you and your opponent in it, or your moves short of time and
+    your other moves). Moves within a game are not independent observations (one bad game produces
+    several blunders), so the variance is the cluster-robust (sandwich) variance of the two ratio
+    estimators, from per-game residuals; pairing the two sides of each game also removes what the game
+    itself contributes to both. It is never taken below the plain binomial variance. The result's ``n``
+    is the number of games with moves on either side.
+    """
+    games = [(count(x), x.moves, count(y), y.moves) for x, y in zip(a, b) if x.moves or y.moves]
+    n = len(games)
+    x1, n1 = sum(g[0] for g in games), sum(g[1] for g in games)
+    x2, n2 = sum(g[2] for g in games), sum(g[3] for g in games)
+    if n < 2 or n1 == 0 or n2 == 0:
+        return MeanTest(n, 0.0, float("inf"), 0.0, 1.0)
+    p1, p2 = x1 / n1, x2 / n2
+    residuals = [(c1 - p1 * m1) / n1 - (c2 - p2 * m2) / n2 for c1, m1, c2, m2 in games]
+    variance = n / (n - 1) * sum(r * r for r in residuals)
+    pooled = (x1 + x2) / (n1 + n2)
+    variance = max(variance, pooled * (1.0 - pooled) * (1.0 / n1 + 1.0 / n2))
+    if variance <= 0.0:
+        return MeanTest(n, p1 - p2, float("inf"), 0.0, 1.0)
+    se = math.sqrt(variance)
+    z = (p1 - p2) / se
+    return MeanTest(n, p1 - p2, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
+
+
+def _claim(test: MeanTest, th: "Thresholds", p_adjusted: Optional[float] = None, min_n: Optional[int] = None):
+    """(significant, confidence) under the project-wide rule, with this module's alpha and confidence floor."""
+    significant, confidence = significance(test, th.min_games if min_n is None else min_n, p_adjusted,
+                                           alpha=th.max_p_value)
+    return significant and confidence >= th.min_confidence, confidence
 
 
 def _clearly_higher(a: Optional[float], b: Optional[float], ratio: float) -> bool:
@@ -259,14 +306,17 @@ def time_class_table(records: Sequence[Analysed]) -> tuple[Table, dict[str, Any]
     return table, stats
 
 
-def blunder_insight(records: Sequence[Analysed], me: Tally, opp: Tally, th: Thresholds) -> Optional[Insight]:
+def blunder_insight(
+    records: Sequence[Analysed], me_games: Sequence[Tally], opp_games: Sequence[Tally], th: Thresholds
+) -> Optional[Insight]:
     """Overall blunder rate vs your opponents in the same games."""
+    me, opp = total(me_games), total(opp_games)
     if len(records) < th.min_games or me.moves < th.min_moves or opp.moves < th.min_moves:
         return None
     mine, theirs = me.per100(me.blunders), opp.per100(opp.blunders)
-    test = rate_test(me.blunders, me.moves, opp.blunders, opp.moves)
-    confidence = combined_confidence(test, th.min_moves)
-    if test.p_value > th.max_p_value or confidence < th.min_confidence:
+    test = clustered_rate_test(me_games, opp_games, lambda t: t.blunders)
+    significant, confidence = _claim(test, th)
+    if not significant:
         return None
     detail = (
         f"Stockfish found {me.blunders} blunders in your {me.moves} moves over {len(records)} games "
@@ -383,8 +433,10 @@ PHASE_STUDY = {
 
 
 def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, Chart, list[Insight], dict[str, Any]]:
-    me = {ph: tally(records, True, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
-    opp = {ph: tally(records, False, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
+    me_games = {ph: per_game(records, True, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
+    opp_games = {ph: per_game(records, False, lambda r, p, ph=ph: p.phase == ph) for ph in PHASES}
+    me = {ph: total(me_games[ph]) for ph in PHASES}
+    opp = {ph: total(opp_games[ph]) for ph in PHASES}
     rows, stats = [], {}
     for ph in PHASES:
         m, o = me[ph], opp[ph]
@@ -418,14 +470,14 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
         return table, chart, [], stats
 
     judged = [ph for ph in PHASES if me[ph].moves >= th.min_phase_moves and opp[ph].moves >= th.min_phase_moves]
-    tests = {ph: rate_test(me[ph].errors, me[ph].moves, opp[ph].errors, opp[ph].moves) for ph in judged}
+    tests = {ph: clustered_rate_test(me_games[ph], opp_games[ph], lambda t: t.errors) for ph in judged}
     adjusted = dict(zip(judged, bh_adjust([tests[ph].p_value for ph in judged])))
     weak, strong = [], []
     for ph in judged:
         mine, theirs = me[ph].per100(me[ph].errors), opp[ph].per100(opp[ph].errors)
-        confidence = combined_confidence(with_p_value(tests[ph], adjusted[ph]), th.min_phase_moves)
-        stats[ph].update(p_value=tests[ph].p_value, p_adjusted=adjusted[ph])
-        if adjusted[ph] > th.max_p_value or confidence < th.min_confidence:
+        significant, confidence = _claim(tests[ph], th, adjusted[ph])
+        stats[ph].update(p_value=tests[ph].p_value, p_adjusted=adjusted[ph], games=tests[ph].n)
+        if not significant:
             continue
         if _clearly_higher(mine, theirs, th.phase_ratio):
             weak.append((mine - theirs, ph, confidence))
@@ -498,27 +550,34 @@ def pressure_section(
     records: Sequence[Analysed], th: Thresholds
 ) -> tuple[Optional[Table], list[Insight], dict[str, Any]]:
     """Your blunder rate on moves made while short of time vs other moves, per time class (live games)."""
-    groups: dict[str, dict[str, Tally]] = defaultdict(
-        lambda: {k: Tally() for k in ("me_low", "me_ok", "opp_low", "opp_ok")}
-    )
+    keys = ("me_low", "me_ok", "opp_low", "opp_ok")
+    by_game: dict[str, list[dict[str, Tally]]] = defaultdict(list)  # time class -> one {key: Tally} per game
     low_games: dict[str, list[Analysed]] = defaultdict(list)
     for r in records:
         g = r.game
         if g.time_class == "daily" or not g.base_seconds:
             continue
         limit = th.pressure_fraction * float(g.base_seconds)
+        counts = {k: Tally() for k in keys}
         low_blunder = False
         for p in r.plies:
             before = _clock_before(g, p.ply)
             if before is None:
                 continue
             low = before < limit
-            groups[g.time_class][("me" if p.is_user else "opp") + ("_low" if low else "_ok")].add(p)
+            counts[("me" if p.is_user else "opp") + ("_low" if low else "_ok")].add(p)
             low_blunder |= low and p.is_user and p.judgement == "blunder"
+        if any(t.moves for t in counts.values()):
+            by_game[g.time_class].append(counts)
         if low_blunder:
             low_games[g.time_class].append(r)
-    if not groups:
+    if not by_game:
         return None, [], {}
+    groups = {tc: {k: total(c[k] for c in games) for k in keys} for tc, games in by_game.items()}
+
+    def column(tc: str, key: str) -> list[Tally]:
+        return [c[key] for c in by_game[tc]]
+
     order = sorted(groups, key=_time_class_order)
     rows, stats = [], {}
     for tc in order:
@@ -549,11 +608,12 @@ def pressure_section(
     judged = [tc for tc in order if groups[tc]["me_low"].moves >= th.min_pressure_moves and groups[tc]["me_ok"].moves]
     # Everyone blunders more when short of time, so the claim needs two things: your own rate jumps (short of
     # time vs otherwise), and it jumps further than your opponents' does (your short-of-time rate vs theirs).
-    own = {tc: rate_test(groups[tc]["me_low"].blunders, groups[tc]["me_low"].moves,
-                         groups[tc]["me_ok"].blunders, groups[tc]["me_ok"].moves) for tc in judged}
+    def blunders(t: Tally) -> int:
+        return t.blunders
+
+    own = {tc: clustered_rate_test(column(tc, "me_low"), column(tc, "me_ok"), blunders) for tc in judged}
     benched = [tc for tc in judged if groups[tc]["opp_low"].moves >= th.min_pressure_moves]
-    bench = {tc: rate_test(groups[tc]["me_low"].blunders, groups[tc]["me_low"].moves,
-                           groups[tc]["opp_low"].blunders, groups[tc]["opp_low"].moves) for tc in benched}
+    bench = {tc: clustered_rate_test(column(tc, "me_low"), column(tc, "opp_low"), blunders) for tc in benched}
     own_adj = dict(zip(judged, bh_adjust([own[tc].p_value for tc in judged])))
     bench_adj = dict(zip(benched, bh_adjust([bench[tc].p_value for tc in benched])))
     insights = []
@@ -561,21 +621,17 @@ def pressure_section(
         t = groups[tc]
         low, ok = t["me_low"].per100(t["me_low"].blunders), t["me_ok"].per100(t["me_ok"].blunders)
         opp_low, opp_ok = t["opp_low"].per100(t["opp_low"].blunders), t["opp_ok"].per100(t["opp_ok"].blunders)
-        confidence = combined_confidence(with_p_value(own[tc], own_adj[tc]), th.min_pressure_moves)
-        stats[tc].update(p_value=own[tc].p_value, p_adjusted=own_adj[tc])
-        if own_adj[tc] > th.max_p_value or confidence < th.min_confidence:
+        significant, confidence = _claim(own[tc], th, own_adj[tc])
+        stats[tc].update(p_value=own[tc].p_value, p_adjusted=own_adj[tc], games=own[tc].n)
+        if not significant:
             continue
         if not _clearly_higher(low, ok, th.pressure_ratio):
             continue
         worse_than_peers = False
         if tc in bench:
-            bench_conf = combined_confidence(with_p_value(bench[tc], bench_adj[tc]), th.min_pressure_moves)
+            bench_significant, bench_conf = _claim(bench[tc], th, bench_adj[tc])
             stats[tc].update(benchmark_p_value=bench[tc].p_value, benchmark_p_adjusted=bench_adj[tc])
-            worse_than_peers = (
-                bench_adj[tc] <= th.max_p_value
-                and bench_conf >= th.min_confidence
-                and _clearly_higher(low, opp_low, th.pressure_peer_ratio)
-            )
+            worse_than_peers = bench_significant and _clearly_higher(low, opp_low, th.pressure_peer_ratio)
             confidence = min(confidence, bench_conf)
         detail = (
             f"In {tc}, with less than {share} of your starting clock left you blundered {_f1(low)} times per 100 "
@@ -710,7 +766,7 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         return table, insights, stats
 
     test = two_proportion_test(conv.converted, len(conv.reached), conv.opp_converted, len(conv.opp_reached))
-    confidence = combined_confidence(test, 2 * th.min_conversion_games)
+    significant, confidence = _claim(test, th, min_n=2 * th.min_conversion_games)  # n: games, each counted once
     stats.update(p_value=test.p_value)
     rate, opp_rate = conv.rate or 0.0, conv.opp_rate or 0.0
     base = (
@@ -719,7 +775,6 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         f"opponents got there first, they won {conv.opp_converted} of {len(conv.opp_reached)} ({pct(opp_rate)})."
     )
     evidence = {k: stats[k] for k in ("reached", "converted", "rate", "opp_reached", "opp_converted", "opp_rate")}
-    significant = test.p_value <= th.max_p_value and confidence >= th.min_confidence
     if significant and rate <= opp_rate - th.min_conversion_gap:
         thrown = [r for r in conv.reached if r.game.outcome != "win"]
         insights.append(
@@ -840,8 +895,9 @@ TACTIC_TEXT = {
 
 
 def tactics_section(
-    records: Sequence[Analysed], me: Tally, opp: Tally, th: Thresholds
+    records: Sequence[Analysed], me_games: Sequence[Tally], opp_games: Sequence[Tally], th: Thresholds
 ) -> tuple[Table, list[Insight], dict[str, Any]]:
+    me, opp = total(me_games), total(opp_games)
     rows = [
         ["Missed a tactical shot", me.missed_tactics, me.per100(me.missed_tactics),
          opp.missed_tactics, opp.per100(opp.missed_tactics)],
@@ -870,9 +926,7 @@ def tactics_section(
     if len(records) >= th.min_games and me.moves >= th.min_moves and opp.moves >= th.min_moves:
         tags = list(TACTIC_TEXT)
         tests = {
-            tag: rate_test(
-                getattr(me, TACTIC_TEXT[tag]["attr"]), me.moves, getattr(opp, TACTIC_TEXT[tag]["attr"]), opp.moves
-            )
+            tag: clustered_rate_test(me_games, opp_games, lambda t, attr=TACTIC_TEXT[tag]["attr"]: getattr(t, attr))
             for tag in tags
         }
         adjusted = dict(zip(tags, bh_adjust([tests[t].p_value for t in tags])))
@@ -880,9 +934,9 @@ def tactics_section(
             text = TACTIC_TEXT[tag]
             mine_n, theirs_n = getattr(me, text["attr"]), getattr(opp, text["attr"])
             mine, theirs = me.per100(mine_n), opp.per100(theirs_n)
-            confidence = combined_confidence(with_p_value(tests[tag], adjusted[tag]), th.min_moves)
+            significant, confidence = _claim(tests[tag], th, adjusted[tag])
             stats[f"{tag}_p_adjusted"] = adjusted[tag]
-            if adjusted[tag] > th.max_p_value or confidence < th.min_confidence:
+            if not significant:
                 continue
             detail = (
                 f"In {len(records)} analysed games you {text['what']} {mine_n} times ({_f1(mine)} per 100 moves); "
@@ -1053,11 +1107,17 @@ def anatomy_section(
 
 # --------------------------------------------------------------------------- opening outcome
 def opening_eval(r: Analysed) -> Optional[float]:
-    """Your eval (cp, capped at +-OPENING_CP_CAP) after ply OPENING_PLY; None if the game didn't get there."""
+    """Eval (cp, your side) gained from the start position to after ply OPENING_PLY; None if the game ended earlier.
+
+    Measured from Stockfish's own evaluation of the start position, so White's normal first-move edge (about
+    +0.3) counts as neither a good opening for White nor a bad one for Black. Capped at +-OPENING_CP_CAP.
+    """
     p = next((p for p in r.plies if p.ply == OPENING_PLY - 1), None)
     if p is None:
         return None
-    cp = p.cp_after if r.game.color == "white" else -p.cp_after
+    first = next((q for q in r.plies if q.ply == 0), None)
+    gained = p.cp_after - (first.cp_before if first is not None else 0)
+    cp = gained if r.game.color == "white" else -gained
     return float(max(-OPENING_CP_CAP, min(OPENING_CP_CAP, cp)))
 
 
@@ -1095,7 +1155,8 @@ def opening_section(
         rows=rows,
         formats=["text", "text", "int", "signed_int", "int", "pct"],
         note="Stockfish's evaluation from your side after both players' 10th move, in centipawns (100 = one pawn), "
-        "capped at ±5 pawns per game. Games from set-up positions are left out.",
+        "compared with its evaluation of the start position, so White's usual small edge counts as 0; capped at "
+        "±5 pawns per game. Games from set-up positions are left out.",
     )
     insights: list[Insight] = []
     if len(records) < th.min_games:
@@ -1104,10 +1165,9 @@ def opening_section(
     adjusted = dict(zip(judged, bh_adjust([tests[k].p_value for k in judged])))
     for key in judged:
         family, colour = key
-        test = with_p_value(tests[key], adjusted[key])
-        confidence = combined_confidence(test, th.min_opening_insight_games)
-        avg = test.mean
-        if adjusted[key] > th.max_p_value or confidence < th.min_confidence or abs(avg) < th.opening_eval_threshold:
+        significant, confidence = _claim(tests[key], th, adjusted[key], min_n=th.min_opening_insight_games)
+        avg = tests[key].mean
+        if not significant or abs(avg) < th.opening_eval_threshold:
             continue
         items = groups[key]
         n = len(items)
@@ -1126,8 +1186,8 @@ def opening_section(
                     title=f"You come out of the {family} worse off as {side}",
                     detail=(
                         f"In {n} analysed games as {side} in the {family}, Stockfish rated your position after "
-                        f"move 10 at {fmt_signed(avg)} centipawns on average (about {pawns} pawns); {worse} of "
-                        f"them were already a pawn or more worse."
+                        f"move 10 at {fmt_signed(avg)} centipawns on average compared with the start (about {pawns} "
+                        f"pawns); {worse} of them were already a pawn or more worse."
                     ),
                     severity=clamp(abs(avg) / 150.0),
                     confidence=confidence,
@@ -1150,8 +1210,8 @@ def opening_section(
                     title=f"The {family} gives you good positions as {side}",
                     detail=(
                         f"In {n} analysed games as {side} in the {family}, Stockfish rated your position after "
-                        f"move 10 at {fmt_signed(avg)} centipawns on average (about {pawns} pawns); {better} of "
-                        f"them were already a pawn or more better."
+                        f"move 10 at {fmt_signed(avg)} centipawns on average compared with the start (about {pawns} "
+                        f"pawns); {better} of them were already a pawn or more better."
                     ),
                     severity=clamp(abs(avg) / 150.0),
                     confidence=confidence,
@@ -1262,14 +1322,15 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             stats={"games": 0, "engine": True},
         )
 
-    me, opp = tally(records, True), tally(records, False)
+    me_games, opp_games = per_game(records, True), per_game(records, False)
+    me, opp = total(me_games), total(opp_games)
     tables: list[Table] = []
     charts: list[Chart] = []
     insights: list[Insight] = []
 
     tc_table, tc_stats = time_class_table(records)
     tables.append(tc_table)
-    blunders = blunder_insight(records, me, opp, th)
+    blunders = blunder_insight(records, me_games, opp_games, th)
     if blunders:
         insights.append(blunders)
     by_result, result_stats = accuracy_by_result(records, th)
@@ -1290,7 +1351,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     tables.append(conv_table)
     insights += conv_insights
 
-    tactic_table, tactic_insights, tactic_stats = tactics_section(records, me, opp, th)
+    tactic_table, tactic_insights, tactic_stats = tactics_section(records, me_games, opp_games, th)
     tables.append(tactic_table)
     insights += tactic_insights
 

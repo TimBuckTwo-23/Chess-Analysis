@@ -54,9 +54,24 @@ the path to `stockfish-windows-x86-64.exe`. Then run:
 chess-insights report YOUR_USERNAME --engine --stockfish "C:\path\to\stockfish.exe"
 ```
 
-By default this analyses your 150 most recent games at depth 12, using all but one CPU
-core. That takes a few minutes, and results are cached. Use `--engine-games` and
-`--depth` to trade speed for coverage.
+By default this analyses your 150 most recent games at depth 12, running one Stockfish
+per CPU core except one (`--workers N` to change that). Stockfish evaluates every
+position once, about 65 positions for a typical game, so 150 games are roughly 10,000
+positions.
+
+How long that takes, measured with Stockfish 16 at depth 12 on 6 real chess.com games
+(715 positions) on a shared 4-core cloud machine:
+
+| Engines (`--workers`) | Positions per second | 150 games |
+|---|---|---|
+| 1 | 26 | about 6 minutes |
+| 3 | 69 | about 2½ minutes |
+
+A recent desktop CPU is usually faster per core, and more cores help almost linearly.
+Results are cached per Stockfish version and depth, so re-running the report only
+analyses new games (150 cached games load in about a second). Use `--engine-games` and
+`--depth` to trade speed for coverage: each extra level of depth makes the analysis about
+1.5 times slower.
 
 ### Useful options
 

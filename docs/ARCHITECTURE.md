@@ -50,8 +50,15 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 2. Never flag anything below the module's minimum sample size (defaults: 8
    games for an opening family as one colour, 20 for a split like
    "after a loss").
-3. Use `stats.mean_test` / `stats.two_proportion_test` for significance.
-   Convert to `Insight.confidence` with `stats.combined_confidence`.
+3. **One claim rule.** A strength or weakness needs `stats.significance(...)`
+   to pass: enough games, a BH-adjusted p-value at or below the tier's alpha,
+   and a confidence derived from the adjusted p. Tiers: `stats.ALPHA` (0.05)
+   for pre-specified hypotheses (colour, opening families, after a loss, late
+   night); `stats.STRICT_ALPHA` (0.01) for everything else. Build tests with
+   `stats.summarize` / `mean_test(..., min_sd=...)` / `two_proportion_test` /
+   `one_sided`. Anything that fails the rule is at most an observation.
+   `tests/test_null_calibration.py` enforces the result: on data with no real
+   effects, a report may contain on average no more than 0.3 false claims.
 4. Shrink small-sample rates (`stats.shrink`) before sorting "best/worst" lists.
 5. Standard chess only by default. Variants and abandoned 0-move games distort
    everything.
@@ -60,9 +67,12 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 7. When the same test runs over many groups (every opening family, every
    time-of-day bucket), adjust with `stats.bh_adjust` before calling anything
    significant.
-8. Opponent-strength buckets are judged against `stats.attenuated_expected`.
+8. Opponent-strength effects must be significant, in the same direction,
+   against both the plain Elo expectation and `stats.attenuated_expected`.
    Rating noise makes *everyone* look like they underperform against weaker
-   players and overperform against stronger ones.
+   players and overperform against stronger ones, and the true size of that
+   effect is uncertain (`stats.ATTENUATION_RANGE`). Colour comparisons use
+   `stats.colour_expected` (White's first-move edge).
 9. Exclude games with fewer than 4 plies (aborted starts, instant abandons) from
    skill metrics. They still count in the results totals.
 10. Word findings as associations ("you score worse after 11 pm"), not causes.

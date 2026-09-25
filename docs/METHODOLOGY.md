@@ -153,7 +153,7 @@ same).
 | Late night (23:00–03:00, ~29% of games) −0.10 | 72% | 88% | 59% | 84% |
 | Time trouble in 35% more games, −0.10 in them | 100% | 100% | 94% | 97% |
 | 25% of mate/resignation losses become losses on time | 66% | 88% | | |
-| 40% of Italian Game losses (its main White opening) over within 22 moves, score unchanged | 53% | 81% | | |
+| 40% of Italian Game losses (its main White opening) over within 22 moves, score unchanged | 53% | 78% | | |
 | Black −0.08 | 31% | 53% | 50% | 62% |
 
 Before this calibration the old thresholds "found" most of these too, but only
