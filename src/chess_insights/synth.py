@@ -254,10 +254,10 @@ class Persona:
     baseline_shift: float = 0.09
     # T1: Caro-Kann as Black against 1.e4
     caro_kann_share: float = 0.38
-    caro_kann_shift: float = -0.15
+    caro_kann_shift: float = -0.17
     # T2: Italian Game as White (share of all White games; White always opens 1.e4)
     italian_share: float = 0.45
-    italian_shift: float = 0.18
+    italian_shift: float = 0.19
     # T3: blitz clock handling
     blitz_opening_time_factor: float = 2.1  # time used on moves 1-15 relative to a typical opponent
     blitz_flag_share: float = 0.28  # share of planned blitz losses that end on the clock
@@ -270,7 +270,7 @@ class Persona:
     late_night_shift: float = -0.16
     late_session_share: float = 0.28
     # T6: error-rate multiplier once the position is an endgame (opponents: 1.0)
-    endgame_error_factor: float = 3.0
+    endgame_error_factor: float = 4.0
     # T7: share of non-wins in which the player first gets a clearly winning position (opponents: lower)
     throw_win_share: float = 0.50
     opponent_throw_win_share: float = 0.05
@@ -1122,7 +1122,7 @@ class _Director:
             if side == self.player and not endgame:
                 ramp *= 0.6  # the player tends to hold the middlegame and go wrong later (T6)
             elif side != self.player and endgame:
-                ramp *= 0.3  # opponents mostly go wrong before the endgame
+                ramp *= 0.15  # opponents mostly go wrong before the endgame
             if score >= 150:  # ahead against the script: gives it back
                 m = 2.5 + 2.5 * ramp
             elif score > -250:

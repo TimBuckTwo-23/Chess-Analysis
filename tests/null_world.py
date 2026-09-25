@@ -27,6 +27,13 @@ their clocks / how they end):
     probability that a loss by mate or resignation becomes a loss on time.
 ``"colour": ("black", -0.08)``
     points per game with that colour (on top of White's normal edge).
+``"baseline": 0.03``
+    points per game for every game that no planted effect shifts. The null world
+    anchors each game's true expectation to the *current* rating, so on its own a
+    planted weakness makes the player underperform their rating on average (and the
+    rating slides); a real player's rating has already priced their weaknesses in,
+    which puts their ordinary games a little above expectation. About
+    ``-share * effect / (1 - share)`` models that.
 
 Without ``planted`` every random draw happens exactly as it always did, so a
 seed gives the same games, results, openings, clocks and lengths as before; the
@@ -73,7 +80,9 @@ SESSION_STARTS = ((0.20, 8.0, 17.0), (0.45, 17.0, 22.5), (0.35, 22.5, 25.5))
 LATE_NIGHT_HOURS = frozenset({23, 0, 1, 2})  # games started 23:00-03:00 UTC
 TILT_WINDOW = timedelta(minutes=15)
 DEFAULT_MAIN_SHARE = 0.40  # share of a colour's games in a planted opening family
-PLANT_KEYS = frozenset({"opening", "short_losses", "tilt_after_loss", "late_night", "time_trouble", "flagging", "colour"})
+PLANT_KEYS = frozenset(
+    {"opening", "short_losses", "tilt_after_loss", "late_night", "time_trouble", "flagging", "colour", "baseline"}
+)
 
 
 def _random_moves(rng: random.Random, start: list[str], target_plies: int) -> list[str]:
@@ -188,21 +197,23 @@ def null_games(
         trouble = False
         if planted:
             family = family_choice[1] if family_choice else None
+            shift = 0.0
             spec = planted.get("opening")
             if spec and spec[0] == color and spec[1] == family:
-                e_true += spec[2]
+                shift += spec[2]
             spec = planted.get("colour")
             if spec and spec[0] == color:
-                e_true += spec[1]
+                shift += spec[1]
             if "tilt_after_loss" in planted and prev is not None and prev.outcome == "loss":
                 if t - prev.end_time <= TILT_WINDOW:
-                    e_true += planted["tilt_after_loss"]
+                    shift += planted["tilt_after_loss"]
             if "late_night" in planted and t.hour in LATE_NIGHT_HOURS:
-                e_true += planted["late_night"]
+                shift += planted["late_night"]
             spec = planted.get("time_trouble")
             if spec and prng.random() < spec[0]:
                 trouble = True
-                e_true += spec[1]
+                shift += spec[1]
+            e_true += shift if shift else planted.get("baseline", 0.0)
 
         p_win = max(0.0, min(1.0 - P_DRAW, e_true - P_DRAW / 2))
         u = rng.random()
