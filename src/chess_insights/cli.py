@@ -577,13 +577,19 @@ def _puzzle_path(out: Path) -> Path:
 
 
 def write_puzzles(games: list[Game], evals: dict, out: Path) -> Path:
-    from .analysis.mistakes import build_puzzles, puzzles_to_pgn
+    from .analysis.mistakes import LICHESS_STUDY_CHAPTERS, build_puzzles, puzzles_to_pgn
 
     path = _puzzle_path(out)
     path.parent.mkdir(parents=True, exist_ok=True)
     puzzles = build_puzzles(games, evals)
     path.write_text(puzzles_to_pgn(puzzles), encoding="utf-8")
-    _say(f"{len(puzzles)} puzzles from your own mistakes (import into a Lichess study or any chess GUI)")
+    note = "import into a Lichess study or any chess GUI"
+    if len(puzzles) > LICHESS_STUDY_CHAPTERS:
+        note += (
+            f"; a Lichess study holds {LICHESS_STUDY_CHAPTERS} chapters, and the file is sorted costliest first, "
+            f"so the first {LICHESS_STUDY_CHAPTERS} are the ones to start with"
+        )
+    _say(f"{len(puzzles)} puzzles from your own mistakes ({note})")
     return path
 
 

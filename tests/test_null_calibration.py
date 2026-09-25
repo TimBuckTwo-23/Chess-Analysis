@@ -14,7 +14,7 @@ skill effects: a rating that lags the player's strength (every game a little abo
 below expectation), and a player who never resigns (losses are longer and end in mate).
 
 The default run (10 seeds of 400 games, plus four shifted and two never-resign worlds)
-takes about 30 s. For a heavier check set CALIBRATION_RUNS (e.g. 64) and optionally
+takes about 35 s. For a heavier check set CALIBRATION_RUNS (e.g. 64) and optionally
 CALIBRATION_GAMES (e.g. 600); with 16 or more runs the mean must also meet the 0.3
 target, not just the 0.5 hard limit.
 """

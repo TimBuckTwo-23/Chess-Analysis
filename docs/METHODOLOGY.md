@@ -41,7 +41,7 @@ rating's expectation alone is only used for the tables and charts.
 **Colour.** At equal ratings White scores about 52% and Black about 48% in club
 blitz and rapid, a White-minus-Black gap of about 0.04 points per game. The exact
 edge is uncertain (about 0.03 in bullet and at lower ratings, 0.05 or more in
-slower games; 0.06–0.08 for players rated 2000+), so a colour claim must hold for
+slower games and for strong players), so a colour claim must hold for
 every edge from 0.03 to 0.05: "worse with Black" against 0.05, "worse with White"
 against 0.03. Openings are compared only with your other openings *of the same
 colour*, so neither the edge nor a colour-wide gap turns into opening claims.
@@ -198,18 +198,72 @@ generator can *plant* realistic effects, each shifting only the games it concern
 and habits that are not skill effects (a rating that lags, never resigning).
 
 False claims in the top lists per report (the null player gives the time zone,
-`Etc/UTC`, so late night is tested at 0.05; seeds not used for tuning):
+`Etc/UTC`, so late night is tested at 0.05; seeds 0–63 and 1000–1039 for the null
+world, 24–64 fresh seeds for each variant):
 
-@@NULL_TABLE@@
+| World | 400 games | 600 | 1,200 | 3,000 |
+|---|---|---|---|---|
+| Null world (104 / 64 / 40 / 40 reports) | **0.18** | **0.23** | **0.10** | **0.00** |
+| … without a time zone (late night at 0.01) | 0.12 | 0.19 | 0.05 | |
+| Every game 5 points per 100 above the rating (a lagging rating) | | 0.25 | 0.04 | 0.00 |
+| Every game 5 points per 100 below it | | 0.27 | 0.17 | 0.08 |
+| Never resigns: 80% of resignations played on to mate | 0.27 | | 0.10 | |
+| … 35% played on | 0.13 | | 0.04 | |
+| 80% bullet / 80% rapid | 0.20 / 0.28 | | 0.10 / 0.10 | |
+| Rating noise 110 Elo / none | 0.30 / 0.10 | | 0.18 / 0.08 | |
+| True strength fixed, rating wanders | 0.15 | | 0.05 | |
+| White's edge 0.065 instead of 0.04 (16 reports) | | | 0.38 | 0.19 |
+
+No report had more than 2 false claims. Before this calibration the null world got
+4.95 per report at 400 games (up to 10); the first calibration brought that to 0.2,
+but a lagging rating still produced 0.7–1.5 per report at 600–1,200 games (3.2 at
+3,000, mostly opening "strengths" or "weaknesses"), and never resigning 3.5–5.1 (a
+king-safety "weakness" and game-length claims in every report). The last row is
+outside the assumed range of White's edge: the extra claims are all "you score worse
+with Black", so a player rated 2000+, whose edge is larger, should read that claim
+with care. The null world's realised edge is slightly below 0.04 (colour z-scores
+average −0.1), so "worse with White" shows up a little more often than "worse with
+Black" in it.
 
 Share of 32 worlds (seeds 1000–1031) in which the report's top weaknesses name the
 planted effect (right kind and category), one effect at a time:
 
-@@POWER_TABLE@@
+| Planted effect | 400 | 600 | 1,200 | priced in, 400 / 600 |
+|---|---|---|---|---|
+| Caro-Kann as Black −0.15 (40% of Black games) | 22% | 47% | 97% | 31% / 62% |
+| Right after a loss −0.12 | 88% | 88% | 100% | 75% / 84% |
+| Late night (23:00–03:00, ~29% of games) −0.10 | 75% | 84% | 94% | 50% / 81% |
+| Time trouble in 35% more games, −0.10 in them | 94% | 100% | 100% | 100% / 100% |
+| 25% of mate/resignation losses become losses on time | 81% | 88% | 100% | |
+| 40% of Italian Game losses (its main White opening) over within 22 moves, score unchanged | 25% | 59% | 100% | |
+| Black −0.08 | 28% | 50% | 62% (84% at 2,000) | 41% / 47% |
+
+*Priced in*: the rating has absorbed the effect, so every game is lifted by
+`share × effect` (the realistic case for a long-standing habit; the gap to the other
+games is the same, and the differences from the plain column are mostly sampling
+noise). Several effects at once are found as well: in 1,200-game worlds with tilt,
+late night, time trouble and flagging together, each was named in 91–100% of 32
+worlds, and with the weak Caro-Kann and the Italian quick losses together in 91% and
+100%, with about 0.1 other claims per report.
 
 What this means for you:
 
-@@POWER_NOTES@@
+* **With 1,200+ games** the report finds effects of these sizes almost always (a
+  colour imbalance of 8 points per 100 games needs about 2,000).
+* **With 400–600 games** it finds tilt, late night and clock habits most of the time,
+  but an opening effect only a quarter to a half of the time: an opening is now
+  compared with *your other openings of that colour*, which is what makes the claim
+  immune to a lagging rating and to colour effects, and that comparison is noisier
+  than a comparison with the rating's expectation (which found the Caro-Kann in 59% /
+  81% of worlds, at the price of turning every rating lag into opening claims). The
+  opening tables and chart still show every opening's score against expectation.
+* The report says less rather than guessing: a missed effect costs a finding, a false
+  one sends you to study the wrong thing.
+* The null world is idealised (each game's true strength equals the current rating,
+  families of tests are roughly independent). The rows above that break those
+  assumptions (a lagging or wandering rating, resignation habits, other time-control
+  mixes and noise levels) stay at or below 0.3 false claims per report; a White edge
+  outside 0.03–0.05 is the one assumption that shows.
 
 Run `CALIBRATION_RUNS=64 CALIBRATION_GAMES=600 pytest tests/test_null_calibration.py`
 to re-measure the false-claim rate after changing a threshold, and
