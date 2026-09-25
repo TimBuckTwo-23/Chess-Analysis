@@ -17,7 +17,10 @@ Deliberate differences from Lichess, each pinned down by a ``test_deviation_*`` 
 * the start position is evaluated by Stockfish (Lichess assumes +15 cp);
 * one move's centipawn loss is capped at ``CP_LOSS_CAP`` (Lichess: up to 2000);
 * a game that goes straight from the opening into an endgame has "endgame" moves (Lichess: "opening");
-* a side's accuracy is reported even when the other side never moved (Lichess: neither).
+* a side's accuracy is reported even when the other side never moved (Lichess: neither);
+* a game that ends in a draw by threefold repetition or the 50-move rule (chess.com ends it there by
+  itself) has its final position scored as a draw, not searched: Stockfish does not treat the root
+  of a search as drawn, so the drawing move would otherwise be charged up to 1000 cp.
 
 Every position of a game is evaluated exactly once (N + 1 searches for N plies), from
 the last position backwards like Lichess's fishnet so later positions warm the hash.
@@ -649,6 +652,29 @@ def _time_spent(game: Game) -> list[Optional[float]]:
     return out
 
 
+def ends_drawn_by_rule(game: Game, final: chess.Board) -> bool:
+    """Whether the game's final position (``final`` must carry the move stack) is a draw by the repetition or
+    move-count rules: always after a fivefold repetition or 75 moves (the game is over by itself), and after a
+    threefold repetition or 50 moves when the game was drawn (chess.com draws it there automatically;
+    elsewhere a player claimed it). A checkmate takes precedence."""
+    if final.is_checkmate():
+        return False
+    if final.is_fivefold_repetition() or final.is_seventyfive_moves():
+        return True
+    return game.outcome == "draw" and (final.is_repetition(3) or final.is_fifty_moves())
+
+
+def _final_board(boards: Sequence[chess.Board], moves: Sequence[chess.Move]) -> chess.Board:
+    """The last position with the moves that led to it (needed to see repetitions)."""
+    board = boards[0].copy(stack=False)
+    for move in moves:
+        board.push(move)
+    return board
+
+
+DRAWN = PositionEval(cp=0)  # a position drawn by rule: no search, no best move
+
+
 # --------------------------------------------------------------------------- one game
 def evaluate_game(
     game: Game, engine: chess.engine.SimpleEngine, cfg: EngineConfig
@@ -660,8 +686,12 @@ def evaluate_game(
     boards, _ = replay
     limit = cfg.limit()
     session = object()  # a fresh "game" for python-chess: sends ucinewgame, so the hash starts empty
+    drawn = ends_drawn_by_rule(game, boards[-1])
     # Backwards, like fishnet: the hash entries of later positions help the earlier searches.
-    return [evaluate_position(engine, b, limit, session) for b in reversed(boards)][::-1]
+    return [
+        DRAWN if drawn and i == len(boards) - 1 else evaluate_position(engine, b, limit, session)
+        for i, b in reversed(list(enumerate(boards)))
+    ][::-1]
 
 
 def _legal_uci(board: chess.Board, uci: Optional[str]) -> Optional[chess.Move]:
@@ -671,6 +701,22 @@ def _legal_uci(board: chess.Board, uci: Optional[str]) -> Optional[chess.Move]:
         return board.parse_uci(uci)
     except ValueError:
         return None
+
+
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
+
+
+def material_gain(board: chess.Board, move: chess.Move) -> int:
+    """Material (pawn = 1) a move wins on the spot: what it captures, plus what a promotion adds."""
+    gain = 0
+    if board.is_en_passant(move):
+        gain = 1
+    elif board.is_capture(move):
+        piece = board.piece_at(move.to_square)
+        gain = PIECE_VALUES[piece.piece_type] if piece is not None else 0
+    if move.promotion:
+        gain += PIECE_VALUES[move.promotion] - 1
+    return gain
 
 
 def _tags(
@@ -685,7 +731,11 @@ def _tags(
     win_after: float,
     judgement: Optional[str],
 ) -> list[str]:
-    """Error tags of a move that is not the engine's best (``reply``: the engine's best answer to it)."""
+    """Error tags of a move that is not the engine's best (``reply``: the engine's best answer to it).
+
+    ``hung_material``: a mistake or blunder the engine answers with a capture that wins more material than the
+    move itself won (a recapture that merely completes a trade doesn't count).
+    """
     tags = []
     if mover_mate_before is not None and mover_mate_before > 0:
         if mover_mate_after is None or mover_mate_after < 0:
@@ -693,7 +743,12 @@ def _tags(
     already_mated = mover_mate_before is not None and mover_mate_before < 0
     if mover_mate_after is not None and mover_mate_after < 0 and not already_mated:
         tags.append("allowed_mate")
-    if judgement in ("mistake", "blunder") and reply is not None and after_board.is_capture(reply):
+    if (
+        judgement in ("mistake", "blunder")
+        and reply is not None
+        and after_board.is_capture(reply)
+        and material_gain(after_board, reply) > material_gain(board, move)
+    ):
         tags.append("hung_material")
     if (
         best is not None
@@ -719,6 +774,8 @@ def build_game_eval(
     if replay is None or len(positions) != len(replay[0]):
         return None
     boards, moves = replay
+    if ends_drawn_by_rule(game, _final_board(boards, moves)):  # also corrects analyses cached before this rule
+        positions = [*positions[:-1], DRAWN]
     white_wp = [win_percent(p.white_cp) for p in positions]
     phases = _move_phases(boards)
     spent = _time_spent(game)
@@ -874,8 +931,12 @@ def _load_cached(path: Path, game: Game) -> Optional[GameEval]:
         return None
 
 
-def _write_cached(path: Path, game: Game, positions: Sequence[PositionEval], engine: str, depth: Optional[int]) -> None:
-    """Atomic write (temp file + rename): an interrupted run never leaves a half-written cache file."""
+def _write_cached(
+    path: Path, game: Game, positions: Sequence[PositionEval], engine: str, depth: Optional[int]
+) -> Optional[OSError]:
+    """Atomic write (temp file + rename): an interrupted run never leaves a half-written cache file.
+
+    Returns the error if the file could not be written (the caller reports it once per run)."""
     payload = {
         "format": CACHE_FORMAT,
         "engine": engine,
@@ -897,7 +958,8 @@ def _write_cached(path: Path, game: Game, positions: Sequence[PositionEval], eng
                 os.unlink(tmp)
             raise
     except OSError as exc:
-        log.warning("could not cache the engine analysis of %s: %s", game.game_id, exc)
+        return exc
+    return None
 
 
 # --------------------------------------------------------------------------- running many games
@@ -1108,15 +1170,23 @@ def analyze_games(
         depth = cfg.effective_depth
         out_dir = cache_root(cache, cfg, label) if cache is not None else None
         engine_label = label
+        cache_failures = 0
 
         def on_result(game: Game, positions: Optional[list[PositionEval]]) -> None:
-            nonlocal done
+            nonlocal done, cache_failures
             done += 1
             ev = build_game_eval(game, positions, engine_label, depth) if positions is not None else None
             if ev is not None:
                 results[game.game_id] = ev
                 if out_dir is not None:
-                    _write_cached(out_dir / cache_file_name(game.game_id), game, positions, engine_label, depth)
+                    error = _write_cached(out_dir / cache_file_name(game.game_id), game, positions, engine_label, depth)
+                    if error is not None:  # e.g. a read-only or full disk: one warning, not one per game
+                        cache_failures += 1
+                        if cache_failures == 1:
+                            log.warning("could not cache the engine analysis in %s: %s (the analysis itself is not "
+                                        "affected; further cache errors are logged at debug level)", out_dir, error)
+                        else:
+                            log.debug("could not cache the engine analysis of %s: %s", game.game_id, error)
             if progress:
                 progress(done, total)
 

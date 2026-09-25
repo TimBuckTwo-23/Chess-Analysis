@@ -800,3 +800,65 @@ def test_ctrl_c_during_a_parallel_run_is_quiet_and_leaves_nothing_running(stockf
     out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0 and out.stdout.split() == ["INTERRUPTED"]
     assert out.stderr == ""
+
+
+# --------------------------------------------------------------------------- verifier findings
+QUEEN_UP = "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1"
+REPETITION = ["Kd1", "Kd8", "Ke1", "Ke8", "Kd1", "Kd8", "Ke1", "Ke8"]  # the start position comes back a third time
+
+
+def test_a_threefold_repetition_draw_ends_on_a_drawn_position_without_a_search():
+    """Black, a queen down, holds the draw by repetition (chess.com ends the game there). Stockfish would score
+    the final position +10 (it doesn't treat the root as drawn), charging the drawing move 1000 cp."""
+    game = make_game(color="black", outcome="draw", termination="repetition", initial_fen=QUEEN_UP,
+                     moves_san=REPETITION)
+    # after 4.Ke1 Stockfish (given the moves) sees that ...Ke8 repeats: 0; it scores the final position +10
+    scripted_engine = ScriptedEngine([1000] * 7 + [0, 1000], {k: "Qa7" for k in range(0, 9, 2)})
+    ev = analyze_game(game, scripted_engine, EngineConfig(depth=12))
+    assert scripted_engine.calls == 8  # the drawn final position is not searched
+    last = ev.plies[-1]
+    assert (last.san, last.cp_before, last.cp_after, last.cp_loss) == ("Ke8", 0, 0, 0)
+    assert last.accuracy == 100.0 and last.judgement is None
+    assert ev.plies[-2].judgement == "blunder"  # White's 4.Ke1 let a won game be drawn
+    # an analysis cached before this rule (the final position searched) is corrected when it is read
+    searched = [PositionEval(cp=1000, best="a1a7")] * 9
+    assert build_game_eval(game, searched).plies[-1].cp_loss == 0
+    # the same moves in a game that went on being scored (nobody claimed the draw): the search stands
+    unclaimed = make_game(color="black", outcome="loss", initial_fen=QUEEN_UP, moves_san=REPETITION)
+    assert build_game_eval(unclaimed, searched).plies[-1].cp_after == 1000
+
+
+def test_fifty_move_and_seventy_five_move_draws():
+    fifty = make_game(color="white", outcome="draw", termination="50move",
+                      initial_fen="4k3/8/8/8/8/8/8/Q3K3 w - - 98 80", moves_san=["Kd1", "Kd8"])
+    assert build_game_eval(fifty, [PositionEval(cp=900)] * 3).plies[-1].cp_after == 0
+    board = chess.Board("4k3/8/8/8/8/8/8/Q3K3 w - - 149 80")
+    board.push_san("Kd1")
+    assert engine.ends_drawn_by_rule(make_game(outcome="win"), board)  # 75 moves: over whatever the result
+    mate = chess.Board()
+    for san in ["f3", "e5", "g4", "Qh4#"]:
+        mate.push_san(san)
+    assert not engine.ends_drawn_by_rule(make_game(outcome="draw"), mate)
+
+
+def test_hung_material_needs_the_reply_to_win_more_than_the_move_did():
+    """A capture answered by a recapture is a trade, not material left hanging; a capture of a defended pawn
+    with the queen is."""
+    trade = make_game(moves_san=["e4", "d5", "exd5", "Qxd5", "Nc3", "Qa5", "d4", "Nf6", "Nf3", "Bf5"])
+    ev = scripted(trade, [30, 40, 50, -400] + [-400] * 7, {2: "Nc3", 3: "Qxd5"})
+    assert ev.plies[2].judgement == "blunder" and "hung_material" not in ev.plies[2].tags
+    bad = make_game(moves_san=["e4", "e5", "Qh5", "Nc6", "Qxe5+", "Nxe5", "d4", "Ng6", "Nf3", "Nf6"])
+    ev = scripted(bad, [30, 30, 0, 0, 0, -900] + [-900] * 5, {4: "Bc4", 5: "Nxe5"})
+    assert ev.plies[4].judgement == "blunder" and "hung_material" in ev.plies[4].tags
+    board = chess.Board("4k3/1P6/8/3pP3/8/8/8/4K3 w - d6 0 1")
+    assert engine.material_gain(board, board.parse_san("exd6")) == 1  # en passant
+    assert engine.material_gain(board, board.parse_san("b8=Q+")) == 8  # a promotion adds a queen for a pawn
+
+
+def test_an_unwritable_cache_is_reported_once(fake_engines, tmp_path, caplog):
+    not_a_dir = tmp_path / "cache"
+    not_a_dir.write_text("x")
+    games = [make_game(moves_san=SICILIAN) for _ in range(4)]
+    assert len(analyze_games(games, cfg_fake(), cache_dir=not_a_dir)) == 4  # the analysis itself is unaffected
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "could not cache" in r.getMessage()]
+    assert len(warnings) == 1

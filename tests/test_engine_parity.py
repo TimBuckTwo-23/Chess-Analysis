@@ -520,3 +520,23 @@ def test_python_chess_mate_zero_is_the_side_to_move_being_mated():
     board.push_san("e4")
     black = engine.evaluate_position(MatedEngine(), board, chess.engine.Limit(depth=1), object())
     assert black.white_cp == MATE_CP
+
+
+def test_deviation_a_final_position_drawn_by_rule_is_scored_as_a_draw():
+    """Stockfish does not treat the root of a search as drawn, so the final position of a game drawn by threefold
+    repetition (or the 50-move rule; chess.com ends such games by itself) comes back with its material eval,
+    and lila's formulas then charge the drawing move for it: here Black, a queen down, holds the draw with the
+    engine's own move and would lose 1000 cp and most of its accuracy. We score that position 0 cp without a
+    search, like stalemate; everything else is lila's formula on those evaluations."""
+    sans = ["Kd1", "Kd8", "Ke1", "Ke8", "Kd1", "Kd8", "Ke1", "Ke8"]
+    fen = "4k3/8/8/8/8/8/8/Q3K3 w - - 0 1"
+    searched = [1000] * 7 + [0, 1000]  # after 4.Ke1 the engine (given the moves) sees the repetition coming
+    game, positions = _game_and_positions(sans, searched, color="black", outcome="draw", initial_fen=fen)
+    ev = build_game_eval(game, positions)
+    assert ref_acpl_diffs(searched[1:], False, start_white=True)[-1] == 1000  # lila: the drawing move costs 1000
+    ours = searched[:-1] + [0]
+    assert ev.plies[-1].cp_after == 0 and ev.plies[-1].cp_loss == 0 and ev.plies[-1].accuracy == 100.0
+    ref = ref_game_accuracy(ours[1:], True, initial_cp=1000)
+    assert ev.my_accuracy == pytest.approx(ref["black"], abs=1e-9)
+    assert ev.opp_accuracy == pytest.approx(ref["white"], abs=1e-9)
+    assert ev.my_accuracy > ref_game_accuracy(searched[1:], True, initial_cp=1000)["black"] + 50

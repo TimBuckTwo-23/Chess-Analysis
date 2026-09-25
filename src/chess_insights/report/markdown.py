@@ -65,13 +65,14 @@ def _escape(text: str) -> str:
 
 def _url_end(run: str) -> int:
     """Length of the address in ``run``: trailing punctuation and unbalanced ")" are not part of it."""
-    end = len(run)
+    end, opens, closes = len(run), run.count("("), run.count(")")
     while end:
         ch = run[end - 1]
-        if ch in _URL_TRAILING or (ch == ")" and run[:end].count("(") < run[:end].count(")")):
-            end -= 1
-        else:
+        if ch == ")" and opens < closes:
+            closes -= 1
+        elif ch not in _URL_TRAILING:
             break
+        end -= 1
     return end
 
 

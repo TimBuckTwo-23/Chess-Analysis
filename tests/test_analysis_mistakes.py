@@ -1,10 +1,13 @@
 import io
+import math
 
 import chess
 import chess.pgn
+import pytest
 
 from chess_insights.analysis import mistakes
 from chess_insights.context import AnalysisContext
+from chess_insights.insights import MIN_CONFIDENCE, headline, rank_insights
 from factories import make_game, make_game_eval, make_ply_eval
 
 LINE = ["e4", "e5", "Nf3", "Nc6", "Bc4"]  # black to move after 3.Bc4
@@ -55,30 +58,33 @@ def test_repeated_mistake_detected_with_reach_count_and_insight():
     specs = [_game_with_error(1), _game_with_error(2), _game_with_error(3, reply="Nf6", error=False)]
     unanalysed, _ = _game_with_error(4, reply="Nf6", error=False)
     ctx = _ctx(specs + [(unanalysed, None)])
-    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games)
-    assert (rep.errors, rep.reached, rep.best_san) == (2, 4, "Nf6")
+    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals)
+    assert (rep.san, rep.errors, rep.reached, rep.analysed, rep.best_san) == ("Nd4", 2, 4, 2, "Nf6")
 
     res = mistakes.analyze(ctx)
     assert res.key == "mistakes"
     [ins] = res.insights
-    assert ins.kind == "weakness" and ins.category == "openings"
-    assert ins.title == "You have played 3...Nd4 here 2 times; 3...Nf6 is better"
-    assert "2 of the 4 games" in ins.detail
+    # two games are not enough to call it a habit: shown, but as an observation that never ranks
+    assert ins.kind == "observation" and ins.category == "openings" and ins.confidence < MIN_CONFIDENCE
+    assert ins.title == "You played 3...Nd4 here in 2 of 4 games; 3...Nf6 is better"
+    assert "in 2 of the 4 games" in ins.detail and "Too few games" in ins.detail
     assert set(ins.example_games) == {"https://www.chess.com/game/live/1", "https://www.chess.com/game/live/2"}
-    assert 0 < ins.severity <= 1 and 0 < ins.confidence <= 1
+    assert 0 < ins.severity <= 1
     [table] = res.tables
     assert len(table.rows[0]) == len(table.columns) == len(table.formats)
     assert table.rows[0][0] == "1.e4 e5 2.Nf3 Nc6 3.Bc4"
+    assert table.rows[0][2:6] == [4, 2, "3...Nd4", "3...Nf6"]
     [diagram] = res.diagrams
     assert diagram.svg.startswith("<svg") and diagram.fen == ins.evidence["fen"]
-    assert res.stats["repeated_positions"] == 1
+    assert res.stats["repeated_positions"] == 1 and res.stats["claims"] == 0
 
 
 def test_single_errors_are_not_repeated_but_become_puzzles():
     ctx = _ctx([_game_with_error(1), _game_with_error(2, reply="Nf6", error=False)])
     res = mistakes.analyze(ctx)
     assert res.insights == [] and res.stats["puzzles"] == 1
-    assert "No position where you erred more than once" in res.summary
+    assert "No wrong move you played in more than one game" in res.summary
+    assert "One of your mistakes is available as a puzzle." in res.summary
 
 
 def test_without_engine_analysis():
@@ -147,13 +153,13 @@ LOOP = ["Nb8", "Ng1", "Nc6", "Nf3"]  # both sides go back and forth: the positio
 
 
 def test_an_error_repeated_within_one_game_counts_once():
-    twice = _game(1, LINE + LOOP + ["Nd4", "Nxe5"], {5: "Nf6", 9: "Nf6"})
+    twice = _game(1, LINE + LOOP + ["Nd4", "Nxe5"], {5: "Nf6", 9: "Nf6"})  # 3...Nb8 and, back there, 5...Nd4
     once = _game(2, LINE + ["Nd4", "Nxe5"], {5: "Nf6"})
     ctx = _ctx([twice, once])
-    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games)
-    assert (rep.errors, rep.reached) == (2, 2)  # games, not moves
+    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals)
+    assert (rep.san, rep.errors, rep.reached) == ("Nd4", 2, 2)  # games, not moves; ...Nb8 was played once
     [ins] = mistakes.analyze(ctx).insights
-    assert "2 of the 2 games" in ins.detail
+    assert "in 2 of the 2 games" in ins.detail
     assert len(ins.example_games) == len(set(ins.example_games)) == 2
 
 
@@ -163,7 +169,7 @@ def test_reach_counts_find_transpositions_and_later_arrivals():
     c, _ = _game(3, LINE + LOOP + ["Nf6", "Ng5"], {})  # not analysed: reaches it at ply 9 as well as ply 5
     d, _ = _game(4, ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6"], {})  # never gets there
     ctx = _ctx([a, b, (c, None), (d, None)])
-    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games)
+    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals)
     assert (rep.errors, rep.reached) == (2, 3)
     assert rep.games_reached == [a[0].url, b[0].url, c.url]
     # reached only at ply 9, after both knights went out and back: later than any analysed error
@@ -239,3 +245,108 @@ def test_diagram_arrows_show_where_the_king_goes_when_castling():
     assert mistakes._arrow(c960, c960.parse_san("O-O-O")) == (chess.B1, chess.C1)  # not b1 -> a1 (the rook)
     assert mistakes._arrow(c960, c960.parse_san("O-O")) == (chess.B1, chess.G1)
     assert mistakes._arrow(c960, c960.parse_san("a3")) == (chess.A2, chess.A3)
+
+
+# --------------------------------------------------------------------------- verifier findings: repeated mistakes
+def test_different_one_off_errors_in_one_position_are_not_a_repeated_mistake():
+    """Two unrelated errors (3...Nd4 once, 3...d6 once) where you play the engine's 3...Nf6 in 38 of 40 games:
+    nothing is repeated, so nothing is claimed (it used to headline the report as 'played 3...d6 here 1 times')."""
+    specs = [_game_with_error(1, "Nd4"), _game_with_error(2, "d6")]
+    specs += [_game_with_error(n, "Nf6", error=False) for n in range(3, 41)]
+    ctx = _ctx(specs)
+    assert mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals) == []
+    res = mistakes.analyze(ctx)
+    assert res.insights == [] and res.tables == [] and res.stats["repeated_positions"] == 0
+    strengths, weaknesses = rank_insights([res])
+    assert weaknesses == [] and headline(strengths, weaknesses).startswith("No clear patterns")
+
+
+def test_a_wrong_move_you_rarely_play_there_is_not_a_habit():
+    """The same wrong move in 3 of 40 games, the engine's move in the other 37: at an ordinary error rate
+    that is chance, so an observation at most, never a weakness."""
+    # each of these games also has a one-off error later on (a different queen move each time)
+    specs = [_game(n, LINE + ["Nd4", "Nxe5", queen], {5: "Nf6", 7: "Qh4"}) for n, queen in enumerate(["Qg5", "Qf6", "Qe7"], 1)]
+    specs += [_game_with_error(n, "Nf6", error=False) for n in range(4, 41)]
+    ctx = _ctx(specs)
+    [rep] = mistakes.assess(
+        mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals),
+        *mistakes.error_rate(ctx.games, ctx.evals),
+    )
+    assert (rep.errors, rep.reached) == (3, 40)
+    assert rep.p_value > 0.01 and not rep.significant
+    res = mistakes.analyze(ctx)
+    assert [i.kind for i in res.insights] == ["observation"]
+    assert rank_insights([res]) == ([], [])
+
+
+def test_a_wrong_move_you_keep_playing_is_a_weakness():
+    """3...Nd4 in 4 of the 5 games that reached the position (the engine's move once): a habit."""
+    specs = [_game_with_error(n) for n in range(1, 5)] + [_game_with_error(5, "Nf6", error=False)]
+    specs += [_game(n, ["d4", "d5", "c4", "e6", "Nc3", "Nf6"], {}, color="black") for n in range(6, 20)]
+    ctx = _ctx(specs)
+    res = mistakes.analyze(ctx)
+    [ins] = res.insights
+    assert ins.kind == "weakness" and ins.confidence >= MIN_CONFIDENCE
+    assert ins.title == "You played 3...Nd4 here in 4 of 5 games; 3...Nf6 is better"
+    assert "habit" in ins.detail and ins.evidence["p_adjusted"] <= 0.01
+    assert ins.id.startswith("mistakes.weakness.")
+    _, weaknesses = rank_insights([res])
+    assert [w.id for w in weaknesses] == [ins.id]
+    assert res.stats["claims"] == 1
+
+
+def test_unanalysed_games_with_the_same_move_count_as_repeats():
+    """Reached and played-it come from the same games: 3...Nd4 in all 10 games, only 2 of them engine-analysed,
+    is 10 of 10, not '2 of the 10 games that reached this position'."""
+    games, evals = [], {}
+    for n in range(1, 11):
+        g, ev = _game_with_error(n)
+        games.append(g)
+        if n <= 2:
+            evals[g.game_id] = ev
+    other, _ = _game_with_error(11, "Nf6", error=False)  # reached it, played the right move, not analysed
+    games.append(other)
+    ctx = AnalysisContext("tester", games, evals=evals)
+    [rep] = mistakes.find_repeated(mistakes.collect_errors(ctx.games, ctx.evals), ctx.games, ctx.evals)
+    assert (rep.errors, rep.reached, rep.analysed) == (10, 11, 2)
+    [ins] = mistakes.analyze(ctx).insights
+    assert ins.kind == "weakness"
+    assert ins.title == "You played 3...Nd4 here in 10 of 11 games; 3...Nf6 is better"
+    assert "Stockfish analysed 2 of them" in ins.detail
+    assert ins.example_games[:2] == [games[1].url, games[0].url]  # analysed games first, most recent first
+
+
+def test_a_move_the_engine_does_not_consistently_flag_is_left_out():
+    """Flagged once (15 points) but a 2-point loss in two other analysed games: on average not an error."""
+    specs = [_game_with_error(1)]
+    for n in (2, 3):
+        g, ev = _game_with_error(n)
+        ev.plies[5].win_after = 46.0
+        ev.plies[5].judgement = None
+        specs.append((g, ev))
+    ctx = _ctx(specs)
+    events = mistakes.collect_errors(ctx.games, ctx.evals)
+    assert len(events) == 1
+    assert mistakes.find_repeated(events, ctx.games, ctx.evals) == []
+
+
+def test_binomial_tail():
+    assert mistakes.binomial_sf(0, 5, 0.3) == 1.0
+    assert mistakes.binomial_sf(6, 5, 0.3) == 0.0
+    assert mistakes.binomial_sf(2, 2, 0.1) == pytest.approx(0.01)
+    assert mistakes.binomial_sf(3, 40, 0.025) == pytest.approx(1 - sum(
+        math.comb(40, j) * 0.025**j * 0.975 ** (40 - j) for j in range(3)))
+
+
+def test_puzzle_kpi_counts_what_is_exported(monkeypatch):
+    monkeypatch.setattr(mistakes, "PUZZLE_LIMIT", 2)
+    ctx = _ctx([_game_with_error(n, reply) for n, reply in enumerate(["Nd4", "d6", "Bc5", "h6"], 1)])
+    res = mistakes.analyze(ctx)
+    kpi = next(k for k in res.kpis if k.label == "Puzzles from your games")
+    assert kpi.value == 2 and "the 2 costliest of 4" in kpi.hint
+    assert res.stats["puzzles"] == 4 and res.stats["puzzles_exported"] == 2
+    monkeypatch.setattr(mistakes, "PUZZLE_LIMIT", 300)
+    monkeypatch.setattr(mistakes, "LICHESS_STUDY_CHAPTERS", 3)
+    kpi = next(k for k in mistakes.analyze(ctx).kpis if k.label == "Puzzles from your games")
+    assert kpi.value == 4 and "a Lichess study holds 3" in kpi.hint
+    assert len(mistakes.build_puzzles(ctx.games, ctx.evals)) == 4

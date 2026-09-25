@@ -1397,8 +1397,8 @@ def test_write_report_survives_bad_text_and_never_truncates(report, tmp_path, mo
     paths = write_report(bad, tmp_path / "bob")
     for p in paths:
         text = p.read_bytes().decode("utf-8")
-        assert "bad � surrogate" in text or "bad \\ufffd surrogate" in text
-    assert json.loads(paths[2].read_text(encoding="utf-8"))["modules"][0]["summary"] == "bad � surrogate"
+        assert "bad \ufffd surrogate" in text
+    assert json.loads(paths[2].read_text(encoding="utf-8"))["modules"][0]["summary"] == "bad \ufffd surrogate"
 
 
 def test_write_report_into_a_folder(report, tmp_path):
@@ -1497,6 +1497,12 @@ def test_markdown_bare_urls_become_clean_links():
     rep.modules[0].tables = [Table("t", ["a", "b"], [["https://e.com/a|b", "x"]], ["text", "text"])]
     row = next(l for l in render_markdown(rep).splitlines() if "e.com" in l)
     assert len(re.findall(r"(?<!\\)\|", row)) == 3 and "%7C" in row
+    import time
+
+    start = time.perf_counter()
+    md_text("https://a.com/" + ")" * 100_000)  # trimming unbalanced ")" stays linear
+    assert time.perf_counter() - start < 1.0
+    assert md_text("ftp://e.com/x_y") == "ftp\\://e.com/x_y"  # GitHub would autolink ftp: only http(s) may link
 
 
 def test_cut_labels_keep_their_distinguishing_end():
