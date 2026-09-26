@@ -595,7 +595,33 @@ def puzzle_motifs(fen: str, moves_uci: list[str]) -> list[Motif]:
     return [m for m in detect_moves(board.fen(), solution, max_plies=len(solution)) if m.side == "first"]
 
 
-def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = None) -> list[Motif]:
+def _forcing_reach(fen: str, moves_uci: list[str], first: int) -> int:
+    """The last ply index a pattern of the side moving at index ``first`` can sit at and still be forced.
+
+    That side's first move always counts. A later move of theirs counts only when each of their moves before it
+    was a check or a capture (the other side's replies are the engine's best defence, not forced moves). The
+    reply to the first quiet move is still in reach: it is where a pattern set up by that move lands.
+    """
+    try:
+        board = _board(fen)
+    except (ValueError, TypeError):
+        return first
+    for i, uci in enumerate(moves_uci):
+        try:
+            move = board.parse_uci(uci)
+        except (ValueError, TypeError, AttributeError):
+            return max(i - 1, first)
+        if i >= first and (i - first) % 2 == 0 and not (board.is_capture(move) or board.gives_check(move)):
+            return i + 1
+        board.push(move)
+    return len(moves_uci)
+
+
+_MATES = frozenset({"backRankMate", "smotheredMate"})
+
+
+def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = None, *,
+                forcing_only: bool = True) -> list[Motif]:
     """Motifs along a coaching line. ``role`` is "best" (what you missed: yours are the patterns you carry out)
     or "refutation" (what your move allowed: the opponent's patterns). Sets ``line`` and ``side`` ("you" /
     "opponent").
@@ -608,16 +634,26 @@ def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = N
     ``previous_fen`` (optional) is the position before your opponent's last move, the one that led to
     ``line.fen``. Pass it when the game is at hand: along the best line it tells whether taking a piece on your
     first move wins a hanging piece or just completes a trade (see ``detect_moves``).
+
+    ``forcing_only`` (default): an engine line is not a puzzle, so a pattern deep in it may only exist because
+    the other side cooperates. Keep a pattern only when it is on the carrier's first move of the line, or every
+    earlier move of the carrier was a check or a capture (``_forcing_reach``). Mates are forced by definition
+    and always kept. (4.e4? in the Queen's Gambit Accepted: the best line 4.d5 Na5 5.Qa4+ has a fork only if
+    Black plays 4...Na5, so it is not "a fork you missed".)
     """
     if role not in ("best", "refutation"):
         raise ValueError(f"role must be 'best' or 'refutation', not {role!r}")
     if line is None or not line.fen or not line.moves_uci:  # no line from the engine: nothing to name
         return []
     want = "first" if role == "best" else "second"
+    moves = list(line.moves_uci)
+    reach = _forcing_reach(line.fen, moves, 0 if role == "best" else 1) if forcing_only else len(moves)
     out = []
-    for motif in _safe_detect(line.fen, list(line.moves_uci), LINE_PLIES, MATE_PLIES, previous_fen):
+    for motif in _safe_detect(line.fen, moves, LINE_PLIES, MATE_PLIES, previous_fen):
         if motif.side != want:
             continue
+        if motif.ply > reach and not motif.theme.startswith("mate") and motif.theme not in _MATES:
+            continue  # only there if the other side cooperates
         motif.line = role
         motif.side = "you" if want == "first" else "opponent"
         out.append(motif)

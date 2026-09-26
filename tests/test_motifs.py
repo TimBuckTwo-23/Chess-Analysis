@@ -427,3 +427,20 @@ def test_detect_line_speed():
 def test_module_constants_consistent():
     assert motifs.MATE_PLIES >= 2 * motifs.MAX_MATE_IN
     assert motifs.LINE_PLIES == 8
+
+
+def test_patterns_that_need_the_other_side_to_cooperate_are_not_named():
+    # 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6: the best line 4.d5 Na5 5.Qa4+ c6 6.b4 has a queen fork on move 5, but only
+    # because Black chose 4...Na5: 4.d5 is quiet, so the fork is not "a fork you missed".
+    from chess_insights.models import Line
+
+    fen = "r1bqkbnr/ppp1pppp/2n5/8/2pP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4"
+    line = Line(fen=fen, moves_uci=["d4d5", "c6a5", "d1a4", "c7c6", "b2b4"])
+    loose = {m.theme for m in motifs.detect_line(line, "best", forcing_only=False)}
+    assert "fork" in loose
+    assert "fork" not in {m.theme for m in motifs.detect_line(line, "best")}
+    # a forcing start keeps later patterns: 2.exd5 (a capture) Qxd5 3.Nc3 (quiet, but still in reach)
+    scandi = "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+    assert motifs._forcing_reach(scandi, ["e4d5", "d8d5", "b1c3", "d5a5"], 0) == 3
+    assert motifs._forcing_reach(fen, ["d4d5", "c6a5", "d1a4"], 0) == 1
+    assert motifs._forcing_reach(fen, ["e2e4", "d8d4"], 1) == 2  # the refutation's side: its first move counts
