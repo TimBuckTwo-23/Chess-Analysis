@@ -118,11 +118,23 @@ _TOPIC_PATTERNS = (
 )
 
 
+# "You allow hanging pieces more often than your opponents" (the coaching's motif profile) and "You leave
+# material hanging more often than your opponents" (the engine review's tags) measure nearly the same thing.
+_HUNG_PATTERNS = (
+    re.compile(r"^tactics\.(strength|weakness)\.motif-allowed\.hangingPiece$"),
+    re.compile(r"^engine\.(strength|weakness)\.hung-material$"),
+)
+
+
 def topic_key(ins: Insight) -> str:
     for rx in _TOPIC_PATTERNS:
         m = rx.match(ins.id)
         if m:
             return f"opening:{m.group(1)}:{m.group(2)}:{m.group(3)}"
+    for rx in _HUNG_PATTERNS:
+        m = rx.match(ins.id)
+        if m:
+            return f"hung-material:{m.group(1)}"
     return ins.id
 
 
@@ -340,6 +352,16 @@ def target_for(ins: Insight) -> tuple[str, dict[str, Any]]:
             f"Cut your {what}{where} to your opponents' {ev.get('opp_per100', 0):.1f} per 100 moves "
             f"(now {ev['per100']:.1f}).",
             {"metric": f"{what}{where} per 100 moves", "value": ev["per100"]},
+        )
+    if ".motif-" in i and ev.get("theme") and _num(ev.get("per100")) is not None:
+        from .coach.profile import motif_name
+
+        names = motif_name(str(ev["theme"]), plural=True)
+        verb = "Miss" if ev.get("motif_kind") == "missed" else "Allow"
+        return (
+            f"{verb} no more {names} than your opponents: {ev.get('opp_per100', 0):.2f} per 100 moves "
+            f"(now {ev['per100']:.2f}).",
+            {"metric": f"{names} {verb.lower()}ed per 100 moves", "value": ev["per100"]},
         )
     if i.startswith("mistakes.weakness") and ev.get("best"):
         best, played = _move_label(ev.get("fen"), ev["best"]), _move_label(ev.get("fen"), ev.get("move"))

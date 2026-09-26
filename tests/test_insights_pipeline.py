@@ -336,3 +336,23 @@ def test_same_opening_found_by_two_modules_is_merged_in_the_headline():
     assert merged.example_games == ["https://x/2", "https://x/1"]
     assert merged.evidence["also_found_by"] == [a.id]
     assert b.study == ["Learn the Advance line"] and "also_found_by" not in b.evidence  # module findings untouched
+
+
+def test_hanging_piece_motif_and_hung_material_findings_are_one_topic():
+    from chess_insights.insights import target_for, topic_key
+    from chess_insights.models import Insight
+
+    motif = Insight(id="tactics.weakness.motif-allowed.hangingPiece", kind="weakness", category="tactics",
+                    title="t", detail="", severity=0.5, confidence=0.9,
+                    evidence={"theme": "hangingPiece", "motif_kind": "allowed", "per100": 1.24, "opp_per100": 0.62})
+    engine = Insight(id="engine.weakness.hung-material", kind="weakness", category="tactics", title="t", detail="",
+                     severity=0.4, confidence=0.9)
+    assert topic_key(motif) == topic_key(engine) == "hung-material:weakness"
+    fork = Insight(id="tactics.weakness.motif-missed.fork", kind="weakness", category="tactics", title="t",
+                   detail="", severity=0.5, confidence=0.9,
+                   evidence={"theme": "fork", "motif_kind": "missed", "per100": 1.24, "opp_per100": 0.62})
+    assert topic_key(fork) == fork.id
+    sentence, baseline = target_for(fork)
+    assert sentence == "Miss no more forks than your opponents: 0.62 per 100 moves (now 1.24)."
+    assert baseline == {"metric": "forks missed per 100 moves", "value": 1.24}
+    assert target_for(motif)[0].startswith("Allow no more hanging pieces than your opponents")
