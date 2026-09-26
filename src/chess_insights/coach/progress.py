@@ -10,12 +10,13 @@ badge) comes only from a test; everything else is shown without one.
   previous report's games plus newer ones (the workflow analyses every game each time), the newer games' count is
   the difference, and the share of the games since the previous report (its ``date_to``) is compared with the share
   before: "rated games started 23:00–03:00: 31% of your 600 games before 12 Sep → 7% of your 100 games since".
-  The test is a two-proportion z-test (``stats.two_proportion_test``) with sessions as the unit: games in one
-  session share their time of day and much else, so they are not independent, and each period's counts are scaled
-  to its number of sessions (a conservative design effect). It needs at least ``MIN_NEW_GAMES`` new games, and the
-  p-values of the tested lines are adjusted together (Benjamini-Hochberg) and judged at ``PROGRESS_ALPHA``. A line
-  that passes gets ``improved`` True (the change is for the better) or False (for the worse); one that doesn't says
-  "no clear change yet" and gets no badge.
+  The test is a two-proportion z-test (``stats.two_proportion_test``) on each period's effective number of games
+  (``effective_units``): games in one session share their time of day and much else, so they are not independent,
+  and the test counts a period's games as if every session's games all went the same way, weighting long sessions
+  by their size (Kish's effective sample size of the sessions). It needs at least ``MIN_NEW_GAMES`` new games, and
+  the p-values of the tested lines are adjusted together (Benjamini-Hochberg) and judged at ``PROGRESS_ALPHA``. A
+  line that passes gets ``improved`` True (the change is for the better) or False (for the worse); one that doesn't
+  says "no clear change yet" and gets no badge.
 * Every other metric (the share of the clock, the score against your rating, errors per 100 moves ...) is computed
   over all the report's games, most of them in both reports, so its two numbers are shown side by side with the
   number of new games, and no verdict.
@@ -27,6 +28,7 @@ higher score against your rating are all better.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
@@ -141,13 +143,22 @@ def _day(moment: datetime, year: Optional[int] = None) -> str:
     return f"{moment.day} {moment:%b}" + (f" {moment.year}" if year is not None and moment.year != year else "")
 
 
-def sessions(games: Sequence[Game], gap_min: float = SESSION_GAP_MIN) -> int:
-    """How many sessions ``games`` were played in: live games with pauses of at most ``gap_min`` minutes between
-    them share one; each daily game is its own."""
+def session_sizes(games: Sequence[Game], gap_min: float = SESSION_GAP_MIN) -> list[int]:
+    """Games per session: live games with pauses of at most ``gap_min`` minutes between them share one (as in the
+    habits section); each daily game is its own."""
     from ..analysis.habits import build_timeline
 
-    live = build_timeline(games, session_gap_min=gap_min)
-    return len({t.session for t in live}) + sum(1 for g in games if g.time_class == "daily")
+    sizes = Counter(t.session for t in build_timeline(games, session_gap_min=gap_min))
+    return list(sizes.values()) + [1] * sum(1 for g in games if g.time_class == "daily")
+
+
+def effective_units(games: Sequence[Game], gap_min: float = SESSION_GAP_MIN) -> float:
+    """How many independent games ``games`` are worth when each session's games may all go the same way: Kish's
+    effective sample size of the sessions, (sum of sizes)² / (sum of squared sizes). The number of sessions when
+    they are all the same size, fewer when a few long sessions hold most of the games."""
+    sizes = session_sizes(games, gap_min)
+    squares = sum(n * n for n in sizes)
+    return sum(sizes) ** 2 / squares if squares else 0.0
 
 
 @dataclass
@@ -157,8 +168,8 @@ class Periods:
     since: str
     before: int  # games in the previous report
     new: int  # games since
-    before_sessions: int = 0
-    new_sessions: int = 0
+    before_units: float = 0.0  # effective_units of each period's games
+    new_units: float = 0.0
     # the report's games are exactly the previous report's plus newer ones, so a count's difference is the newer
     # games' count (known only with the games)
     comparable: bool = False
@@ -184,7 +195,7 @@ def periods(report: Report, previous: dict[str, Any], games: Optional[Sequence[G
         and len(earlier) + len(later) == int(report.n_games)
         and (prev_from is None or first is None or abs((first - prev_from).total_seconds()) < 1)
     )
-    return Periods(since, len(earlier), len(later), sessions(earlier), sessions(later), comparable)
+    return Periods(since, len(earlier), len(later), effective_units(earlier), effective_units(later), comparable)
 
 
 @dataclass
@@ -212,12 +223,11 @@ def _count_line(metric: str, before: float, now: float, p: Periods) -> tuple[Pro
     text = (f"{label}: {pct(rate_before)} of your {p.before} {_games(p.before)} before {p.since} → "
             f"{pct(rate_new)} of your {p.new} {_games(p.new)} since")
     item = ProgressItem("", metric, before, now, text)
-    if not p.before or not p.before_sessions or not p.new_sessions or direction(metric) is None:
+    if not p.before or not p.before_units or not p.new_units or direction(metric) is None:
         item.text += " (not compared)"
         return item, None
-    # sessions as the unit: each period's counts scaled to its number of sessions
-    test = two_proportion_test(fresh * p.new_sessions / p.new, p.new_sessions,
-                               before * p.before_sessions / p.before, p.before_sessions)
+    # each period's counts scaled to its effective number of games (sessions, weighted by size)
+    test = two_proportion_test(rate_new * p.new_units, p.new_units, rate_before * p.before_units, p.before_units)
     return item, _Tested(item, test.p_value, rate_new - rate_before)
 
 

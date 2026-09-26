@@ -158,7 +158,17 @@ def test_games_in_one_session_count_as_one_unit():
     progress.annotate(report, CoachConfig(previous=previous), games)
     [line] = report.coaching.progress
     assert line.improved is None and line.text.endswith("→ 0% of your 40 games since (no clear change yet)")
-    assert progress.sessions(games[100:]) == 4 and progress.sessions(games[:100]) == 100
+    assert progress.session_sizes(games[100:]) == [10, 10, 10, 10] and len(progress.session_sizes(games[:100])) == 100
+    assert progress.effective_units(games[100:]) == 4 and progress.effective_units(games[:100]) == 100
+
+
+def test_a_few_long_sessions_are_worth_fewer_games_than_many_short_ones():
+    """Kish's effective sample size: ten sessions of one game and one of ten are worth 400 / 110 = 3.6 games."""
+    games = played([False] * 10, T0) + played([False] * 10, T0 + timedelta(days=30), per_session=10)
+    assert sorted(progress.session_sizes(games)) == [1] * 10 + [10]
+    assert progress.effective_units(games) == pytest.approx(400 / 110)
+    daily = [make_game(time_class="daily", base_seconds=86400, end_time=T0 + timedelta(days=i)) for i in range(3)]
+    assert progress.session_sizes(daily) == [1, 1, 1] and progress.effective_units([]) == 0
 
 
 def test_too_few_new_games_are_not_compared():
