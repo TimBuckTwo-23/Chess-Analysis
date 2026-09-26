@@ -7,13 +7,19 @@ Four habits, measured for both players in every standard game:
 * knights and bishops that had left their starting squares by move 10, of 4;
 * pawn moves among the first 10 moves.
 
-Every habit is compared with your opponent's in the same game, so the opening, the format, the clock, the
-rating gap and the result are the same for both sides. Games are the unit of the tests (a paired test on the
-per-game difference, :func:`paired_share_test`), with White and Black games weighted equally because White
-moves first. The four tests are one family: Benjamini-Hochberg adjusted, judged at ``stats.STRICT_ALPHA``
-under the project-wide rule (``stats.significance``), and a finding also needs a gap big enough to matter
-(``Thresholds``). Findings are associations ("you castle later than your opponents"), never causes: an
-opening you choose, or opponents who attack early, shows up here as well.
+Every habit is compared with your opponent's in the same game, so the format, the clock, the rating gap and
+the result are the same for both sides. Games are the unit of the tests (a paired test on the per-game
+difference, :func:`paired_share_test`), with White and Black games weighted equally because White moves
+first. The four tests are one family: Benjamini-Hochberg adjusted, judged at ``stats.STRICT_ALPHA`` under the
+project-wide rule (``stats.significance``), and a finding also needs a gap big enough to matter
+(``Thresholds``). Findings are associations ("you castle later than your opponents"), never causes.
+
+The opening is the same game for both sides but not the same side of it: you choose your side of an asymmetric
+line (in the Caro-Kann Black usually castles later than White, in the Ruy Lopez earlier), so your repertoire
+alone can open a gap. The fold rule (as the colour claim's in ``results``) guards against it: for each would-be
+finding, the (colour, opening family) group that contributes most to the gap is left out and the habit tested
+again (the family's other p-values unchanged, BH again); when the finding no longer passes, it is an observation
+worded "Mostly your <family> games: ...", with that group against your other games, never a strength or weakness.
 
 A game counts for a habit only when both players made the moves it looks at (20 plies for the habits
 measured by move 10, 16 for the queen), so a game that ended on move 7 is not "not castled" for either side;
@@ -65,6 +71,10 @@ MINOR_HOMES = {
     chess.BLACK: (chess.B8, chess.G8, chess.C8, chess.F8),
 }
 COLOURS = {"white": chess.WHITE, "black": chess.BLACK}
+OTHER_FAMILY = "unnamed opening"  # games without an opening name form one group
+FOLD_GROUPS = 2  # opening groups the fold rule leaves out, one after the other (a main line with each colour)
+MIN_GROUP_GAMES = 5  # opening groups listed in a chart's table
+MAX_GROUP_ROWS = 6
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,11 @@ class Opening:
     @property
     def my_color(self) -> chess.Color:
         return COLOURS[self.game.color]
+
+    @property
+    def group(self) -> tuple[str, str]:
+        """(your colour, opening family): the repertoire group of the fold rule."""
+        return self.game.color, self.game.opening_family or self.game.opening or OTHER_FAMILY
 
     def board_after(self, ply: int) -> chess.Board:
         """The position after ply index ``ply`` (the start position for -1)."""
@@ -328,6 +343,59 @@ class HabitResult:
         return {tc: {"n": len(gs), "you": self.average(True, gs), "opponents": self.average(False, gs)}
                 for tc, gs in self.by_format()}
 
+    def by_group(self) -> dict[tuple[str, str], list[Opening]]:
+        """(your colour, opening family) -> games, most games first."""
+        groups: dict[tuple[str, str], list[Opening]] = {}
+        for o in self.games:
+            groups.setdefault(o.group, []).append(o)
+        return dict(sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])))
+
+    def group_stats(self, limit: int = MAX_GROUP_ROWS) -> list[dict[str, Any]]:
+        """The biggest opening groups (at least ``MIN_GROUP_GAMES`` games): colour, family, games, you, opponents."""
+        return [
+            {"colour": c, "family": f, "n": len(gs), "you": self.average(True, gs),
+             "opponents": self.average(False, gs)}
+            for (c, f), gs in list(self.by_group().items())[:limit]
+            if len(gs) >= MIN_GROUP_GAMES
+        ]
+
+    def contributions(self) -> dict[tuple[str, str], float]:
+        """Each opening group's part of the colour-balanced gap (``test.mean``, in shares): the sum of its games'
+        differences over its colour's games, over the number of colours (as :func:`paired_share_test` weighs)."""
+        colours: dict[str, int] = {}
+        for o in self.games:
+            colours[o.game.color] = colours.get(o.game.color, 0) + 1
+        used = {c: n for c, n in colours.items() if n >= 2}
+        out: dict[tuple[str, str], float] = {}
+        for key, gs in self.by_group().items():
+            if key[0] in used:
+                diff = sum(self.habit.count(o.me) - self.habit.count(o.opp) for o in gs) / self.habit.scale
+                out[key] = diff / used[key[0]] / len(used)
+        return out
+
+
+@dataclass
+class Fold:
+    """The fold rule's check of one would-be finding: the opening groups left out, one after the other, each the
+    biggest part of the gap left, and the habit tested again without them (``holds``: the finding still passes)."""
+
+    groups: list[tuple[str, str, list[Opening]]]  # (your colour, opening family, its games)
+    without: HabitResult  # the habit on the other games, with its BH-adjusted p-value
+    holds: bool
+    too_few: bool = False  # the other games are fewer than the minimum: no habit can be told from the opening
+
+    @property
+    def games(self) -> list[Opening]:
+        return [o for _, _, gs in self.groups for o in gs]
+
+    def names(self) -> str:
+        """'Caro-Kann Defense games with Black' / 'Sicilian Defense games with White and King's Indian Defense
+        games with Black' / 'Caro-Kann Defense and French Defense games with Black'."""
+        colours = {c for c, _, _ in self.groups}
+        if len(colours) == 1:
+            return f"{' and '.join(f for _, f, _ in self.groups)} games with {self.groups[0][0].capitalize()}"
+        return " and ".join(f"{f} games with {c.capitalize()}" for c, f, _ in self.groups)
+
 
 # --------------------------------------------------------------------------- charts
 _UNIT_NOTE = {
@@ -346,12 +414,15 @@ def habit_chart(r: HabitResult) -> Chart:
         rows.append(("All games", r.games))
     you = [r.average(True, gs) for _, gs in rows]
     them = [r.average(False, gs) for _, gs in rows]
+    openings = [[_group_label(g["colour"], g["family"]), g["n"], g["you"], g["opponents"]] for g in r.group_stats()]
     table = Table(
         title=f"{h.label}: you vs your opponents",
-        columns=["Format", "Games", "You", "Opponents"],
-        rows=[[label, len(gs), a, b] for (label, gs), a, b in zip(rows, you, them, strict=True)],
+        columns=["Games", "Count", "You", "Opponents"],
+        rows=[[label, len(gs), a, b] for (label, gs), a, b in zip(rows, you, them, strict=True)] + openings,
         formats=["text", "int", h.value_format, h.value_format],
-        note=f"Games in which both players made at least {h.by} moves; you and your opponent in the same games.",
+        note=f"Games in which both players made at least {h.by} moves; you and your opponent in the same games."
+        + (" Then your most-played openings: the line you choose can set when each side castles and develops."
+           if openings else ""),
     )
     return comparison_chart(
         f"{h.label}: you vs your opponents",
@@ -362,6 +433,36 @@ def habit_chart(r: HabitResult) -> Chart:
         "their own.",
         kind="bar",
         table=table,
+    )
+
+
+def _group_label(colour: str, family: str) -> str:
+    """'Caro-Kann Defense (Black)'."""
+    return f"{family} ({colour.capitalize()})"
+
+
+def fold_chart(r: HabitResult, fold: Fold) -> Chart:
+    """The opening groups that make most of the gap against your other games and all games: you vs your
+    opponents."""
+    h = r.habit
+    rows = [(_group_label(c, f), gs) for c, f, gs in fold.groups]
+    rows += [("Your other games", fold.without.games), ("All games", r.games)]
+    you = [r.average(True, gs) for _, gs in rows]
+    them = [r.average(False, gs) for _, gs in rows]
+    families = " and ".join(f for _, f, _ in fold.groups)
+    return comparison_chart(
+        f"{h.label}: your {families} games against the rest",
+        [label for label, _ in rows],
+        [("You", you), ("Opponents", them)],
+        value_format=h.value_format,
+        note=f"{h.label}, {_UNIT_NOTE[h.key]}. You and your opponent in the same games.",
+        kind="bar",
+        table=Table(
+            title=f"{h.label}: your {families} games against the rest",
+            columns=["Games", "Count", "You", "Opponents"],
+            rows=[[label, len(gs), a, b] for (label, gs), a, b in zip(rows, you, them, strict=True)],
+            formats=["text", "int", h.value_format, h.value_format],
+        ),
     )
 
 
@@ -630,8 +731,8 @@ def habit_diagram(r: HabitResult, o: Opening, kind: str = "weakness") -> Optiona
     )
 
 
-def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
-    """A strength or weakness when the gap passes the claim rule and is big enough to matter."""
+def _passes(r: HabitResult, th: Thresholds) -> Optional[tuple[str, float]]:
+    """(kind, confidence) when the gap passes the claim rule and is big enough to matter; None otherwise."""
     h = r.habit
     if r.n < th.min_games:
         return None
@@ -641,17 +742,108 @@ def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
     kind = "strength" if (r.gap > 0) == (h.good > 0) else "weakness"
     if kind == "strength" and not h.strength:
         return None
-    title, study = _TEXT[(h.key, kind)]
-    # severity from the gap pulled toward 0 by its noise (winner's curse), in the habit's own units
+    return kind, confidence
+
+
+def fold_check(r: HabitResult, th: Thresholds, family: dict[str, float], steps: int = FOLD_GROUPS) -> Optional[Fold]:
+    """The fold rule for a habit that passes the claim rule (None for any other): leave out the (colour, opening
+    family) group that contributes most to the gap and test the habit again; while it still passes, do the same
+    with the biggest part left, up to ``steps`` groups (your main line with each colour, say). ``family`` holds
+    the raw p-values of the habits judged together; each re-test's replaces this habit's, BH-adjusted again."""
+    passed = _passes(r, th)
+    if passed is None:
+        return None
+    h, sign = r.habit, 1.0 if r.gap > 0 else -1.0
+    current, groups = r, []
+    for _ in range(steps):
+        shares = current.contributions()
+        key = max(shares, key=lambda k: sign * shares[k]) if shares else None
+        if key is None or sign * shares[key] <= 0.0:
+            break
+        groups.append((key[0], key[1], [o for o in current.games if o.group == key]))
+        rest = [o for o in current.games if o.group != key]
+        test = paired_share_test([(h.count(o.me), h.count(o.opp), o.game.color) for o in rest], h.scale)
+        raw = {**family, h.key: test.p_value}
+        names = sorted(raw)
+        adjusted = dict(zip(names, bh_adjust([raw[k] for k in names]), strict=True))
+        current = HabitResult(h, rest, test, adjusted[h.key])
+        again = _passes(current, th)
+        if again is None or again[0] != passed[0]:
+            return Fold(groups, current, holds=False, too_few=current.n < th.min_games)
+    return Fold(groups, current, holds=True, too_few=current.n < th.min_games) if groups else None
+
+
+def _gap_text(h: Habit, gap: float) -> str:
+    """'4 points' / '0.2 pieces' / '0.3 pawn moves'."""
+    if h.binary:
+        return f"{abs(gap) * 100:.0f} points"
+    return f"{abs(gap):.1f} " + ("pieces" if h.key == "minors" else "pawn moves")
+
+
+def _group_text(r: HabitResult, games: Sequence[Opening]) -> str:
+    """'you castled by move 10 in 2% of them, your opponents in 47%' (the games of one opening group)."""
+    h = r.habit
+    you, them = h.number(r.average(True, games)), h.number(r.average(False, games))
+    if h.key == "castled":
+        return f"you castled by move {h.by} in {you} of them, your opponents in {them}"
+    if h.key == "early_queen":
+        return f"you brought your queen out early in {you} of them, your opponents in {them}"
+    if h.key == "minors":
+        return f"you had {you} of 4 knights and bishops out by move {h.by}, your opponents {them}"
+    return f"you made {you} pawn moves in your first {h.by}, your opponents {them}"
+
+
+_BOOK = {  # (habit, kind the gap would have been) -> what the opening's main lines would do too
+    ("castled", "weakness"): "castle as late",
+    ("castled", "strength"): "castle as early",
+    ("early_queen", "weakness"): "bring the queen out as early",
+    ("early_queen", "strength"): "keep the queen at home as long",
+    ("minors", "weakness"): "develop the knights and bishops as slowly",
+    ("minors", "strength"): "develop the knights and bishops as fast",
+    ("pawns", "weakness"): "make as many early pawn moves",
+}
+
+
+def fold_observation(r: HabitResult, fold: Fold, kind: str, confidence: float) -> Insight:
+    """A would-be finding that the fold rule traced to one or two opening groups: an observation about them."""
+    h = r.habit
+    held = HabitResult(h, fold.games, r.test)
+    shown = _examples(held, kind)
+    rest = fold.without
+    one = len(fold.groups) == 1
+    usual = f"the way {'that opening is' if one else 'those openings are'} usually played"
+    if not rest.n:
+        after = f"All of them are {'that opening' if one else 'those openings'}, so a habit of yours can't be told " \
+                f"apart from {usual}."
+    elif fold.too_few:
+        after = f"Your other {rest.n} games are too few to tell a habit of yours from {usual}."
+    else:
+        after = (
+            f"Without them the gap is {_gap_text(h, rest.gap)} ({h.value_text(r.average(True, rest.games))} "
+            f"against {h.value_text(r.average(False, rest.games))} in {rest.n} games), too small or unclear to call "
+            f"a {kind}: {usual} is the likelier reason, rather than a habit of yours."
+        )
+    parts = " and ".join(
+        f"your {f} games with {c.capitalize()} ({len(gs)} game{'s' if len(gs) != 1 else ''}: "
+        f"{h.value_text(r.average(True, gs))} against {h.value_text(r.average(False, gs))})"
+        for c, f, gs in fold.groups
+    )
+    colours = {c for c, _, _ in fold.groups}
+    if len(colours) == 1:
+        colour = fold.groups[0][0].capitalize()
+        title = (f"Mostly your {' and '.join(f for _, f, _ in fold.groups)} games: with {colour} "
+                 f"{_group_text(r, fold.games)}")
+        lines = f"the opening's main lines for {colour}"
+    else:
+        title = f"Mostly your {fold.names()}: {_group_text(r, fold.games)}"
+        lines = "those openings' main lines"
     shrunk = shrink_effect(r.test.mean, r.test.se, prior_sd=h.full / h.unit / 2.0) * h.unit
-    shown = _examples(r, kind)
-    target, metric = _target(r)
     return Insight(
-        id=f"{KEY}.{kind}.{h.key.replace('_', '-')}",
-        kind=kind,
+        id=f"{KEY}.observation.{h.key.replace('_', '-')}",
+        kind="observation",
         category="structure",
         title=title,
-        detail=_detail(r),
+        detail=f"{_detail(r)} Most of that gap comes from {parts}. {after}",
         severity=clamp(abs(shrunk) / h.full),
         confidence=confidence,
         evidence={
@@ -662,10 +854,66 @@ def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
             "gap": r.gap,
             "p_value": r.test.p_value,
             "p_adjusted": r.p_adjusted,
+            "would_be": kind,
+            "groups": [{"colour": c, "family": f, "n": len(gs), "you": r.average(True, gs),
+                        "opponents": r.average(False, gs)} for c, f, gs in fold.groups],
+            "without": {"n": rest.n, "you": r.average(True, rest.games), "opponents": r.average(False, rest.games),
+                        "gap": rest.gap if rest.n else None, "p_value": rest.test.p_value,
+                        "p_adjusted": rest.p_adjusted},
+            "by_opening": r.group_stats(),
             "by_format": r.format_stats(),
-            "metric": metric,
-            "target": target,
         },
+        study=[
+            f"Compare your {fold.names()} with {lines}: if those {_BOOK[(h.key, kind)]} as your games do, the "
+            "gap comes from the opening, not from a habit of yours.",
+            f"Replay one of the linked games at move {h.by} and check your moves against the main line.",
+        ],
+        example_games=[o.game.url for o in shown if o.game.url][:MAX_EXAMPLES],
+        formats=format_counts(o.game for o in fold.games),
+        chart=fold_chart(r, fold),
+        diagram=habit_diagram(r, shown[0], kind) if shown else None,
+    )
+
+
+def habit_insight(r: HabitResult, th: Thresholds, fold: Optional[Fold] = None) -> Optional[Insight]:
+    """A strength or weakness when the gap passes the claim rule and is big enough to matter; an observation
+    about one opening group when the fold rule (``fold``, from :func:`fold_check`) traces the gap to it."""
+    passed = _passes(r, th)
+    if passed is None:
+        return None
+    kind, confidence = passed
+    if fold is not None and not fold.holds:
+        return fold_observation(r, fold, kind, confidence)
+    h = r.habit
+    title, study = _TEXT[(h.key, kind)]
+    # severity from the gap pulled toward 0 by its noise (winner's curse), in the habit's own units
+    shrunk = shrink_effect(r.test.mean, r.test.se, prior_sd=h.full / h.unit / 2.0) * h.unit
+    shown = _examples(r, kind)
+    target, metric = _target(r)
+    evidence: dict[str, Any] = {
+        "habit": h.key,
+        "n": r.n,
+        "you": r.average(True),
+        "opponents": r.average(False),
+        "gap": r.gap,
+        "p_value": r.test.p_value,
+        "p_adjusted": r.p_adjusted,
+        "by_format": r.format_stats(),
+        "by_opening": r.group_stats(),
+        "metric": metric,
+        "target": target,
+    }
+    if fold is not None:  # the gap holds without the opening groups that contribute most to it
+        evidence["fold"] = _fold_stats(fold)
+    return Insight(
+        id=f"{KEY}.{kind}.{h.key.replace('_', '-')}",
+        kind=kind,  # type: ignore[arg-type]
+        category="structure",
+        title=title,
+        detail=_detail(r),
+        severity=clamp(abs(shrunk) / h.full),
+        confidence=confidence,
+        evidence=evidence,
         study=study,
         example_games=[o.game.url for o in shown if o.game.url][:MAX_EXAMPLES],
         formats=format_counts(o.game for o in r.games),
@@ -695,9 +943,12 @@ def _summary(by: dict[str, HabitResult], insights: Sequence[Insight], skipped: i
     if main.n < th.min_games:
         return (f"Not enough data yet: only {main.n} games reached move {th.castle_by}, so treat these numbers as a "
                 f"snapshot. {text}")
-    ranked = sorted(insights, key=lambda i: -i.priority)
+    ranked = sorted((i for i in insights if i.kind != "observation"), key=lambda i: -i.priority)
     if ranked:
         return f"{text} Key finding: {ranked[0].title}."
+    if any(i.kind == "observation" for i in insights):
+        return (f"{text} None of the gaps is a habit of yours: the clearest comes mostly from one of your openings "
+                "(below).")
     return f"{text} None of the gaps is big and clear enough to call a strength or weakness."
 
 
@@ -715,6 +966,14 @@ def _kpis(by: dict[str, HabitResult], th: Thresholds) -> list[Kpi]:
         hint = prefix + (f"opponents {r.habit.number(theirs)}" if theirs is not None else "")
         kpis.append(Kpi(label, r.average(True), r.habit.value_format, hint=hint.rstrip("; ")))
     return kpis
+
+
+def _fold_stats(fold: Optional[Fold]) -> Optional[dict[str, Any]]:
+    if fold is None:
+        return None
+    return {"groups": [{"colour": c, "family": f, "n": len(gs)} for c, f, gs in fold.groups], "holds": fold.holds,
+            "n_without": fold.without.n, "gap_without": fold.without.gap if fold.without.n else None,
+            "p_value_without": fold.without.test.p_value, "p_adjusted_without": fold.without.p_adjusted}
 
 
 def analyze(ctx: AnalysisContext) -> ModuleResult:
@@ -743,7 +1002,9 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     judged = [r for r in results if r.n >= th.min_games]
     for r, p in zip(judged, bh_adjust([r.test.p_value for r in judged]), strict=True):
         r.p_adjusted = p
-    insights = [i for i in (habit_insight(r, th) for r in results) if i]
+    family = {r.habit.key: r.test.p_value for r in judged}
+    folds = {r.habit.key: fold_check(r, th, family) for r in results}
+    insights = [i for i in (habit_insight(r, th, folds[r.habit.key]) for r in results) if i]
     by = {r.habit.key: r for r in results}
     overview = overview_chart(results, th)
 
@@ -769,6 +1030,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                     "p_value": r.test.p_value,
                     "p_adjusted": r.p_adjusted,
                     "by_format": r.format_stats(),
+                    "by_opening": r.group_stats(),
+                    "fold": _fold_stats(folds[r.habit.key]),
                 }
                 for r in results
             },

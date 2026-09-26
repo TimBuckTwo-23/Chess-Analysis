@@ -14,7 +14,9 @@ effects are found much less often.
 The opening-habit claims (analysis/structure.py: castling, early queen moves, development,
 you against your opponents in the same games) get one 600-game world per effect: the tests
 are paired within each game, so realistic habit gaps are found at the size of an ordinary
-report. These runs name the module explicitly, whether or not pipeline.MODULES has it yet.
+report. A planted habit shows in every opening, so it survives the fold rule (the finding must
+still pass without the opening group that makes most of the gap). These runs name the module
+explicitly, whether or not pipeline.MODULES has it yet.
 
 POWER_RUNS=32 (optionally POWER_GAMES=600) re-measures those single-effect rates; it
 takes a few minutes per effect, so it only runs when asked for.
@@ -161,6 +163,8 @@ def test_planted_opening_habit_is_found_at_600_games(effect):
     assert hits, [(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses]
     # each finding carries its formats, its chart (you vs your opponents by format) and a board from one of its games
     assert all(i.confidence >= 0.5 and i.formats and i.chart and i.diagram and i.diagram.fen for i in hits)
+    # the fold rule ran: the gap holds without the opening group that contributes most to it
+    assert all(i.evidence["fold"]["p_adjusted_without"] <= 0.01 for i in hits)
     assert not found(report, category, keywords, kind="strength")
     # nothing else about the player's first moves
     others = [i.id for i in report.strengths + report.weaknesses if i.category == "structure" and i not in hits]

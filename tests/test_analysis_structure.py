@@ -30,6 +30,16 @@ QH5 = "e4 e5 Qh5 Nc6 Bc4 g6 Qf3 Nf6 Ne2 Bg7 Nbc3 O-O d3 d6 Bg5 Be6 h3 a6 a3 Rb8"
 # White: eight pawn moves in ten, knights out late (9.Ne2, 10.Nd2), bishops at home; Black: four pawn moves, castled
 PAWNY = "e4 e5 d4 Nc6 c3 Nf6 f3 d6 g3 Be7 h3 O-O a3 Re8 b3 Bf8 Ne2 h6 Nd2 a6".split()
 FORMATS = ["blitz", "blitz", "rapid", "bullet"]
+# Opening names to spread games over: a habit that shows in every opening survives the fold rule (leaving out the
+# opening groups that make most of the gap), while one confined to one or two openings becomes an observation.
+FAMILIES = ["Italian Game", "Vienna Game", "Scotch Game", "Four Knights Game", "Ruy Lopez Opening",
+            "Queen's Gambit", "Sicilian Defense", "French Defense"]
+
+
+def spread(moves, n: int, color: str, time_class: str) -> list:
+    """``n`` games with the same moves and colour, their opening names spread over ``FAMILIES``."""
+    return [make_game(moves_san=moves, color=color, time_class=time_class, opening_family=FAMILIES[k % 8])
+            for k in range(n)]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -44,7 +54,7 @@ def assert_consistent(mr: ModuleResult) -> None:
     assert all(k.format in VALUE_FORMATS for k in mr.kpis)
     for ins in mr.insights:
         assert ins.id.startswith(f"{mr.key}.{ins.kind}.") and ins.category in CATEGORIES
-        assert ins.kind in ("strength", "weakness")
+        assert ins.kind in ("strength", "weakness", "observation")
         assert 0.0 <= ins.severity <= 1.0 and 0.0 <= ins.confidence <= 1.0
         assert 2 <= len(ins.study) <= 4 and ins.title and ins.detail
         assert len(ins.example_games) <= 5 and all(u.startswith("https://") for u in ins.example_games)
@@ -60,12 +70,14 @@ def run(games, **options) -> ModuleResult:
 
 
 def uncastled_games(n: int, **kw) -> list:
-    """``n`` games in which you never castle by move 10 and your opponent does, alternating colours and formats."""
+    """``n`` games in which you never castle by move 10 and your opponent does, alternating colours and formats,
+    in four openings with each colour (a habit, not one opening's move order)."""
     games = []
     for k in range(n):
         color = "white" if k % 2 == 0 else "black"
         moves = WHITE_UNCASTLED if color == "white" else BLACK_UNCASTLED
-        games.append(make_game(moves_san=moves, color=color, time_class=FORMATS[k % 4], outcome="loss" if k % 3 else "win", **kw))
+        games.append(make_game(moves_san=moves, color=color, time_class=FORMATS[k % 4], outcome="loss" if k % 3 else "win",
+                               opening_family=FAMILIES[k // 2 % 4], **kw))
     return games
 
 
@@ -73,7 +85,7 @@ def castled_games(n: int) -> list:
     """The same games with the colours swapped: you castle, your opponent doesn't."""
     return [
         make_game(moves_san=WHITE_UNCASTLED if k % 2 else BLACK_UNCASTLED, color="black" if k % 2 else "white",
-                  time_class=FORMATS[k % 4], outcome="win" if k % 3 else "loss")
+                  time_class=FORMATS[k % 4], outcome="win" if k % 3 else "loss", opening_family=FAMILIES[k // 2 % 4])
         for k in range(n)
     ]
 
@@ -152,7 +164,12 @@ def test_castling_later_than_your_opponents_is_a_weakness_with_chart_formats_and
     assert ins.chart.labels == ["Bullet", "Blitz", "Rapid", "All games"]
     assert [s.name for s in ins.chart.series] == ["You", "Opponents"]
     assert ins.chart.series[1].values == [1.0, 1.0, 1.0, 1.0] and ins.chart.value_format == "pct"
-    assert ins.chart.table.rows[-1] == ["All games", 60, 0.0, 1.0]
+    assert ins.chart.table.rows[3] == ["All games", 60, 0.0, 1.0]
+    # ... then your most-played openings, by colour: the gap is in each (the fold rule keeps the finding)
+    assert ins.chart.table.rows[4] == ["Italian Game (Black)", 8, 0.0, 1.0] and len(ins.chart.table.rows) == 10
+    fold = ins.evidence["fold"]  # two groups left out, one after the other: the gap is the same without them
+    assert len(fold["groups"]) == 2 and fold["n_without"] == 60 - sum(g["n"] for g in fold["groups"])
+    assert fold["holds"] and fold["gap_without"] == pytest.approx(-1.0)
     # a board from the first example game (a loss): your king still at home after move 10, marked
     d = ins.diagram
     assert d is not None and d.link == ins.example_games[0] and d.time_class
@@ -183,7 +200,7 @@ def test_castling_earlier_is_a_strength():
 
 
 def test_early_queen_strip_marks_the_queen_when_it_is_chased():
-    mr = run([make_game(moves_san=QH5, color="white", time_class="blitz") for _ in range(40)])
+    mr = run(spread(QH5, 40, "white", "blitz"))
     queen = next(i for i in mr.insights if i.id == "structure.weakness.early-queen")
     d = queen.diagram
     assert d.title == "Your queen comes out on move 2" and d.orientation == "white"
@@ -194,7 +211,7 @@ def test_early_queen_strip_marks_the_queen_when_it_is_chased():
     assert [(m.square, m.kind) for m in strip.frames[3].marks] == [("h5", "target"), ("g6", "attacker")]
     # the same games from Black's side: your opponent's early queen move is a grey arrow, and the strip shows
     # your pawn chasing it
-    mr = run([make_game(moves_san=QH5, color="black", time_class="blitz") for _ in range(40)])
+    mr = run(spread(QH5, 40, "black", "blitz"))
     strength = next(i for i in mr.insights if i.id == "structure.strength.early-queen")
     d = strength.diagram
     assert d.title == "Your opponent's queen comes out on move 2" and d.orientation == "black"
@@ -204,7 +221,7 @@ def test_early_queen_strip_marks_the_queen_when_it_is_chased():
 
 
 def test_pawn_moves_and_development_boards_mark_the_squares_they_are_about():
-    mr = run([make_game(moves_san=PAWNY, color="white", time_class="rapid") for _ in range(40)])
+    mr = run(spread(PAWNY, 40, "white", "rapid"))
     by = {i.id: i for i in mr.insights}
     assert set(by) == {"structure.weakness.castled", "structure.weakness.minors", "structure.weakness.pawns"}
     pawns = by["structure.weakness.pawns"].diagram
@@ -233,7 +250,7 @@ def test_games_without_a_link_still_get_a_board():
 
 
 def test_early_queen_weakness_shows_the_queen_move_as_a_red_arrow():
-    mr = run([make_game(moves_san=QUEEN_EARLY, color="black", time_class="rapid") for _ in range(60)])
+    mr = run(spread(QUEEN_EARLY, 60, "black", "rapid"))
     queen = next(i for i in mr.insights if i.id == "structure.weakness.early-queen")
     assert queen.title == "You bring your queen out early more often than your opponents"
     assert queen.formats == {"rapid": 60} and queen.chart.labels == ["Rapid"]  # one format: no "All games" bar
@@ -304,6 +321,82 @@ def test_pipeline_lists_the_finding_and_plans_it_with_a_target():
     assert insights.STUDY_LIBRARY["structure"]["label"] == "Development & king safety"
 
 
+# --------------------------------------------------------------------------- the fold rule: habit or repertoire?
+def caro_kann_world() -> list:
+    """40 Caro-Kann games with Black in which you never castle by move 10 and your opponent does (the line's usual
+    move order, say), and 60 games in four other openings where both of you castle on move 6."""
+    caro = [make_game(moves_san=BLACK_UNCASTLED, color="black", time_class=FORMATS[k % 4],
+                      opening_family="Caro-Kann Defense", outcome="loss" if k % 2 else "win") for k in range(40)]
+    other = [make_game(moves_san=DEFAULT_MOVES, color="white" if k % 2 else "black", time_class=FORMATS[k % 4],
+                       opening_family=FAMILIES[k % 4]) for k in range(60)]
+    return caro + other
+
+
+def test_a_gap_that_comes_from_one_opening_is_an_observation_about_it():
+    mr = run(caro_kann_world())
+    [obs] = mr.insights
+    assert obs.id == "structure.observation.castled" and obs.kind == "observation"  # never a weakness
+    assert obs.title == ("Mostly your Caro-Kann Defense games: with Black you castled by move 10 in 0% of them, your "
+                         "opponents in 100%")
+    assert "Most of that gap comes from your Caro-Kann Defense games with Black (40 games: 0% against 100%). " \
+           "Without them the gap is 0 points (100% against 100% in 60 games), too small or unclear to call a " \
+           "weakness" in obs.detail
+    assert obs.evidence["would_be"] == "weakness" and obs.evidence["groups"][0]["n"] == 40
+    assert obs.evidence["without"]["gap"] == pytest.approx(0.0) and "target" not in obs.evidence
+    assert any("main lines for Black" in a for a in obs.study)
+    # the picture: that opening against your other games, and a board from one of its games
+    assert obs.chart.labels == ["Caro-Kann Defense (Black)", "Your other games", "All games"]
+    assert obs.chart.series[0].values == [0.0, 1.0, 0.6] and obs.chart.series[1].values == [1.0, 1.0, 1.0]
+    assert obs.formats == {"bullet": 10, "blitz": 20, "rapid": 10}
+    assert obs.diagram is not None and obs.diagram.title == "Move 10: you haven't castled yet"
+    assert obs.diagram.orientation == "black"
+    assert mr.stats["habits"]["castled"]["fold"]["holds"] is False
+    assert "None of the gaps is a habit of yours" in mr.summary
+    # without the fold rule the same numbers were a weakness
+    r = structure.HabitResult(structure.habits(structure.Thresholds())[0], [], MeanTest(100, -0.4, 0.05, -8.0, 1e-15),
+                              p_adjusted=1e-15)
+    r.games = [structure.read_opening(g, 20) for g in caro_kann_world()]
+    assert structure.habit_insight(r, structure.Thresholds()).id == "structure.weakness.castled"
+    # and it reaches neither the top lists nor the plan
+    report = pipeline.run_analysis(caro_kann_world(), "tester", modules=MODULES)
+    assert not [i.id for i in report.strengths + report.weaknesses if i.category == "structure"]
+
+
+def test_a_gap_in_every_opening_is_still_a_finding():
+    # the Caro-Kann games as above, and your other games uncastled too: the gap holds without the Caro-Kann
+    games = caro_kann_world()[:40] + [
+        make_game(moves_san=WHITE_UNCASTLED if k % 2 else BLACK_UNCASTLED, color="white" if k % 2 else "black",
+                  time_class=FORMATS[k % 4], opening_family=FAMILIES[k % 4]) for k in range(60)
+    ]
+    mr = run(games)
+    [ins] = mr.insights
+    assert ins.id == "structure.weakness.castled"
+    fold = ins.evidence["fold"]
+    assert fold["groups"][0] == {"colour": "black", "family": "Caro-Kann Defense", "n": 40} and fold["holds"]
+    assert fold["gap_without"] == pytest.approx(-1.0) and fold["p_adjusted_without"] <= 0.01
+    assert ["Caro-Kann Defense (Black)", 40, 0.0, 1.0] in ins.chart.table.rows  # the openings in the numbers
+
+
+def test_fold_check_leaves_out_the_biggest_part_of_the_gap_and_tests_again():
+    th = structure.Thresholds()
+    castled = structure.habits(th)[0]
+    openings = [structure.read_opening(g, 20) for g in caro_kann_world()]
+    pairs = [(castled.count(o.me), castled.count(o.opp), o.game.color) for o in openings]
+    r = structure.HabitResult(castled, openings, structure.paired_share_test(pairs, 1), p_adjusted=1e-12)
+    parts = r.contributions()
+    assert sum(parts.values()) == pytest.approx(r.test.mean)  # the groups' parts add up to the balanced gap
+    assert min(parts, key=parts.get) == ("black", "Caro-Kann Defense")
+    fold = structure.fold_check(r, th, {"castled": r.test.p_value, "minors": 0.5, "early_queen": 0.9})
+    [(colour, family, group)] = fold.groups  # the claim fails at the first step
+    assert (colour, family, len(group), fold.without.n) == ("black", "Caro-Kann Defense", 40, 60)
+    assert not fold.holds and not fold.too_few and fold.without.p_adjusted == 1.0
+    # a habit that is no finding to begin with is not folded
+    assert structure.fold_check(dataclasses.replace(r, p_adjusted=0.5), th, {}) is None
+    # when your other games are too few to tell, the gap stays an observation about the opening
+    few = structure.HabitResult(castled, openings[:40] + openings[40:60], r.test, p_adjusted=1e-12)
+    assert structure.fold_check(few, th, {}).too_few
+
+
 # --------------------------------------------------------------------------- the null world
 def _fingerprint(games) -> str:
     """Everything about the null world's games except the moves."""
@@ -357,3 +450,33 @@ def test_planted_structure_effects_change_only_the_players_habits():
     _, slow = habits({"slow_development": 1.0})
     assert slow["minors"]["you"] < slow["minors"]["opponents"] - 0.6
     assert abs(slow["minors"]["opponents"] - base["minors"]["opponents"]) < 0.2
+
+
+# The opening line, not the player, sets when each side castles and develops (null_world "line_habits": in the
+# Caro-Kann Black castles on moves 9-14, in the Sicilian on 9-14 against White's 6-9 ...): whatever the player's
+# repertoire, a gap to the opponents is no habit of theirs. A player who mostly plays one line gets its gap; the
+# fold rule turns it into an observation about that opening.
+LINE_WORLDS = {  # measured over more seeds in docs/METHODOLOGY.md
+    "mostly the Caro-Kann with Black": {"line_habits": True, "opening": ("black", "Caro-Kann Defense", 0.0, 0.6)},
+    "mostly the Sicilian with White": {"line_habits": True, "opening": ("white", "Sicilian Defense", 0.0, 0.6)},
+}
+
+
+@pytest.mark.parametrize("world", list(LINE_WORLDS))
+def test_opening_lines_that_set_the_habits_make_no_structure_claims(world):
+    mr = structure.analyze(AnalysisContext("p", null_games(600, seed=2, planted=LINE_WORLDS[world])))
+    assert not [i.id for i in mr.insights if i.kind != "observation"]
+    castled = {(g["colour"], g["family"]): g for g in mr.stats["habits"]["castled"]["by_opening"]}
+    caro = castled[("black", "Caro-Kann Defense")]
+    assert caro["you"] < caro["opponents"] - 0.2  # the line's gap is there, and ...
+    [obs] = mr.insights  # ... in a main line it would have been a finding without the fold rule
+    assert obs.id == "structure.observation.castled" and obs.title.startswith(
+        "Mostly your Caro-Kann Defense games: with Black" if "Caro" in world
+        else "Mostly your Sicilian Defense games: with White")
+    assert mr.stats["habits"]["castled"]["p_adjusted"] <= 0.01 and not mr.stats["habits"]["castled"]["fold"]["holds"]
+
+
+def test_null_world_line_habits_change_nothing_but_the_moves():
+    games = null_games(120, seed=3, planted={"line_habits": True})
+    assert _fingerprint(games) == _fingerprint(null_games(120, seed=3))
+    assert [g.moves_san for g in games] != [g.moves_san for g in null_games(120, seed=3)]

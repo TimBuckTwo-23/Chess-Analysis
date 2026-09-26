@@ -50,6 +50,13 @@ their clocks / how they end):
     share of games in which the player gets the knights and bishops out much later (all
     four by moves 24-40 instead of 7-20); the kingside pieces still come out in time for
     castling, so only development changes.
+``"line_habits": True``
+    the opening line, not the player, sets when each side castles, how soon it develops and
+    how many early pawn moves it makes (``LINE_HABITS``: in the Ruy Lopez White castles on
+    moves 4-6 and Black on 7-10, in the Caro-Kann Black castles on 8-13 ...), for the player
+    and the opponent alike. The player's repertoire then shows up as a gap to the opponents
+    that is no habit of the player's (combine with a main family, e.g. ``"opening":
+    ("black", "Caro-Kann Defense", 0.0, 0.6)``, for a player who mostly plays one line).
 
 Opening habits (castling, development, early queen and pawn moves) are the same for
 both players: after the opening line, each side's first 16 moves come from a simple
@@ -119,6 +126,7 @@ PLANT_KEYS = frozenset(
         "late_castling",
         "early_queen",
         "slow_development",
+        "line_habits",
     }
 )
 STRUCTURE_KEYS = ("late_castling", "early_queen", "slow_development")
@@ -170,6 +178,41 @@ def _draw_habits(srng: random.Random) -> dict[str, Any]:
         "developed_by": srng.randint(*DEVELOPED_BY),
         "pawn_moves": srng.randint(*PAWN_MOVES),
     }
+
+
+# Planted "line_habits": the opening line sets each side's targets, whoever plays it (book-like move orders):
+# family -> side -> {habit: (from, to)} for the own move it castles on, the move by which all four knights and
+# bishops are out, and the pawn moves among its first 10 moves. Whether a side castles at all stays P_CASTLE.
+LINE_HABITS: dict[str, dict[chess.Color, dict[str, tuple[int, int]]]] = {
+    "Italian Game": {chess.WHITE: {"castle_at": (4, 7), "developed_by": (6, 12)},
+                     chess.BLACK: {"castle_at": (5, 8), "developed_by": (6, 12)}},
+    "Ruy Lopez Opening": {chess.WHITE: {"castle_at": (4, 6), "developed_by": (7, 14)},
+                          chess.BLACK: {"castle_at": (7, 11), "developed_by": (8, 16), "pawn_moves": (3, 6)}},
+    "Queen's Gambit": {chess.WHITE: {"castle_at": (8, 12), "developed_by": (8, 16)},
+                       chess.BLACK: {"castle_at": (5, 7), "developed_by": (6, 12)}},
+    "Sicilian Defense": {chess.WHITE: {"castle_at": (6, 9), "developed_by": (6, 12)},
+                         chess.BLACK: {"castle_at": (9, 14), "developed_by": (10, 22), "pawn_moves": (4, 7)}},
+    "Queen's Pawn Opening": {chess.WHITE: {"castle_at": (6, 9), "developed_by": (7, 14)},
+                             chess.BLACK: {"castle_at": (5, 8), "developed_by": (6, 12)}},
+    "Caro-Kann Defense": {chess.WHITE: {"castle_at": (6, 9), "developed_by": (7, 14)},
+                          chess.BLACK: {"castle_at": (9, 14), "developed_by": (10, 20), "pawn_moves": (3, 6)}},
+    "King's Pawn Opening": {chess.WHITE: {"castle_at": (4, 7), "developed_by": (6, 12)},
+                            chess.BLACK: {"castle_at": (5, 9), "developed_by": (7, 14)}},
+    "French Defense": {chess.WHITE: {"castle_at": (6, 9), "developed_by": (7, 14)},
+                       chess.BLACK: {"castle_at": (9, 13), "developed_by": (12, 24), "pawn_moves": (3, 6)}},
+    "King's Indian Defense": {chess.WHITE: {"castle_at": (7, 11), "developed_by": (7, 14), "pawn_moves": (3, 6)},
+                              chess.BLACK: {"castle_at": (4, 6), "developed_by": (5, 10)}},
+}
+
+
+def _line_habits(lrng: random.Random, habits: dict[chess.Color, dict[str, Any]], family: str) -> None:
+    """Planted "line_habits": both sides' targets from the opening line (own stream; same draws for any line)."""
+    for color in (chess.WHITE, chess.BLACK):
+        spec = LINE_HABITS.get(family, {}).get(color, {})
+        for key, default in (("castle_at", CASTLE_AT), ("developed_by", DEVELOPED_BY), ("pawn_moves", PAWN_MOVES)):
+            value = lrng.randint(*spec.get(key, default))
+            if key != "castle_at" or habits[color]["castle_at"] is not None:
+                habits[color][key] = value
 
 
 def _plant_structure(prng: random.Random, habits: dict[str, Any], planted: dict[str, Any]) -> None:
@@ -501,6 +544,8 @@ def null_games(
         # the moves themselves: both sides play the opening by habits from the same distribution (own streams)
         srng_game = random.Random(f"structure-{seed}-{i}")
         habits = {chess.WHITE: _draw_habits(srng_game), chess.BLACK: _draw_habits(srng_game)}
+        if planted.get("line_habits"):
+            _line_habits(random.Random(f"line-habits-{seed}-{i}"), habits, family)
         if any(k in planted for k in STRUCTURE_KEYS):
             mine = habits[chess.WHITE if color == "white" else chess.BLACK]
             _plant_structure(random.Random(f"structure-planted-{seed}-{i}"), mine, planted)
