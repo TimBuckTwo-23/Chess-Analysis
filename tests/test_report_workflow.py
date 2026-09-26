@@ -157,7 +157,7 @@ def run_players(tmp_path, players="", **env):
     out.write_text("", encoding="utf-8")
     base = {"EVENT": "push", "IN_USER": "", "IN_TZ": "", "IN_ENGINE": "true", "IN_ENGINE_GAMES": "300",
             "IN_DEPTH": "12", "GITHUB_OUTPUT": str(out), "PATH": os.environ.get("PATH", "")}
-    proc = subprocess.run([sys.executable, "-c", players_script()], cwd=tmp_path, env={**base, **env},
+    proc = subprocess.run([sys.executable, "-c", players_script()], cwd=tmp_path, env={**os.environ, **base, **env},
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
     lines = dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines())
