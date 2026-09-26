@@ -36,17 +36,36 @@ then with the same gap in your other openings (your resignation habits: a player
 resigns early has quick losses in every opening). Difference-in-differences of
 proportions (``stats.proportion_gap_test``), weighted BH over families,
 ``stats.STRICT_ALPHA``.
+
+Pictures (they never change which findings there are): every finding carries the games
+per format behind it (``Insight.formats``) and a small chart split by format; an opening
+finding also carries a board of the position your games in that opening usually reach
+(the longest move sequence most of them share, up to 8 moves) with that main line as a
+strip of small boards. Each choice point ("Your choices at key moves") becomes a board
+with your moves as arrows; :func:`choice_positions` returns them for the coaching layer.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
+import chess
+
 from ..context import AnalysisContext
-from ..models import Chart, Color, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Table
+from ..models import Chart, Color, Diagram, Frame, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Strip, Table
+from ..visuals import (
+    FORMAT_NAMES,
+    MIN_FORMAT_GAMES,
+    comparison_chart,
+    format_counts,
+    line_strip,
+    move_arrow,
+    ordered_formats,
+    position_diagram,
+)
 from ..stats import (
     ALPHA,
     STRICT_ALPHA,
@@ -118,8 +137,12 @@ class Thresholds:
     max_lines: int = 20
     choice_max_ply: int = 10  # your moves up to move 5 count as opening choices
     min_choice_games: int = 10  # games with one move at a choice point to show it
-    max_choice_points: int = 4
+    max_choice_points: int = 4  # rows of the "Your choices at key moves" table (and the study advice)
+    max_choice_diagrams: int = 12  # choice points drawn as boards
     min_eval_games: int = 8  # engine-analysed games in an opening to say where its games are lost
+    main_line_plies: int = 16  # an opening's usual position: at most this many plies (8 moves) deep
+    strip_frames: int = 6  # small boards in a main-line strip
+    max_format_families: int = 8  # openings in the per-format chart
 
     @classmethod
     def from_ctx(cls, ctx: AnalysisContext) -> "Thresholds":
@@ -241,6 +264,216 @@ def _colour(c: Color) -> str:
     return c.capitalize()
 
 
+# --------------------------------------------------------------------------- formats (shared with habits.py)
+DELTA_NOTE = "Per game: your score minus what your ratings predict (−10% = 10 points per 100 games below your rating)."
+
+
+def formats_note(counts: dict[str, int], unit: str = "games") -> str:
+    """'Bullet 210 · Blitz 88 games', or 'Blitz only (88 games)'; '' without games."""
+    counts = ordered_formats(counts)
+    if not counts:
+        return ""
+    names = [(FORMAT_NAMES.get(tc, tc), n) for tc, n in counts.items()]
+    if len(names) == 1:
+        name, n = names[0]
+        return f"{name} only ({n} {unit if n != 1 else unit.rstrip('s')})"
+    return " · ".join(f"{name} {n}" for name, n in names) + f" {unit}"
+
+
+def mixed_formats_note(games: Sequence[Game]) -> str:
+    """' Formats: Bullet 210 · Blitz 88 games.' when ``games`` mix formats (for a table or chart note), else ''."""
+    counts = format_counts(games)
+    return f" Formats: {formats_note(counts)}." if len(counts) > 1 else ""
+
+
+def in_format(games: Sequence[Game], tc: Optional[str]) -> list[Game]:
+    """The games of one time class (all of them for ``None``)."""
+    return list(games) if tc is None else [g for g in games if g.time_class == tc]
+
+
+def format_groups(
+    games: Sequence[Game], min_games: int = MIN_FORMAT_GAMES, rated: bool = True, max_labels: int = 6
+) -> tuple[list[tuple[str, Optional[str]]], list[str]]:
+    """The bars of a split by format: ([(label, time class or None for every game)], formats left out).
+
+    Games in one format are a single bar named after it; games in several formats get an "All games" bar
+    first, then one per format with at least ``min_games`` games (``rated``: games with both ratings, the
+    ones a score-vs-rating figure is computed from). The names of the formats too small for a bar come back
+    separately, for the chart's note.
+    """
+    counts = format_counts(games)
+    if not counts:
+        return [], []
+    if len(counts) == 1:
+        tc = next(iter(counts))
+        return [(FORMAT_NAMES.get(tc, tc), None)], []
+    bars: list[tuple[str, Optional[str]]] = [("All games", None)]
+    small = []
+    for tc in counts:
+        n = sum(1 for g in games if g.time_class == tc and (not rated or g.expected_score is not None))
+        if n >= min_games and len(bars) < max_labels:
+            bars.append((FORMAT_NAMES.get(tc, tc), tc))
+        else:
+            small.append(FORMAT_NAMES.get(tc, tc))
+    return bars, small
+
+
+def split_note(games: Sequence[Game], small: Sequence[str], min_games: int = MIN_FORMAT_GAMES, what: str = "games") -> str:
+    """The formats behind a chart split by format, and which ones are too small for a bar of their own."""
+    text = formats_note(format_counts(games), what)
+    if small:
+        text += f"; {', '.join(small)}: fewer than {min_games} {what}, no bar of {'its' if len(small) == 1 else 'their'} own"
+    return f"{text}." if text else ""
+
+
+def versus_chart(
+    title: str,
+    subject_name: str,
+    subject: Sequence[Game],
+    other_name: str,
+    other: Sequence[Game],
+    *,
+    note: str = DELTA_NOTE,
+    min_games: int = MIN_FORMAT_GAMES,
+) -> Chart:
+    """A finding's chart: score vs rating of ``subject`` next to ``other`` (the games it was compared with),
+    for all games and for each format with at least ``min_games`` rated games of ``subject``.
+
+    The first bar is computed on exactly the games the finding's text quotes, so the chart and the text agree;
+    a format's ``other`` bar is blank when that format has fewer than ``min_games`` rated games of them.
+    The full numbers (games, score, rating's prediction) go under "Show the numbers".
+    """
+    bars, small = format_groups(subject, min_games)
+    if len(bars) == 1 and set(format_counts(other)) - set(format_counts(subject)):
+        bars = [("All games", None)]  # one format here, but the games compared with are not all of it
+    subject_values: list[Optional[float]] = []
+    other_values: list[Optional[float]] = []
+    rows: list[list[Any]] = []
+    for label, tc in bars:
+        s, o = summarize(in_format(subject, tc)), summarize(in_format(other, tc))
+        least = 1 if tc is None else min_games
+        subject_values.append(s.delta if s.n_rated >= least else None)
+        other_values.append(o.delta if o.n_rated >= least else None)
+        rows.append([label, subject_name, s.n_rated, s.rated_score, s.expected, s.delta])
+        if other:
+            rows.append([label, other_name, o.n_rated, o.rated_score, o.expected, o.delta])
+    rated = [g for g in subject if g.expected_score is not None]
+    full_note = " ".join(x for x in (note, split_note(rated, small, min_games, "rated games")) if x)
+    series = [(subject_name, subject_values)] + ([(other_name, other_values)] if other else [])
+    return comparison_chart(
+        title,
+        [label for label, _ in bars],
+        series,
+        value_format="signed_pct",
+        reference=0.0,
+        note=full_note,
+        table=Table(
+            title=title,
+            columns=["Format", "Games in", "Games", "Score", "Rating predicts", "vs rating"],
+            rows=rows,
+            formats=["text", "text", "int", "pct", "pct", "signed_pct"],
+            note=full_note,
+            key_columns=[0, 1, 2, 5],
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- boards
+def play_line(sans: Sequence[str], fen: Optional[str] = None) -> tuple[chess.Board, list[str]]:
+    """The board after ``sans`` from ``fen`` (the start by default), and the UCI of each move played;
+    stops at the first move that isn't legal (a test's made-up game, a corrupt record)."""
+    board = chess.Board(fen) if fen else chess.Board()
+    ucis: list[str] = []
+    for san in sans:
+        try:
+            move = board.parse_san(san)
+        except ValueError:
+            break
+        ucis.append(move.uci())
+        board.push(move)
+    return board, ucis
+
+
+def main_line(games: Sequence[Game], max_plies: int = 16, min_share: float = 0.5) -> list[str]:
+    """The longest move sequence (SAN, from the start, at most ``max_plies``) that more than ``min_share`` of
+    ``games`` begin with, following the most played move at each step (ties: alphabetical)."""
+    need = min_share * len(games)
+    pool = list(games)
+    line: list[str] = []
+    while len(line) < max_plies and pool:
+        ply = len(line)
+        counts = Counter(g.moves_san[ply] for g in pool if g.plies > ply)
+        if not counts:
+            break
+        move, n = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        if n <= need:
+            break
+        line.append(move)
+        pool = [g for g in pool if g.plies > ply and g.moves_san[ply] == move]
+    return line
+
+
+def usual_line(games: Sequence[Game], max_plies: int = 16) -> list[str]:
+    """``main_line`` of the games: shared by most of them, or (when not even the first move is) the most
+    played path followed while at least a quarter of the games are on it."""
+    line = main_line(games, max_plies)
+    return line if line else main_line(games, max_plies, 0.25)
+
+
+def _single_format(games: Sequence[Game]) -> str:
+    counts = format_counts(games)
+    return next(iter(counts)) if len(counts) == 1 else ""
+
+
+def _family_phrase(label: str, color: Color) -> str:
+    """'in the Caro-Kann Defense' for your own choice, 'against the Sicilian Defense' for your opponent's."""
+    if label == UNNAMED or chosen_by(label) == color:
+        return f"in the {label}"
+    return f"against the {label}"
+
+
+def _main_line_strip(line: Sequence[str], ucis: Sequence[str], start: int, frames: int, title: str) -> Strip:
+    """The moves ``line[start:]`` as small boards, starting from the position after ``line[:start]``."""
+    board, _ = play_line(line[:start])
+    return line_strip(title, board.fen(), list(ucis[start:]), max_frames=frames)
+
+
+def family_diagram(grp: OpeningGroup, kind: InsightKind, th: Thresholds) -> Diagram:
+    """The position your games in this opening usually reach, with the main line leading there as a strip and
+    the move you (or your opponent) most often played next as a blue arrow."""
+    line = usual_line(grp.games, th.main_line_plies)
+    board, ucis = play_line(line)
+    line = line[: len(ucis)]
+    reached = [g for g in grp.games if g.moves_san[: len(line)] == line]
+    nxt = Counter(g.moves_san[len(line)] for g in reached if g.plies > len(line))
+    colour, where = _colour(grp.color), _family_phrase(grp.label, grp.color)
+    caption = f"{len(reached)} of your {grp.n} games {where} as {colour} reached this position"
+    next_move = None
+    if nxt:
+        next_move, k = min(nxt.items(), key=lambda kv: (-kv[1], kv[0]))
+        caption += f"; the most common next move was {move_label(len(line), next_move)} ({k} game{'s' if k != 1 else ''})"
+    caption += "."
+    outcome = "loss" if kind == "weakness" else "win" if kind == "strength" else None
+    links = recent_urls(reached, outcome, 1) or recent_urls(reached, None, 1)
+    after = f" after {move_label(len(line) - 1, line[-1])}" if line else ""
+    diagram = position_diagram(
+        f"{display_name(grp.label, grp.color)} as {colour}: your usual position{after}",
+        board.fen(),
+        orientation=grp.color,
+        others=[(next_move, "line")] if next_move else [],
+        caption=caption,
+        link=links[0] if links else "",
+        time_class=_single_format(grp.games),
+        last_move=ucis[-1] if ucis else "",
+    )
+    if line:
+        start = max(0, len(line) - th.strip_frames)
+        diagram.strips.append(
+            _main_line_strip(line, ucis, start, th.strip_frames, f"Your main line: {line_text(line)}")
+        )
+    return diagram
+
+
 # --------------------------------------------------------------------------- tables & chart
 def _group_cells(grp: OpeningGroup) -> list[Any]:
     s = grp.summary
@@ -282,7 +515,7 @@ def family_table(
     )
 
 
-def first_move_table(groups: dict[Color, dict[str, OpeningGroup]]) -> Table:
+def first_move_table(groups: dict[Color, dict[str, OpeningGroup]], note: str = "") -> Table:
     rows = []
     for color in ("white", "black"):
         for label in FIRST_MOVE_ORDER[color]:
@@ -294,11 +527,11 @@ def first_move_table(groups: dict[Color, dict[str, OpeningGroup]]) -> Table:
         columns=["Colour", "First move", *GROUP_COLUMNS],
         rows=rows,
         formats=["text", "text", *GROUP_FORMATS],
-        note="As White: your first move. As Black: your opponent's first move.",
+        note="As White: your first move. As Black: your opponent's first move." + note,
     )
 
 
-def lines_table(games: Sequence[Game], totals: dict[Color, int], th: Thresholds) -> Optional[Table]:
+def lines_table(games: Sequence[Game], totals: dict[Color, int], th: Thresholds, note: str = "") -> Optional[Table]:
     lines = [
         build_group(opening, color, gs, totals[color], th)
         for (color, opening), gs in _group_by([g for g in games if g.opening], lambda g: (g.color, g.opening)).items()
@@ -324,11 +557,11 @@ def lines_table(games: Sequence[Game], totals: dict[Color, int], th: Thresholds)
             for grp in lines[: th.max_lines]
         ],
         formats=["text", "text", "int", "text", "pct", "pct", "signed_pct", "signed_pct"],
-        note=f"Lines played at least {th.min_line_games} times.",
+        note=f"Lines played at least {th.min_line_games} times.{note}",
     )
 
 
-def family_chart(families: list[OpeningGroup], th: Thresholds) -> Optional[Chart]:
+def family_chart(families: list[OpeningGroup], th: Thresholds, note: str = "") -> Optional[Chart]:
     bars = [
         f for f in families if f.label != UNNAMED and f.summary.n_rated >= th.min_family_games and f.shrunk is not None
     ]
@@ -346,8 +579,54 @@ def family_chart(families: list[OpeningGroup], th: Thresholds) -> Optional[Chart
             f"Openings with {th.min_family_games}+ rated games; green above your rating, red below. Fair estimate: each "
             f"result is pulled toward 0 as if you had played {th.prior_n:.0f} extra games scoring exactly as your "
             "rating predicts, so small samples don't dominate."
+            + mixed_formats_note([g for f in bars for g in f.games])
+            + note
         ),
         reference=0.0,
+    )
+
+
+def family_format_chart(families: list[OpeningGroup], th: Thresholds) -> Optional[Chart]:
+    """Your most played openings' score vs rating in each format (fair estimate), when you play them in two or
+    more formats. Descriptive: the claims are in the findings."""
+    fams = [f for f in families if f.label != UNNAMED and f.summary.n_rated >= th.min_family_games]
+    fams = sorted(fams, key=lambda f: (-f.n, f.label))[: th.max_format_families]
+    series: list[tuple[str, list[Optional[float]]]] = []
+    columns: list[tuple[str, list[int], list[Optional[float]]]] = []
+    for tc in format_counts([g for f in fams for g in f.games]):
+        subsets = [summarize(in_format(f.games, tc)) for f in fams]
+        values = [s.shrunk(th.prior_n) if s.n_rated >= th.min_family_games else None for s in subsets]
+        if any(v is not None for v in values):
+            series.append((FORMAT_NAMES.get(tc, tc), values))
+            columns.append((FORMAT_NAMES.get(tc, tc), [s.n for s in subsets], values))
+    if len(series) < 2:
+        return None
+    keep = [i for i in range(len(fams)) if any(values[i] is not None for _, values in series)]
+    labels = [f"{display_name(fams[i].label, fams[i].color)} ({_colour(fams[i].color)})" for i in keep]
+    note = (
+        f"Fair estimate of your score vs rating in each format (as in the chart above), for your most played "
+        f"openings; blank: fewer than {th.min_family_games} rated games in that format. The findings compare each "
+        "opening with your other openings of the same colour."
+        + mixed_formats_note([g for i in keep for g in fams[i].games])
+    )
+    return comparison_chart(
+        "Score vs rating by opening, per format",
+        labels,
+        [(name, [values[i] for i in keep]) for name, values in series],
+        value_format="signed_pct",
+        reference=0.0,
+        note=note,
+        table=Table(
+            title="By opening and format",
+            columns=["Opening"] + [c for name, _, _ in columns for c in (f"{name} games", f"{name} vs rating")],
+            rows=[
+                [labels[j]] + [x for _, ns, values in columns for x in (ns[i], values[i])]
+                for j, i in enumerate(keep)
+            ],
+            formats=["text"] + ["int", "signed_pct"] * len(columns),
+            note=note,
+            key_columns=[0] + [2 + 2 * k for k in range(len(columns))],
+        ),
     )
 
 
@@ -377,9 +656,10 @@ class ChoicePoint:
         return "On move 1" if not self.prefix else f"After {line_text(self.prefix)}"
 
 
-def choice_points(by_colour: dict[Color, list[Game]], th: Thresholds) -> list[ChoicePoint]:
+def choice_points(by_colour: dict[Color, list[Game]], th: Thresholds, limit: Optional[int] = None) -> list[ChoicePoint]:
     """Your real decisions in the opening: positions where you have played more than one move often enough to
-    compare them (descriptive: nothing here is tested or claimed). Most-reached first."""
+    compare them (descriptive: nothing here is tested or claimed). Most-reached first; at most ``limit``
+    (default ``th.max_choice_points``)."""
     points = []
     for color, games in by_colour.items():
         tree: dict[tuple[str, ...], dict[str, list[Game]]] = defaultdict(lambda: defaultdict(list))
@@ -395,10 +675,190 @@ def choice_points(by_colour: dict[Color, list[Game]], th: Thresholds) -> list[Ch
             groups = [build_group(move_label(len(prefix), m), color, gs, len(games), th) for m, gs in options]
             points.append(ChoicePoint(color, prefix, groups, sum(len(gs) for gs in moves.values())))
     points.sort(key=lambda p: (-p.total, p.color, p.prefix))
-    return points[: th.max_choice_points]
+    return points[: th.max_choice_points if limit is None else limit]
 
 
-def choice_table(points: Sequence[ChoicePoint]) -> Optional[Table]:
+def option_san(point: ChoicePoint, option: OpeningGroup) -> str:
+    """The move (SAN) an option of a choice point stands for."""
+    return option.games[0].moves_san[len(point.prefix)]
+
+
+@dataclass
+class ChoiceMove:
+    """One of your moves at a choice point, with how it has scored for you."""
+
+    san: str  # "Bc4"
+    uci: str  # "f1c4" ("" if it could not be replayed)
+    label: str  # "3.Bc4"
+    games: int
+    n_rated: int
+    score: Optional[float]  # over every game with the move
+    expected: Optional[float]  # the rating's prediction, over the rated games
+    delta: Optional[float]  # score minus expected per game (rated games); None without ratings
+    fair: Optional[float]  # delta pulled toward 0 as if Thresholds.prior_n more games had scored as expected
+    formats: dict[str, int] = field(default_factory=dict)
+    urls: list[str] = field(default_factory=list)  # most recent first
+    game_ids: list[str] = field(default_factory=list)  # most recent first
+
+
+@dataclass
+class ChoicePosition:
+    """A choice point as a position: where it is, which moves you have played there and how each has scored.
+
+    ``best`` is the engine's preferred move when the analysed games say (``engine_best``), else the move of
+    yours whose fair estimate beats all your other moves' by at least ``Thresholds.min_effect`` (it may be your
+    usual move), else None.
+    A comparison of your own results, not a verdict on the moves (nothing here is tested or claimed).
+    """
+
+    color: Color
+    moves_before: list[str]  # SAN from the start
+    fen: str  # the position, you to move
+    ply: int  # index of your move in Game.moves_san
+    where: str  # "After 1.e4 e5 2.Nf3 Nc6" / "On move 1"
+    total: int  # games that reached the position with you to move
+    moves: list[ChoiceMove]  # moves played at least ``min_choice_games`` times, most played first
+    formats: dict[str, int] = field(default_factory=dict)  # of the games with one of ``moves``
+    engine_best: Optional[str] = None  # SAN
+    best: Optional[str] = None  # SAN
+    opening_family: str = ""  # the most common opening family among those games
+    last_move: str = ""  # UCI of the move that led to the position ("" at the start)
+
+    @property
+    def epd(self) -> str:
+        return " ".join(self.fen.split()[:4])
+
+    @property
+    def usual(self) -> ChoiceMove:
+        return self.moves[0]
+
+
+def engine_best(ply: int, games: Sequence[Game], evals: Optional[dict[str, Any]]) -> Optional[str]:
+    """Stockfish's preferred move (SAN) before ply ``ply``, the most common verdict over the analysed games."""
+    counts: Counter = Counter()
+    for g in games:
+        ev = (evals or {}).get(g.game_id)
+        p = next((p for p in ev.plies if p.ply == ply), None) if ev is not None else None
+        if p is not None and p.best_san:
+            counts[p.best_san] += 1
+    return min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0] if counts else None
+
+
+def best_scoring(moves: Sequence[ChoiceMove], margin: float) -> Optional[str]:
+    """The move whose fair estimate beats every other move's by at least ``margin`` (your usual move included),
+    or None when none stands out."""
+    rated = sorted((m for m in moves if m.fair is not None), key=lambda m: (-(m.fair or 0.0), -m.games))
+    if len(rated) < 2 or len(rated) < len(moves):
+        return None
+    top, runner_up = rated[0], rated[1]
+    return top.san if (top.fair or 0.0) - (runner_up.fair or 0.0) >= margin else None
+
+
+def choice_position(
+    point: ChoicePoint, th: Thresholds, evals: Optional[dict[str, Any]] = None
+) -> Optional[ChoicePosition]:
+    """A ChoicePoint as a position with your moves, their scores and the better move when one is known; None
+    when its moves can't be replayed on a board (made-up or corrupt game records)."""
+    board, ucis = play_line(point.prefix)
+    if len(ucis) != len(point.prefix):
+        return None
+    moves = []
+    for o in point.options:
+        san = option_san(point, o)
+        try:
+            m: Optional[chess.Move] = board.parse_san(san)
+        except ValueError:
+            m = None
+        recent = sorted(o.games, key=lambda g: g.end_time, reverse=True)
+        moves.append(
+            ChoiceMove(
+                san=san,
+                uci=m.uci() if m else "",
+                label=o.label,
+                games=o.n,
+                n_rated=o.summary.n_rated,
+                score=o.summary.score,
+                expected=o.summary.expected,
+                delta=o.summary.delta,
+                fair=o.shrunk,
+                formats=format_counts(o.games),
+                urls=[g.url for g in recent if g.url],
+                game_ids=[g.game_id for g in recent],
+            )
+        )
+    games = [g for o in point.options for g in o.games]
+    best_engine = engine_best(len(point.prefix), games, evals)
+    best = best_engine or best_scoring(moves, th.min_effect)
+    families = Counter(g.opening_family for g in games if g.opening_family)
+    return ChoicePosition(
+        color=point.color,
+        moves_before=list(point.prefix),
+        fen=board.fen(),
+        ply=len(point.prefix),
+        where=point.where,
+        total=point.total,
+        moves=moves,
+        formats=format_counts(games),
+        engine_best=best_engine,
+        best=best,
+        opening_family=min(families.items(), key=lambda kv: (-kv[1], kv[0]))[0] if families else "",
+        last_move=ucis[-1] if ucis else "",
+    )
+
+
+def choice_positions(ctx: AnalysisContext, max_points: Optional[int] = None) -> list[ChoicePosition]:
+    """Your choice points as positions, most reached first (the coaching layer explains them).
+
+    The same points as the "Your choices at key moves" boards: positions from the standard start where you
+    have played two or more moves at least ``min_choice_games`` times each, up to move
+    ``choice_max_ply // 2``; at most ``max_points`` (default ``Thresholds.max_choice_diagrams``). Each carries
+    its FEN, your moves (SAN, UCI, games, score, rating's prediction, game URLs) and the engine's preferred
+    move when ``ctx.evals`` has the position.
+    """
+    th = Thresholds.from_ctx(ctx)
+    by_colour: dict[Color, list[Game]] = {"white": [], "black": []}
+    for g in sorted(ctx.games, key=lambda g: g.end_time):
+        if is_eligible(g):
+            by_colour[g.color].append(g)
+    limit = th.max_choice_diagrams if max_points is None else max_points
+    positions = (choice_position(p, th, ctx.evals) for p in choice_points(by_colour, th, limit))
+    return [pos for pos in positions if pos is not None]
+
+
+def _move_result(m: ChoiceMove) -> str:
+    text = f"{m.label}: {m.games} games, {pct(m.score)}"
+    return text + (f" ({per100_games(m.delta)} vs your rating)" if m.delta is not None else "")
+
+
+def choice_diagram(pos: ChoicePosition) -> Diagram:
+    """The position with your moves as arrows: your usual move red ("played"), the better move green when one
+    is known (your usual move itself when it is the better one), the others grey."""
+    usual = pos.usual
+    best = pos.best
+    played = None if best == usual.san else usual.san
+    others = [(m.san, "neutral") for m in pos.moves[1:] if m.san != best]
+    caption = "; ".join(_move_result(m) for m in pos.moves) + "."
+    labels = {m.san: m.label for m in pos.moves}
+    if pos.engine_best:
+        caption += f" Stockfish prefers {labels.get(pos.engine_best) or move_label(pos.ply, pos.engine_best)}."
+    elif best:
+        caption += f" {labels[best]} has scored best for you so far (fair estimate)."
+    caption += f" {formats_note(pos.formats)}."
+    return position_diagram(
+        f"Your choice {pos.where[0].lower()}{pos.where[1:]} ({_colour(pos.color)})",
+        pos.fen,
+        orientation=pos.color,
+        played=played,
+        best=best,
+        others=others,
+        caption=caption,
+        link=usual.urls[0] if usual.urls else "",
+        time_class=next(iter(pos.formats)) if len(pos.formats) == 1 else "",
+        last_move=pos.last_move,
+    )
+
+
+def choice_table(points: Sequence[ChoicePoint], note: str = "") -> Optional[Table]:
     if not points:
         return None
     rows = [
@@ -413,13 +873,15 @@ def choice_table(points: Sequence[ChoicePoint]) -> Optional[Table]:
         formats=["text", "text", "int", "pct", "pct", "signed_pct"],
         key_columns=[0, 1, 3, 5],  # a phone shows the position, your move, its score and vs rating
         note="Positions where you have played more than one move often (each at least 10 times): how each of "
-        "your choices has scored. A comparison of your own results, not a verdict on the moves.",
+        "your choices has scored. A comparison of your own results, not a verdict on the moves." + note,
     )
 
 
-def better_choice(grp: OpeningGroup, points: Sequence[ChoicePoint], th: Thresholds) -> Optional[str]:
-    """A study action when, at one of your choice points, the move leading into this opening scores clearly worse
-    than another move you also play there."""
+def better_choice_point(
+    grp: OpeningGroup, points: Sequence[ChoicePoint], th: Thresholds
+) -> Optional[tuple[ChoicePoint, OpeningGroup, OpeningGroup]]:
+    """(choice point, the move leading into this opening, the better-scoring move) at the first of your choice
+    points where the move leading into this opening scores clearly worse than another move you also play there."""
     for p in points:
         if p.color != grp.color:
             continue
@@ -434,13 +896,48 @@ def better_choice(grp: OpeningGroup, points: Sequence[ChoicePoint], th: Threshol
         best = max(others, key=lambda o: o.summary.delta)
         if best.summary.delta - this.summary.delta < th.min_effect:
             continue
-        return (
-            f"{p.where} you have a choice: {best.label} scores {pct(best.summary.score)} in {best.n} games "
-            f"({per100_games(best.summary.delta)} vs your rating), {this.label} {pct(this.summary.score)} in "
-            f"{this.n} ({per100_games(this.summary.delta)}). Play {best.label} for a while and see if your results "
-            "follow."
-        )
+        return p, this, best
     return None
+
+
+def better_choice(grp: OpeningGroup, points: Sequence[ChoicePoint], th: Thresholds) -> Optional[str]:
+    """A study action when, at one of your choice points, the move leading into this opening scores clearly worse
+    than another move you also play there."""
+    found = better_choice_point(grp, points, th)
+    if found is None:
+        return None
+    p, this, best = found
+    return (
+        f"{p.where} you have a choice: {best.label} scores {pct(best.summary.score)} in {best.n} games "
+        f"({per100_games(best.summary.delta)} vs your rating), {this.label} {pct(this.summary.score)} in "
+        f"{this.n} ({per100_games(this.summary.delta)}). Play {best.label} for a while and see if your results "
+        "follow."
+    )
+
+
+def choice_finding_strip(p: ChoicePoint, this: OpeningGroup, best: OpeningGroup) -> Optional[Strip]:
+    """For a finding whose advice is a choice point: that position as one small board, the move into this
+    opening as a red arrow and the better-scoring move you also play there as a green one. None when the moves
+    can't be replayed on a board."""
+    board, ucis = play_line(p.prefix)
+    if len(ucis) != len(p.prefix):
+        return None
+    arrows = [
+        a
+        for san, kind in ((option_san(p, this), "played"), (option_san(p, best), "best"))
+        if (a := move_arrow(board, san, kind)) is not None
+    ]
+    frame = Frame(
+        fen=board.fen(),
+        move=move_label(len(p.prefix) - 1, p.prefix[-1]) if p.prefix else "",
+        last_move=ucis[-1] if ucis else "",
+        caption=(
+            f"{best.label} {pct(best.summary.score)} in {best.n} games, {this.label} {pct(this.summary.score)} in "
+            f"{this.n}"
+        ),
+        arrows=arrows,
+    )
+    return Strip(title=f"Your choice {p.where[0].lower()}{p.where[1:]}: {best.label} or {this.label}", frames=[frame])
 
 
 def move10_eval(game: Game, ev: Any) -> Optional[float]:
@@ -747,7 +1244,37 @@ def score_insights(
                 example_games=recent_urls(grp.games, "loss" if kind == "weakness" else "win"),
             )
         )
+        ids = {id(g) for g in grp.games}
+        add_family_visuals(out[-1], grp, [g for g in by_colour[grp.color] if id(g) not in ids], th, points)
     return out, stats
+
+
+def add_family_visuals(
+    ins: Insight, grp: OpeningGroup, rest: Sequence[Game], th: Thresholds, points: Sequence[ChoicePoint] = ()
+) -> None:
+    """Formats, chart and board for a strength/weakness about one opening family (the finding itself is untouched).
+
+    The chart: your score vs rating in this opening next to your other games with that colour, overall and per
+    format. The board: the position your games in it usually reach, with the main line as a strip; when the
+    advice is a choice point (``better_choice``), that position as one more small board with both moves.
+    """
+    rated = [g for g in grp.games if g.expected_score is not None]
+    colour = _colour(grp.color)
+    name = display_name(grp.label, grp.color)
+    ins.formats = format_counts(rated or grp.games)
+    ins.chart = versus_chart(
+        f"Score vs rating: {name} and your other {colour} games",
+        name,
+        grp.games,
+        f"Other {colour} games",
+        rest,
+    )
+    ins.diagram = family_diagram(grp, ins.kind, th)
+    found = better_choice_point(grp, points, th) if ins.kind == "weakness" and chosen_by(grp.label) == grp.color else None
+    if found is not None:
+        strip = choice_finding_strip(*found)
+        if strip is not None:
+            ins.diagram.strips.append(strip)
 
 
 def early_loss_insights(
@@ -846,7 +1373,61 @@ def early_loss_insights(
                 example_games=[g.url for g in shortest if g.url][:MAX_EXAMPLES],
             )
         )
+        ids = {id(g) for g in f.games}
+        add_early_loss_visuals(out[-1], f, [g for g in eligible if id(g) not in ids], th)
     return out, stats
+
+
+def _quick_shares(games: Sequence[Game], th: Thresholds) -> tuple[list[Game], list[Game], list[Game], list[Game]]:
+    """(losses, quick losses, wins, quick wins) among ``games``."""
+    losses = [g for g in games if g.outcome == "loss"]
+    wins = [g for g in games if g.outcome == "win"]
+    return (
+        losses,
+        [g for g in losses if is_short_loss(g, th.short_loss_moves)],
+        wins,
+        [g for g in wins if is_short_decisive(g, th.short_loss_moves, "win")],
+    )
+
+
+def add_early_loss_visuals(ins: Insight, f: OpeningGroup, rest: Sequence[Game], th: Thresholds) -> None:
+    """Formats, chart and board for a quick-losses finding: the share of your losses and of your wins in the
+    opening that were over within ``short_loss_moves`` moves, overall, per format and in your other openings."""
+    decisive = f.losses + f.wins
+    ins.formats = format_counts(decisive)
+    bars, small = format_groups(decisive, rated=False)
+    groups = [(label, in_format(f.games, tc), tc is None) for label, tc in bars] + [("Other openings", list(rest), True)]
+    loss_values: list[Optional[float]] = []
+    win_values: list[Optional[float]] = []
+    rows = []
+    for label, games, whole in groups:
+        losses, quick_losses, wins, quick_wins = _quick_shares(games, th)
+        enough = whole or len(losses) + len(wins) >= MIN_FORMAT_GAMES
+        loss_values.append(len(quick_losses) / len(losses) if losses and enough else None)
+        win_values.append(len(quick_wins) / len(wins) if wins and enough else None)
+        rows.append([label, len(losses), len(quick_losses), loss_values[-1], len(wins), len(quick_wins), win_values[-1]])
+    n = th.short_loss_moves
+    title = f"Games over within {n} moves: {f.label} as {_colour(f.color)}"
+    note = (
+        f"Share of your losses, and of your wins, that ended by checkmate or resignation within {n} moves. "
+        f"Other openings: all your other games. {split_note(decisive, small, what='decisive games')}"
+    ).strip()
+    ins.chart = comparison_chart(
+        title,
+        [label for label, _, _ in groups],
+        [(f"Losses over within {n} moves", loss_values), (f"Wins over within {n} moves", win_values)],
+        value_format="pct",
+        note=note,
+        table=Table(
+            title=title,
+            columns=["Games", "Losses", "Quick losses", "Share of losses", "Wins", "Quick wins", "Share of wins"],
+            rows=rows,
+            formats=["text", "int", "int", "pct", "int", "int", "pct"],
+            note=note,
+            key_columns=[0, 3, 6],
+        ),
+    )
+    ins.diagram = family_diagram(f, "weakness", th)
 
 
 def _covering(counts: Counter, coverage: float) -> int:
@@ -865,24 +1446,12 @@ def breadth_insight(color: Color, games: Sequence[Game], th: Thresholds) -> tupl
 
     Counted on your own moves, not on opening names: a name like "Sicilian Defense" in your White games is your
     opponent's choice, not a sign of a broad White repertoire. Returns the insight and the widest count."""
-    if color == "white":
-        groups = {"": Counter(g.moves_san[0] for g in games if g.plies >= 1)}
-    else:
-        groups = {
-            first: Counter(g.moves_san[1] for g in games if g.plies >= 2 and g.moves_san[0] == first)
-            for first in BLACK_FIRST_MOVES
-        }
-    groups = {k: c for k, c in groups.items() if sum(c.values()) >= th.min_breadth_games}
+    groups = {k: c for k, c in breadth_groups(color, games).items() if sum(c.values()) >= th.min_breadth_games}
     if not groups:
         return None, None
     cov = f"{th.breadth_coverage:.0%}"
     ks = {first: _covering(c, th.breadth_coverage) for first, c in groups.items()}
     widest = max(ks.values())
-
-    def listing(c: Counter, ply: int) -> str:
-        total = sum(c.values())
-        top = sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
-        return ", ".join(f"{move_label(ply, m)} {pct(n / total)}" for m, n in top)
 
     if color == "white":
         c = groups[""]
@@ -894,12 +1463,12 @@ def breadth_insight(color: Color, games: Sequence[Game], th: Thresholds) -> tupl
             if k == 1
             else f"As White you mix {k} first moves to cover {cov} of your games"
         )
-        detail = f"Your first moves in {sum(c.values())} games as White: {listing(c, 0)}."
+        detail = f"Your first moves in {sum(c.values())} games as White: {_listing(c, 0)}."
     else:
         parts = [f"1.{first} mainly with {ks[first]} {'reply' if ks[first] == 1 else 'replies'}" for first in ks]
         title = f"As Black you answer {' and '.join(parts)}"
         detail = " ".join(
-            f"Against 1.{first} ({sum(c.values())} games): {listing(c, 1)}." for first, c in groups.items()
+            f"Against 1.{first} ({sum(c.values())} games): {_listing(c, 1)}." for first, c in groups.items()
         )
     if widest <= 2:
         study = [
@@ -921,23 +1490,86 @@ def breadth_insight(color: Color, games: Sequence[Game], th: Thresholds) -> tupl
             )
         study = [narrow, "Keep a small repertoire file for those lines and review it once a week."]
         severity = 0.3 if widest >= 5 else 0.15
-    return (
-        Insight(
-            id=f"{KEY}.observation.breadth-{color}",
-            kind="observation",
-            category="openings",
+    ins = Insight(
+        id=f"{KEY}.observation.breadth-{color}",
+        kind="observation",
+        category="openings",
+        title=title,
+        detail=detail,
+        severity=severity,
+        confidence=sample_confidence(sum(sum(c.values()) for c in groups.values())),
+        evidence={
+            "color": color,
+            "games": sum(sum(c.values()) for c in groups.values()),
+            "choices_for_coverage": {first or "first move": k for first, k in ks.items()},
+        },
+        study=study,
+    )
+    add_breadth_visuals(ins, color, games, list(groups), th)
+    return ins, widest
+
+
+def breadth_groups(color: Color, games: Sequence[Game]) -> dict[str, Counter]:
+    """Your moves counted for the repertoire breadth: {"": first moves} as White, {"e4": replies to 1.e4,
+    "d4": replies to 1.d4} as Black."""
+    if color == "white":
+        return {"": Counter(g.moves_san[0] for g in games if g.plies >= 1)}
+    return {
+        first: Counter(g.moves_san[1] for g in games if g.plies >= 2 and g.moves_san[0] == first)
+        for first in BLACK_FIRST_MOVES
+    }
+
+
+def _listing(c: Counter, ply: int) -> str:
+    """'1.e4 60%, 1.d4 20%, 1.c4 10%': the three most played moves and their shares."""
+    total = sum(c.values())
+    top = sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+    return ", ".join(f"{move_label(ply, m)} {pct(n / total)}" for m, n in top)
+
+
+def add_breadth_visuals(ins: Insight, color: Color, games: Sequence[Game], firsts: Sequence[str], th: Thresholds) -> None:
+    """Formats and chart for a repertoire-breadth observation: how many moves make up ``breadth_coverage`` of
+    your games (first moves as White, replies to each of ``firsts`` as Black), overall and per format."""
+    counted = [
+        g for g in games if (g.plies >= 1 if color == "white" else g.plies >= 2 and g.moves_san[0] in firsts)
+    ]
+    ins.formats = format_counts(counted)
+    bars, small = format_groups(counted, rated=False)
+    cov = f"{th.breadth_coverage:.0%}"
+    series = []
+    rows = []
+    for first in firsts:
+        name = "First moves" if color == "white" else f"Replies to 1.{first}"
+        values: list[Optional[float]] = []
+        for label, tc in bars:
+            c = breadth_groups(color, in_format(counted, tc))[first]
+            total = sum(c.values())
+            k = _covering(c, th.breadth_coverage) if total >= (1 if tc is None else MIN_FORMAT_GAMES) else None
+            values.append(k)
+            rows.append([label, "Start" if color == "white" else f"1.{first}", total, k, _listing(c, 0 if color == "white" else 1)])
+        series.append((name, values))
+    title = (
+        f"First moves that make up {cov} of your White games"
+        if color == "white"
+        else f"Replies that make up {cov} of your Black games"
+    )
+    note = (
+        f"How many different moves it takes to cover {cov} of your games: 1 = always the same move. "
+        f"{split_note(counted, small)}"
+    ).strip()
+    ins.chart = comparison_chart(
+        title,
+        [label for label, _ in bars],
+        series,
+        value_format="int",
+        note=note,
+        table=Table(
             title=title,
-            detail=detail,
-            severity=severity,
-            confidence=sample_confidence(sum(sum(c.values()) for c in groups.values())),
-            evidence={
-                "color": color,
-                "games": sum(sum(c.values()) for c in groups.values()),
-                "choices_for_coverage": {first or "first move": k for first, k in ks.items()},
-            },
-            study=study,
+            columns=["Format", "After", "Games", f"Moves for {cov}", "Most played"],
+            rows=rows,
+            formats=["text", "text", "int", "int", "text"],
+            note=note,
         ),
-        widest,
     )
 
 
@@ -1010,19 +1642,26 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     if excluded_note:
         table_note += f" {excluded_note}"
     tables = [
-        family_table(color, families[color], totals[color], th, table_note)
+        family_table(color, families[color], totals[color], th, table_note + mixed_formats_note(by_colour[color]))
         for color in ("white", "black")
         if totals[color]
     ]
-    tables.append(first_move_table(first_moves))
-    points = choice_points(by_colour, th)
-    choices = choice_table(points)
+    tables.append(first_move_table(first_moves, mixed_formats_note(eligible)))
+    all_points = choice_points(by_colour, th, max(th.max_choice_points, th.max_choice_diagrams))
+    points = all_points[: th.max_choice_points]
+    positions = [choice_position(p, th, ctx.evals) for p in all_points[: th.max_choice_diagrams]]
+    diagrams = [choice_diagram(pos) for pos in positions if pos is not None]
+    choices = choice_table(
+        points,
+        mixed_formats_note(list({id(g): g for p in points for o in p.options for g in o.games}.values()))
+        + (" Each position is drawn as a board below, with your moves as arrows." if diagrams else ""),
+    )
     if choices:
         tables.insert(0, choices)
-    lines = lines_table(eligible, totals, th)
+    lines = lines_table(eligible, totals, th, mixed_formats_note([g for g in eligible if g.opening]))
     if lines:
         tables.append(lines)
-    chart = family_chart(all_families, th)
+    charts = [c for c in (family_chart(all_families, th), family_format_chart(all_families, th)) if c]
 
     insights, test_stats = score_insights(all_families, by_colour, th, points, ctx.evals)
     weak_keys = {(i.evidence["color"], i.evidence["family"]) for i in insights if i.kind == "weakness"}
@@ -1089,10 +1728,12 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         summary=_summary(eligible, families, insights, th),
         kpis=kpis,
         tables=tables,
-        charts=[chart] if chart else [],
+        charts=charts,
         insights=insights,
+        diagrams=diagrams,
         stats={
             **base_stats,
+            "formats": format_counts(eligible),
             "families": {
                 f"{f.color}:{f.label}": _group_stats(f)
                 for f in sorted(all_families, key=lambda f: (f.color, -f.n, f.label))
