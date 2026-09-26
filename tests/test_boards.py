@@ -140,3 +140,31 @@ def test_chess960_castling_arrow_is_named_as_castling():
     assert boards.arrows_text(board, [Arrow("e1", "g1", "played"), Arrow("e1", "c1", "best")]) == (
         "Your move O-O (red), better O-O-O (green)")
     assert boards.board_svg(fen, arrows=[Arrow("e1", "g1", "played")]).count('class="a a-played"') == 1
+
+
+def test_a_shorter_arrow_along_the_same_line_is_drawn_on_top():
+    """Your d2-d3 under the engine's d2-d4: drawn by colour alone the green arrow would cover the red one but for a
+    sliver of its head. The shorter one goes on top, whatever its colour; the longer one's head still shows."""
+    board = chess.Board(ITALIAN)
+    d = visuals.position_diagram("4.d3", board.fen(), played="d3", best="d4", others=[("Nc3", "neutral")])
+    svg = boards.board_svg(d.fen, arrows=d.arrows)
+    kinds = re.findall(r'<g class="a a-(\w+)">', svg)
+    assert kinds == ["neutral", "best", "played"]  # neutral first as always; then the long green, the short red
+    order = boards.drawing_order(boards._clean_arrows([Arrow("d2", "d3", "best"), Arrow("d2", "d4", "played")]))
+    assert [a.kind for a, _, _ in order] == ["played", "best"]  # a short green on top of a long red too
+    # arrows from one square in different directions keep the usual order (the better move on top)
+    order = boards.drawing_order(boards._clean_arrows([Arrow("f1", "c4", "best"), Arrow("f1", "b5", "played"),
+                                                       Arrow("e2", "e4", "threat")]))
+    assert [a.kind for a, _, _ in order] == ["threat", "played", "best"]
+    # a knight's two jumps from one square never count as one line
+    assert boards._direction(chess.G1, chess.F3) != boards._direction(chess.G1, chess.E2)
+    assert boards._direction(chess.D2, chess.D3) == boards._direction(chess.D2, chess.D4) == (0, 1)
+
+
+def test_arrow_words_can_be_replaced_per_kind():
+    board = chess.Board(ITALIAN)
+    best = Arrow("d2", "d4", "best")
+    assert boards.arrow_phrase(board, best) == "better d4"
+    assert boards.arrow_phrase(board, best, {"best": "quick check's choice"}) == "quick check's choice d4"
+    assert boards.arrow_phrase(board, Arrow("d2", "d3", "line"), {"line": "best for you so far"}) == "best for you so far d3"
+    assert boards.arrows_text(board, [best], {"best": "engine's move"}) == "Engine's move d4 (green)"

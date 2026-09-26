@@ -259,7 +259,7 @@ def board_svg(
             out.append(f'<circle class="rg rg-{m.kind}" cx="{x + SQ / 2:g}" cy="{y + SQ / 2:g}" r="{SQ / 2 - 3:g}"/>')
 
     clean_arrows = _clean_arrows(arrows)
-    for a, start, end in sorted(clean_arrows, key=lambda t: _ARROW_ORDER[t[0].kind]):
+    for a, start, end in drawing_order(clean_arrows):
         out.append(_arrow_svg(start, end, a.kind, flipped))
 
     words = describe_board(board, orientation="black" if flipped else "white", arrows=[a for a, _, _ in clean_arrows],
@@ -269,6 +269,30 @@ def board_svg(
         f'<svg class="{cls}" viewBox="0 0 {SIZE} {SIZE}" role="img" aria-label="{_html.escape(words, quote=True)}" '
         f'focusable="false">{"".join(out)}</svg>'
     )
+
+
+def _direction(start: int, end: int) -> tuple[int, int]:
+    """An arrow's step reduced to lowest terms: arrows along the same line from one square share it."""
+    df = chess.square_file(end) - chess.square_file(start)
+    dr = chess.square_rank(end) - chess.square_rank(start)
+    g = math.gcd(df, dr) or 1
+    return df // g, dr // g
+
+
+def drawing_order(arrows: Sequence[tuple[Arrow, int, int]]) -> list[tuple[Arrow, int, int]]:
+    """The order to draw arrows in: the ones that matter most last, on top (``_ARROW_ORDER``). Arrows that leave
+    the same square in the same direction (your d2-d3 and the engine's d2-d4) are drawn together, longest first:
+    the shorter one on top keeps its shaft visible and the longer one's head sticks out beyond it, whatever their
+    colours (drawn by kind alone, the green d2-d4 would cover the red d2-d3 but for a sliver of its head)."""
+    groups: dict[tuple[int, tuple[int, int]], list[int]] = {}
+    for i, (_, start, end) in enumerate(arrows):
+        groups.setdefault((start, _direction(start, end)), []).append(i)
+    keys = []
+    for i, (a, start, end) in enumerate(arrows):
+        group = groups[(start, _direction(start, end))]
+        rank = max(_ARROW_ORDER[arrows[j][0].kind] for j in group)  # the group goes where its top arrow goes
+        keys.append((rank, group[0], -chess.square_distance(start, end), i))
+    return [arrows[i] for i in sorted(range(len(arrows)), key=keys.__getitem__)]
 
 
 def _clean_arrows(arrows: Iterable[Arrow]) -> list[tuple[Arrow, int, int]]:
@@ -326,22 +350,27 @@ def arrow_move_text(board: chess.Board, arrow: Arrow) -> str:
     return f"{chess.square_name(start)} to {chess.square_name(end)}"
 
 
-def arrow_phrase(board: Optional[chess.Board], arrow: Arrow) -> str:
-    """One arrow in words, without its colour: "your move d5", "better Nf3", "threat Qxf7", "Nc3"."""
+ARROW_WORDS = {"played": "your move", "best": "better", "threat": "threat"}  # before the move, by kind
+
+
+def arrow_phrase(board: Optional[chess.Board], arrow: Arrow, words: Optional[dict[str, str]] = None) -> str:
+    """One arrow in words, without its colour: "your move d5", "better Nf3", "threat Qxf7", "Nc3". ``words``
+    replaces the words before the move for some kinds ({"line": "best for you so far"})."""
     kind = arrow.kind if arrow.kind in ARROW_KINDS else "neutral"
     move = arrow_move_text(board, arrow) if board is not None else f"{arrow.start} to {arrow.end}"
     if not move:
         return ""
-    return {"played": f"your move {move}", "best": f"better {move}", "threat": f"threat {move}"}.get(kind, move)
+    prefix = {**ARROW_WORDS, **(words or {})}.get(kind, "")
+    return f"{prefix} {move}" if prefix else move
 
 
-def arrows_text(board: Optional[chess.Board], arrows: Iterable[Arrow]) -> str:
+def arrows_text(board: Optional[chess.Board], arrows: Iterable[Arrow], words: Optional[dict[str, str]] = None) -> str:
     """"Your move d5 (red), better Nf3 (green)": the arrows in words, in the report's colour code."""
     parts = []
     for a in arrows or ():
         if not isinstance(a, Arrow):
             continue
-        phrase = arrow_phrase(board, a)
+        phrase = arrow_phrase(board, a, words)
         if phrase:
             parts.append(f"{phrase} ({ARROW_COLOUR_WORDS.get(a.kind, 'grey')})")
     text = ", ".join(parts)
