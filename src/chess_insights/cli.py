@@ -316,7 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pz.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"cache folder (default {DEFAULT_CACHE_DIR})")
 
-    a = sub.add_parser("ask", parents=[common], help="ask a question about your last report (needs ANTHROPIC_API_KEY)")
+    a = sub.add_parser("ask", parents=[common], help="ask a question about your last report (needs ANTHROPIC_API_KEY; with --offline it quotes the report)")
     a.add_argument("username", help="your chess.com username (the report's name)")
     a.add_argument("question", help='your question in quotes, e.g. "why do I lose with the Alapin?"')
     a.add_argument("--out", default=None, help="the report's path stem, as given to `report --out` (default reports/<username>)")

@@ -5,8 +5,8 @@ Every board on a page references ONE piece sprite (:func:`sprite_svg`, python-ch
 last-move tint are coloured by CSS classes whose custom properties (light and dark values) live in the page's
 stylesheet (``BOARD_LIGHT`` / ``BOARD_DARK`` here, merged into the theme tokens by ``report/html.py``).
 
-Arrows follow one colour code everywhere in the report: your move red, the better move green, a threat orange,
-a line of play blue, anything else grey. A FEN python-chess cannot read renders nothing (never an exception).
+Arrows follow one colour code everywhere in the report: your move red, the engine's better move green, a threat
+orange, a line of play (or the move that has scored best for you) blue, anything else grey. A FEN python-chess cannot read renders nothing (never an exception).
 
 The text helpers at the bottom (the board described in words, a line of play in numbered SAN, EPD keys) are
 shared with the Markdown renderer.
