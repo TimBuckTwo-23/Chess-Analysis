@@ -159,6 +159,11 @@ def score_delta(games: Sequence[Game], attenuate: bool | float = False) -> Optio
     return summarize(games, attenuate=attenuate).delta if games else None
 
 
+def with_ratings(games: Iterable[Game]) -> list[Game]:
+    """The games a score-vs-rating test uses: those with both ratings (``ScoreSummary.n_rated``)."""
+    return [g for g in games if g.expected_score is not None]
+
+
 def split_series(
     series: Sequence[tuple[str, Sequence[Game], Metric]],
     *,
@@ -200,18 +205,26 @@ def split_chart(
 ) -> Chart:
     """A finding's chart: each series over all its games, then per format (``split_series``).
 
-    The table under it ("Show the numbers") has the games behind every bar, so a thin format is easy to spot.
+    The table under it ("Show the numbers") has the games behind every bar, so a thin format is easy to spot:
+    one "Games" column when every series is measured over the same games (abandoned games, draw rate), else a
+    games column per series.
     """
     labels, values, counts = split_series(series, min_games=min_games)
     columns, formats = ["Format"], ["text"]
-    for name, _ in values:
-        columns += [f"{name}: games", f"{name}: {value_name}"]
-        formats += ["int", value_format]
-    rows = [
-        [label, *(cell for (_, vals), ns in zip(values, counts, strict=True) for cell in (ns[i], vals[i]))]
-        for i, label in enumerate(labels)
-    ]
-    key_columns = [0, *(2 + 2 * i for i in range(len(values)))]
+    if all(gs is series[0][1] for _, gs, _ in series):  # the same games behind every series
+        columns += ["Games", *(name for name, _ in values)]
+        formats += ["int", *([value_format] * len(values))]
+        rows = [[label, counts[0][i], *(vals[i] for _, vals in values)] for i, label in enumerate(labels)]
+        key_columns = [0, *range(2, len(columns))]
+    else:
+        for name, _ in values:
+            columns += [f"{name}: games", f"{name}: {value_name}"]
+            formats += ["int", value_format]
+        rows = [
+            [label, *(cell for (_, vals), ns in zip(values, counts, strict=True) for cell in (ns[i], vals[i]))]
+            for i, label in enumerate(labels)
+        ]
+        key_columns = [0, *(2 + 2 * i for i in range(len(values)))]
     table = Table(title=title, columns=columns, rows=rows, formats=formats, key_columns=key_columns)
     played = format_counts(g for _, gs, _ in series for g in gs)
     thin = len(labels) - 1 < len(played) or any(n < min_games for ns in counts for n in ns[1:])
@@ -357,8 +370,8 @@ def trend_chart(trend: Trend, points: int = TREND_POINTS) -> Chart:
         value_format="rating",
         kind="line",
         note=(
-            f"{name.capitalize()} only: {trend.n} rated games. Your rating on each date; the straight line is the "
-            "best fit through every game's rating, and moves by the finding's straight-line figure."
+            f"{name.capitalize()} only: {trend.n} rated games. Your rating on each date, and the straight line that "
+            f"fits all those games best ({fmt_signed(trend.change)} over {trend.days} days)."
         ),
     )
 
@@ -475,8 +488,9 @@ def opponent_bucket_chart(buckets: dict[str, list[Game]], deltas: Sequence[Optio
         for i, (key, _) in enumerate(OPPONENT_BUCKETS):
             games = [g for g in buckets[key] if g.time_class == tc]
             s = summarize(games, attenuate=True)
-            values.append(s.delta if s.n_rated >= MIN_FORMAT_GAMES else None)
-            cells[i] += [s.n, s.delta]
+            delta = s.delta if s.n_rated >= MIN_FORMAT_GAMES else None  # a few games say little: left empty
+            values.append(delta)
+            cells[i] += [s.n_rated, delta]
         series.append(Series(name, values))
         columns += [f"{name}: games", f"{name}: vs rating"]
         value_formats += ["int", "signed_pct"]
@@ -484,7 +498,7 @@ def opponent_bucket_chart(buckets: dict[str, list[Game]], deltas: Sequence[Optio
     if formats:
         note = (
             f"Opponent rating minus yours; one colour per format. {format_note(counts)} with ratings. A format's bar "
-            f"is left empty below {MIN_FORMAT_GAMES} games in that group."
+            f"(and its number in the table) is left empty below {MIN_FORMAT_GAMES} games in that group."
         )
     return Chart(
         kind="bar",
@@ -541,9 +555,10 @@ def _colour_study(colour: str, games: Sequence[Game], flagged: Iterable[str] = (
 
 
 def colour_chart(games: Sequence[Game]) -> Chart:
-    """Score vs rating with White and with Black, over all your games and per format."""
-    white = [g for g in games if g.color == "white"]
-    black = [g for g in games if g.color == "black"]
+    """Score vs rating with White and with Black, over all your games with ratings and per format."""
+    rated = with_ratings(games)
+    white = [g for g in rated if g.color == "white"]
+    black = [g for g in rated if g.color == "black"]
     return split_chart(
         "Score vs rating with White and Black",
         [("White", white, score_delta), ("Black", black, score_delta)],
@@ -553,7 +568,7 @@ def colour_chart(games: Sequence[Game]) -> Chart:
         note=(
             "Your score minus what your rating predicts, per game (+5% = 5 points per 100 games above it). The "
             "prediction ignores colour: White normally scores about 2 points per 100 games above it and Black about "
-            f"2 below. {format_note(format_counts(games))}."
+            f"2 below. {format_note(format_counts(rated), 'games with ratings')}."
         ),
     )
 
@@ -667,7 +682,7 @@ def colour_insight(
         },
         study=_colour_study(weaker, colour_games, {fam for c, fam, k in opening_claims if c == weaker}),
         example_games=recent_urls(colour_games, "loss"),
-        formats=format_counts(games),
+        formats=format_counts(with_ratings(games)),
     )
     insight.chart = safe_visual(lambda: colour_chart(games), "the colour chart")
     return insight, central
@@ -735,7 +750,7 @@ def opponent_chart(key: str, group: Sequence[Game], rated: Sequence[Game], atten
     metric: Metric = lambda gs: score_delta(gs, attenuate=attenuation)  # noqa: E731
     return split_chart(
         f"Score vs rating against {key}-rated opponents",
-        [(f"Opponents 50+ {side} you", group, metric), ("Your other games", rest, metric)],
+        [(f"Opponents rated 50+ {side} you", group, metric), ("Your other games", rest, metric)],
         value_format="signed_pct",
         value_name="vs rating",
         reference=0.0,
@@ -957,7 +972,7 @@ def time_control_insights(
             study=study,
             example_games=recent_urls(by_pool[pool], "loss"),
         )
-    claim.formats = format_counts(g for p in pools for g in by_pool[p])
+    claim.formats = format_counts(with_ratings(g for p in pools for g in by_pool[p]))
     claim.chart = safe_visual(lambda: time_control_chart(pool, pools, summaries, rest), "the time-control chart")
     return [claim], stats
 
@@ -1139,12 +1154,16 @@ def accuracy_section(
 
 
 def accuracy_chart(by_pool: dict[str, list[Game]], reviewed: Sequence[Game]) -> Chart:
-    """chess.com Game Review accuracy over every reviewed game and per time control: all, in wins, in losses."""
-    groups = [(pool, [g for g in games if g.my_accuracy is not None]) for pool, games in by_pool.items()]
-    groups = [(pool, rev) for pool, rev in groups if rev]
-    if len(groups) > 1:
-        groups.insert(0, ("All formats", list(reviewed)))
-    groups = groups[:MAX_CHART_LABELS]
+    """chess.com Game Review accuracy over every reviewed game and per time control: all, in wins, in losses.
+
+    A time control gets bars of its own with ``MIN_FORMAT_GAMES`` reviewed games (a handful of reviewed games
+    says little); the table under the chart lists every time control.
+    """
+    pools = [(pool, [g for g in games if g.my_accuracy is not None]) for pool, games in by_pool.items()]
+    pools = [(pool, rev) for pool, rev in pools if rev]
+    groups = ([("All formats", list(reviewed))] if len(pools) > 1 else []) + pools
+    shown = [(label, gs) for label, gs in groups if label == "All formats" or len(gs) >= MIN_FORMAT_GAMES]
+    shown = (shown if len(pools) > 1 else groups)[:MAX_CHART_LABELS]
 
     def avg(gs: Sequence[Game], outcome: Optional[str] = None, field: str = "my_accuracy") -> Optional[float]:
         return _avg(getattr(g, field) for g in gs if outcome is None or g.outcome == outcome)
@@ -1159,19 +1178,22 @@ def accuracy_chart(by_pool: dict[str, list[Game]], reviewed: Sequence[Game]) -> 
         formats=["text", "int", "float1", "float1", "float1", "float1"],
         key_columns=[0, 2, 3, 4],
     )
+    note = (
+        "Average accuracy (0-100) in the games you ran Game Review on, which may not be typical. "
+        f"{' · '.join(f'{label} {len(gs)}' for label, gs in pools)} reviewed games."
+    )
+    if len(shown) < len(groups):
+        note += f" A time control with fewer than {MIN_FORMAT_GAMES} reviewed games gets no bars of its own."
     return comparison_chart(
         "Your chess.com Game Review accuracy",
-        [label for label, _ in groups],
+        [label for label, _ in shown],
         [
-            ("All reviewed games", [avg(gs) for _, gs in groups]),
-            ("In wins", [avg(gs, "win") for _, gs in groups]),
-            ("In losses", [avg(gs, "loss") for _, gs in groups]),
+            ("All reviewed games", [avg(gs) for _, gs in shown]),
+            ("In wins", [avg(gs, "win") for _, gs in shown]),
+            ("In losses", [avg(gs, "loss") for _, gs in shown]),
         ],
         value_format="float1",
-        note=(
-            "Average accuracy (0-100) in the games you ran Game Review on, which may not be typical. "
-            f"{' · '.join(f'{label} {len(gs)}' for label, gs in groups if label != 'All formats')} reviewed games."
-        ),
+        note=note,
         table=table,
     )
 

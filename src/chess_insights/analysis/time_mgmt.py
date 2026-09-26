@@ -687,6 +687,7 @@ def pace_table(classes: Sequence[ClassStats]) -> Table:
         columns=columns,
         rows=rows,
         formats=["text", "int", "pct", "pct"] + ["int", "pct"] * len(CHECKPOINTS),
+        key_columns=[0, 2, 3, 5],  # a phone shows the clock shares and "behind at move 20", not the game counts
         note=(
             f"Clock used = share of the starting time spent on the first {OPENING_MOVES} moves (increments "
             "included), in games where both players got that far. Behind = you had less time left than your "
@@ -886,8 +887,13 @@ def finding_chart(ins: Insight, classes: Sequence[ClassStats]) -> Optional[Chart
 
 
 def _finding_games(ins: Insight, cs: ClassStats) -> int:
-    """Games behind a clock finding in one time class (the games its test used)."""
-    return cs.opening_n if _habit(ins) == "slow-opening" else cs.n
+    """Games behind a clock finding in one time class (the games its test used, as counted in its text)."""
+    habit = _habit(ins)
+    if habit == "slow-opening":
+        return cs.opening_n  # games that reached move OPENING_MOVES
+    if habit == "clock-handling":
+        return cs.checkpoints[CHECKPOINTS[0]].n  # games in which both players made CHECKPOINTS[0] moves
+    return cs.n
 
 
 def add_visuals(insights: Sequence[Insight], classes: Sequence[ClassStats]) -> None:
@@ -934,7 +940,7 @@ def _kpis(main: ClassStats) -> list[Kpi]:
     cp = main.checkpoints[CHECKPOINTS[0]]
     if cp.n:
         kpis.append(
-            Kpi(f"Behind on the clock at move {cp.move}", cp.behind_rate, "pct", hint=f"{cp.n} {tc} games")
+            Kpi(f"Behind on the clock at move {cp.move} ({tc})", cp.behind_rate, "pct", hint=f"{cp.n} {tc} games")
         )
     return kpis
 

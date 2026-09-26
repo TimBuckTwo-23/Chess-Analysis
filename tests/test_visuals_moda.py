@@ -73,12 +73,15 @@ def check_visuals(mr) -> None:
             if c.table is not None:
                 assert all(len(r) == len(c.table.columns) for r in c.table.rows)
                 assert c.table.formats is None or len(c.table.formats) == len(c.table.columns)
+                assert all(0 <= k < len(c.table.columns) for k in c.table.key_columns or [])
         if ins.diagram is not None:
             check_diagram(ins.diagram, ins)
     for chart in mr.charts:
         assert chart.series and all(len(s.values) == len(chart.labels) for s in chart.series), chart.title
-        if chart.table is not None:
-            assert all(len(r) == len(chart.table.columns) for r in chart.table.rows), chart.table.title
+    for table in [*mr.tables, *(c.table for c in mr.charts if c.table is not None)]:
+        assert all(len(r) == len(table.columns) for r in table.rows), table.title
+        assert table.formats is None or len(table.formats) == len(table.columns), table.title
+        assert all(0 <= k < len(table.columns) for k in table.key_columns or []), table.title
 
 
 # --------------------------------------------------------------------------- results
@@ -115,11 +118,11 @@ def test_opponent_findings_compare_with_your_other_games_per_format():
     assert weak.formats == {"bullet": 20, "blitz": 20, "rapid": 20}
     chart = weak.chart
     assert chart.labels == ["All formats", "Bullet", "Blitz", "Rapid"]
-    group, rest = series(chart, "Opponents 50+ below you"), series(chart, "Your other games")
+    group, rest = series(chart, "Opponents rated 50+ below you"), series(chart, "Your other games")
     assert group[0] == pytest.approx(weak.evidence["delta"]) and rest[0] == pytest.approx(weak.evidence["rest_delta"])
     assert per100_games(group[0]) in weak.detail and per100_games(rest[0]) in weak.detail
     strong = finding(mr, "results.strength.higher-rated-opponents")
-    assert series(strong.chart, "Opponents 50+ above you")[0] == pytest.approx(strong.evidence["delta"])
+    assert series(strong.chart, "Opponents rated 50+ above you")[0] == pytest.approx(strong.evidence["delta"])
     # the section's opponent-strength chart gets one series per format
     buckets = next(c for c in mr.charts if c.title.startswith("Score vs realistic"))
     assert [s.name for s in buckets.series] == ["All formats", "Bullet", "Blitz", "Rapid"]
@@ -161,6 +164,8 @@ def test_rating_trend_finding_is_a_small_line_of_that_format_only():
     assert (actual[0], actual[-1]) == (trend.evidence["first"], trend.evidence["last"]) == (1500, 1587)
     assert line[-1] - line[0] == pytest.approx(trend.evidence["change"], abs=0.2)
     assert "Blitz only: 30 rated games" in chart.note
+    assert f"({results.fmt_signed(trend.evidence['change'])} over 90 days)" in chart.note
+    assert f"a straight line through all those games says {results.fmt_signed(trend.evidence['change'])}" in trend.detail
 
 
 def test_accuracy_finding_numbers_match_the_title():
@@ -432,3 +437,103 @@ def test_merged_clock_finding_keeps_the_formats_of_every_class():
     blitz, rapid = flag_player(), flag_player(base=600, time_class="rapid")
     ins = finding(run(time_mgmt, blitz + rapid), "time.weakness.lost-on-time-")
     assert dataclasses.asdict(ins)["formats"] == {"blitz": 40, "rapid": 40}
+
+
+# --------------------------------------------------------------------------- review fixes
+def test_formats_and_chart_games_are_the_rated_games_the_test_used():
+    games = []
+    for tc in ("bullet", "blitz", "rapid"):
+        games += games_by(10, 4, color="white", **fmt(tc)) + games_by(4, 10, color="black", **fmt(tc))
+    unrated = [make_game(outcome=o, color=c, my_rating=None, opp_rating=None, **fmt("blitz"))
+               for o in ("win", "loss") for c in ("white", "black")]
+    ins = finding(run(results, games + unrated), "results.weakness.colour-black")
+    assert ins.formats == {"bullet": 28, "blitz": 28, "rapid": 28}  # the unrated blitz games are not behind it
+    first = ins.chart.table.rows[0]
+    assert first[0] == "All formats" and first[1] == first[3] == 42 and "in 42 games" in ins.detail
+
+    moves = lambda n: (KNIGHTS * n)[: 2 * n]  # noqa: E731
+    short = [
+        make_game(outcome="loss" if i % 4 else "win", moves_san=moves(12 + i % 8), **fmt(("blitz", "rapid")[i % 2]))
+        for i in range(40)
+    ]
+    long_ = [make_game(outcome="win" if i % 4 else "loss", moves_san=moves(47 + i % 10)) for i in range(40)]
+    extra = [make_game(outcome="loss", moves_san=moves(15), my_rating=None, opp_rating=None, **fmt("rapid"))
+             for _ in range(5)]
+    ins = finding(run(endings, short + long_ + extra), "endings.observation.length-short")
+    assert ins.formats == {"blitz": 60, "rapid": 20}
+    assert ins.chart.table.rows[0][1] == ins.evidence["n_rated"] == 40
+
+
+def test_clock_handling_formats_count_the_games_that_reached_move_20():
+    flags = [
+        timed_game([3] * 25, [6] * 25, outcome="win", termination="timeout", opp_result_code="timeout")
+        for _ in range(14)
+    ]
+    rest = [timed_game([3] * 25, [6] * 25, outcome=o) for o in ["win", "loss", "draw"] * 5]
+    rest.append(timed_game([3] * 25, [6] * 25, outcome="loss", termination="timeout", my_result_code="timeout"))
+    short = [timed_game([3] * 12, [6] * 12, outcome="draw") for _ in range(5)]  # over before move 20
+    mr = run(time_mgmt, flags + rest + short)
+    check_visuals(mr)
+    ins = finding(mr, "time.strength.clock-handling-blitz")
+    assert ins.formats == {"blitz": 30} and "of 30 blitz games" in ins.detail
+    assert "30 games" in ins.chart.note
+    assert any(k.label == "Behind on the clock at move 20 (blitz)" for k in mr.kpis)
+
+
+def test_charts_over_the_same_games_have_one_games_column():
+    games = [make_game(outcome="loss", termination="abandoned", my_result_code="abandoned", **fmt("blitz"))
+             for _ in range(3)]
+    games += games_by(20, 18, 4, **fmt("blitz")) + games_by(10, 10, 2, **fmt("rapid"))
+    mr = run(endings, games)
+    abandoned = finding(mr, "endings.observation.abandoned-games").chart.table
+    assert abandoned.columns == ["Format", "Games", "You abandoned", "Opponents abandoned"]
+    assert abandoned.rows[0] == ["All formats", 67, 3, 0] and abandoned.key_columns == [0, 2, 3]
+    draws = finding(mr, "endings.observation.draw-rate").chart.table
+    assert draws.columns == ["Format", "Games", "Draw rate"] and draws.rows[1][:2] == ["Blitz", 45]
+    winner = next(k for k in mr.kpis if k.label == "Games with a winner")
+    assert winner.hint.endswith("blitz and rapid together")
+
+
+def test_accuracy_chart_gives_thin_time_controls_no_bars():
+    games = []
+    for tc, n in (("bullet", 12), ("blitz", 12), ("rapid", 3)):
+        games += [make_game(outcome="win" if i % 2 else "loss", my_accuracy=80.0 + i % 2 * 10, opp_accuracy=75.0,
+                            **fmt(tc)) for i in range(n)]
+    ins = finding(run(results, games), "results.observation.chesscom-accuracy")
+    check_visuals(run(results, games))
+    assert ins.formats == {"bullet": 12, "blitz": 12, "rapid": 3}
+    assert ins.chart.labels == ["All formats", "Bullet", "Blitz"]
+    assert [r[0] for r in ins.chart.table.rows] == ["All formats", "Bullet", "Blitz", "Rapid"]
+    assert "fewer than 10 reviewed games" in ins.chart.note and "Rapid 3" in ins.chart.note
+    assert f"{series(ins.chart, 'All reviewed games')[0]:.1f}" in ins.title
+
+
+def test_draw_board_is_one_of_the_linked_example_draws():
+    old = [make_game(outcome="draw", termination="repetition", minutes_ago=5000 + i) for i in range(6)]
+    new = [make_game(outcome="draw", minutes_ago=100 + i) for i in range(5)]  # agreed draws, the five most recent
+    rest = games_by(10, 10, **fmt("blitz"))
+    ins = finding(run(endings, old + new + rest), "endings.observation.draw-rate")
+    assert "most common kind of draw is by repetition" in ins.detail
+    board = ins.diagram
+    assert board.link in ins.example_games and board.title == "A recent draw by agreement"
+    assert "you agreed a draw" in board.caption
+    assert endings.draw_title(make_game(outcome="draw", termination="other")) == "A recent draw"
+
+
+def test_opponent_strength_table_leaves_thin_groups_empty_like_the_chart():
+    buckets = {key: [] for key, _ in results.OPPONENT_BUCKETS}
+    buckets["lower"] = games_by(6, 6, opp_rating=1400, **fmt("bullet")) + games_by(6, 6, opp_rating=1400)
+    buckets["similar"] = games_by(3, 2, **fmt("bullet")) + games_by(6, 6)
+    deltas = [results.score_delta(buckets[key], attenuate=True) for key, _ in results.OPPONENT_BUCKETS]
+    chart = results.opponent_bucket_chart(buckets, deltas)
+    bullet = series(chart, "Bullet")
+    row = next(r for r in chart.table.rows if r[0].startswith("similar"))
+    assert bullet[2] is None and row[1:3] == [5, None]  # 5 bullet games: no bar, no number
+    assert bullet[1] is not None and "left empty below 10 games" in chart.note
+
+
+def test_a_null_move_at_the_end_highlights_nothing():
+    from factories import DEFAULT_MOVES
+
+    board = endings.final_position_diagram(make_game(moves_san=DEFAULT_MOVES + ["--"]), "x")
+    assert board is not None and board.last_move == "" and " b " in board.fen

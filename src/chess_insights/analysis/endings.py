@@ -37,7 +37,7 @@ import chess
 
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Diagram, Game, Insight, Kpi, Mark, ModuleResult, Series, Table
-from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, format_counts, position_diagram
+from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, format_counts, format_text, position_diagram
 from ..stats import (
     STRICT_ALPHA,
     MeanTest,
@@ -56,7 +56,16 @@ from ..stats import (
     summarize,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, Metric, format_note, recent_urls, safe_visual, score_delta, split_chart
+from .results import (
+    MAX_EXAMPLES,
+    Metric,
+    format_note,
+    recent_urls,
+    safe_visual,
+    score_delta,
+    split_chart,
+    with_ratings,
+)
 
 KEY = "endings"
 TITLE = "How your games end"
@@ -241,6 +250,7 @@ def final_position_diagram(game: Game, title: str) -> Optional[Diagram]:
         f"Final position: {ending_text(game)} after {game.full_moves} moves ({time_control_text(game)}, {day}). "
         f"{material_text(material_balance(board, game.color))}"
     )
+    last = board.peek()
     return position_diagram(
         title,
         board.fen(),
@@ -248,7 +258,7 @@ def final_position_diagram(game: Game, title: str) -> Optional[Diagram]:
         caption=caption,
         link=game.url,
         time_class=game.time_class,
-        last_move=board.peek().uci(),
+        last_move=last.uci() if last else "",  # a null move ("--") has no squares to highlight
         marks=marks,
     )
 
@@ -740,7 +750,7 @@ def length_insights(
             },
             study=[a.format(k=k) for a in study],
             example_games=examples,
-            formats=format_counts(g for gs in groups.values() for g in gs),
+            formats=format_counts(with_ratings(g for gs in groups.values() for g in gs)),
         )
         insight.chart = safe_visual(lambda: length_split_chart(key, groups), "a game-length chart")
         out.append(insight)
@@ -748,18 +758,22 @@ def length_insights(
 
 
 def length_split_chart(key: str, groups: dict[str, list[Game]]) -> Chart:
-    """Score vs rating in one length band and in your games of other lengths, over all formats and per format."""
+    """Score vs rating in one length band and in your games of other lengths, over all formats and per format.
+
+    Only games with ratings count (the ones the finding's test used), so the games under the chart match its text.
+    """
     label = next(label for k, label, _, _ in LENGTH_BUCKETS if k == key)
-    rest = [g for k2, gs in groups.items() if k2 != key for g in gs]
+    band = with_ratings(groups[key])
+    rest = with_ratings(g for k2, gs in groups.items() if k2 != key for g in gs)
     return split_chart(
         f"Score vs rating in games of {label} moves",
-        [(f"Games of {label} moves", groups[key], score_delta), ("Other lengths", rest, score_delta)],
+        [(f"Games of {label} moves", band, score_delta), ("Other lengths", rest, score_delta)],
         value_format="signed_pct",
         value_name="vs rating",
         reference=0.0,
         note=(
             "Your score minus what your rating predicts, per game (+5% = 5 points per 100 games above it). "
-            f"{format_note(format_counts(g for gs in groups.values() for g in gs))}."
+            f"{format_note(format_counts(band + rest), 'games with ratings')}."
         ),
     )
 
@@ -800,11 +814,31 @@ def draw_insight(by_class: dict[str, list[Game]], games: Sequence[Game], th: Thr
     )
     insight.chart = safe_visual(lambda: draw_chart(games, th.min_tc_games), "the draw-rate chart")
     if draws:
-        common = Counter(draw_type(g) for g in draws).most_common(1)[0][0]
-        typical = [g for g in draws if draw_type(g) == common]
-        title = f"A recent draw by {dict(DRAW_TYPES)[common].lower()}"
-        insight.diagram = safe_visual(lambda: first_diagram(typical, insight.example_games, title), "a draw board")
+        insight.diagram = safe_visual(lambda: draw_diagram(draws, insight.example_games), "a draw board")
     return insight
+
+
+def draw_title(game: Game) -> str:
+    """'A recent draw by repetition' ('A recent draw' when the kind of draw is unknown)."""
+    kind = draw_type(game)
+    return "A recent draw" if kind == "other" else f"A recent draw by {dict(DRAW_TYPES)[kind].lower()}"
+
+
+def draw_diagram(draws: Sequence[Game], urls: Sequence[str]) -> Optional[Diagram]:
+    """The final position of a recent draw, of your most common kind of draw where possible.
+
+    The finding's example games (``urls``, newest first) come first, so the board's game is one the report
+    links and labels: an example of the most common kind, then any example, then any draw of that kind.
+    """
+    common = Counter(draw_type(g) for g in draws).most_common(1)[0][0]
+    by_url = {g.url: g for g in draws if g.url}
+    examples = [by_url[u] for u in urls if u in by_url]
+    typical = sorted((g for g in draws if draw_type(g) == common), key=lambda g: g.end_time, reverse=True)
+    for pool in ([g for g in examples if draw_type(g) == common], examples, typical):
+        for game in pool[: MAX_EXAMPLES * 2]:
+            if (diagram := final_position_diagram(game, draw_title(game))) is not None:
+                return diagram
+    return None
 
 
 def draw_chart(games: Sequence[Game], min_games: int) -> Chart:
@@ -827,8 +861,10 @@ def _kpis(games: Sequence[Game], p: DecisiveProfile, abandoned: int) -> list[Kpi
     n = len(games)
     decisive = sum(1 for g in games if g.outcome != "draw")
     mated, mating = p.by_method["checkmate"]
+    formats = format_counts(games)
+    together = f"; {format_text(formats)} together" if len(formats) > 1 else ""
     return [
-        Kpi("Games with a winner", decisive / n, "pct", hint=f"{decisive} of {n} (not drawn)"),
+        Kpi("Games with a winner", decisive / n, "pct", hint=f"{decisive} of {n} (not drawn){together}"),
         Kpi("Losses by checkmate", p.loss_share("checkmate"), "pct", hint=f"{mated} of {p.losses} losses"),
         Kpi("Wins by checkmate", p.win_share("checkmate"), "pct", hint=f"{mating} of {p.wins} wins"),
         Kpi("Losses on time", p.loss_share("timeout"), "pct", hint=f"{p.by_method['timeout'][0]} games"),
