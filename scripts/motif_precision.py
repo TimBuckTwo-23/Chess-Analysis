@@ -1,7 +1,7 @@
 """Precision and recall of the motif detectors against Lichess's puzzle themes.
 
     python scripts/motif_precision.py [--csv tests/fixtures/lichess_puzzles_sample.csv]
-                                      [--refutation] [--extend PLIES --stockfish PATH --nodes N]
+                                      [--refutation | --previous] [--extend PLIES --stockfish PATH --nodes N]
 
 Default: the gate measurement of tests/test_motifs.py. A Lichess puzzle's FEN is the position before the
 opponent's move; the solution is Moves[1:]. We run ``detect_moves`` on the position after Moves[0] and count the
@@ -10,6 +10,9 @@ with it; recall = of the puzzles Lichess tagged, the share we found.
 
 ``--refutation`` runs the puzzle the way the coaching reads a refutation: from the FEN before the opponent's
 move, counting the second side's motifs (the recapture check then sees the move before).
+
+``--previous`` runs the solution as a best line whose caller passes the position before the opponent's move
+(``previous_fen``), which settles whether the solver's first capture is a recapture.
 
 ``--extend PLIES`` stresses the detectors the way an engine line does: the solution is continued with
 Stockfish's principal variation until the line is PLIES long, so patterns that turn up after the tactic is over
@@ -35,7 +38,7 @@ from chess_insights.coach.motifs import GATED_THEMES, THEMES, detect_moves, puzz
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def score(rows, *, refutation=False, extend=0, engine=None, nodes=30000):
+def score(rows, *, refutation=False, previous=False, extend=0, engine=None, nodes=30000):
     tagged, hits, labelled = Counter(), Counter(), Counter()
     for row in rows:
         moves = row["Moves"].split()
@@ -49,6 +52,11 @@ def score(rows, *, refutation=False, extend=0, engine=None, nodes=30000):
                 moves = moves + [m.uci() for m in info.get("pv", [])][: extend - (len(moves) - 1)]
         if refutation:
             found = {m.theme for m in detect_moves(board.fen(), moves, max_plies=len(moves)) if m.side == "second"}
+        elif previous:
+            after = board.copy()
+            after.push_uci(moves[0])
+            found = {m.theme for m in detect_moves(after.fen(), moves[1:], max_plies=len(moves),
+                                                   previous_fen=row["FEN"]) if m.side == "first"}
         else:
             found = {m.theme for m in puzzle_motifs(board.fen(), moves)}
         labels = set(row["Themes"].split())
@@ -74,6 +82,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--csv", default=str(ROOT / "tests" / "fixtures" / "lichess_puzzles_sample.csv"))
     ap.add_argument("--refutation", action="store_true")
+    ap.add_argument("--previous", action="store_true", help="pass the position before the opponent's move")
     ap.add_argument("--extend", type=int, default=0, help="continue each solution to this many plies (Stockfish)")
     ap.add_argument("--stockfish", default="stockfish")
     ap.add_argument("--nodes", type=int, default=30000)
@@ -85,7 +94,8 @@ def main() -> None:
         if engine is not None:
             engine.configure({"Threads": 1, "Hash": 16})
         start = time.perf_counter()
-        result = score(rows, refutation=args.refutation, extend=args.extend, engine=engine, nodes=args.nodes)
+        result = score(rows, refutation=args.refutation, previous=args.previous, extend=args.extend, engine=engine,
+                       nodes=args.nodes)
         print(f"{len(rows)} puzzles in {time.perf_counter() - start:.1f}s")
     finally:
         if engine is not None:

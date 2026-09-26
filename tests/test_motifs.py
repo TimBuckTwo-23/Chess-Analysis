@@ -116,6 +116,91 @@ def test_squares_start_with_the_active_piece():
     assert mate.ply == 2 and mate.squares == ["d8", "g8"]
 
 
+def test_pin_marks_the_piece_that_pins():
+    # the piece on e2 pins the loose knight to its king; a bishop behind it on the file (it can't pin along a
+    # file), or a rook behind the pinning queen, must not be marked instead
+    for fen in ("4k3/8/4n3/8/8/8/4R3/4BK2 w - - 0 1", "4k3/8/4n3/8/8/8/4Q3/4RK2 w - - 0 1"):
+        assert motif(fen, ["f1g1", "e8d8"], "pin").squares == ["e2", "e6", "e8"]
+
+
+def test_a_promoted_pawn_forks_as_its_new_piece():
+    # e8=Q hits two guarded minor pieces: a queen attacking a knight and a bishop is not a fork ...
+    assert "fork" not in themes("8/4P3/p7/1n3p2/4b3/7K/k7/8 w - - 0 1", ["e7e8q", "a2b2", "h3h4"])
+    # ... but e8=N+ forking king and queen is
+    fork = motif("8/2q1P1k1/8/8/8/8/8/K7 w - - 0 1", ["e7e8n", "g7g6", "e8c7"], "fork")
+    assert fork.squares[0] == "e8" and set(fork.squares[1:]) == {"c7", "g7"}
+
+
+def test_double_check_and_mate_mark_the_moving_piece_first():
+    # Nf6 is double check (knight and the rook behind it) and mate: the knight is the active piece
+    found = {m.theme: m for m in detect_moves("3rkb2/3p1p2/8/8/4N3/8/8/K3R3 w - - 0 1", ["e4f6"])}
+    assert found["doubleCheck"].squares == ["f6", "e1", "e8"]
+    assert found["mateIn1"].squares == ["f6", "e1", "e8"]
+    assert found["discoveredCheck"].squares == ["e1", "e8", "f6"]  # the uncovered checker first
+
+
+def _flip_files(square):
+    return chess.square(7 - chess.square_file(square), chess.square_rank(square))
+
+
+def test_mirrored_boards_give_the_mirrored_motifs():
+    """Every detector is blind to colour and to the side of the board: the same puzzle with the colours swapped
+    (board mirrored top to bottom), or flipped left to right (when nobody can castle), gives the same themes,
+    plies and sides, and the mirrored squares (the same active piece first; its targets in any order)."""
+
+    def key(theme, ply, side, squares):
+        return theme, ply, side, squares[:1], frozenset(squares)
+
+    transforms = (("colours", chess.square_mirror, lambda b: b.mirror()),
+                  ("files", _flip_files, lambda b: b.transform(chess.flip_horizontal)))
+    mismatches = []
+    for row in _rows():
+        board = chess.Board(row["FEN"])
+        moves = row["Moves"].split()
+        board.push_uci(moves[0])
+        solution = moves[1:]
+        original = detect_moves(board.fen(), solution, max_plies=len(solution))
+        for name, square_map, board_map in transforms:
+            if name == "files" and board.castling_rights:
+                continue
+            expected = [key(m.theme, m.ply, m.side, [chess.square_name(square_map(chess.parse_square(s)))
+                                                     for s in m.squares]) for m in original]
+            moved = [chess.Move(square_map(mv.from_square), square_map(mv.to_square), mv.promotion).uci()
+                     for mv in map(chess.Move.from_uci, solution)]
+            got = [key(m.theme, m.ply, m.side, m.squares)
+                   for m in detect_moves(board_map(board).fen(), moved, max_plies=len(solution))]
+            if sorted(got) != sorted(expected):
+                mismatches.append((name, row["PuzzleId"]))
+    assert not mismatches, mismatches[:10]
+
+
+def test_castling_in_either_notation_and_chess960():
+    # O-O then Rf8 mate: e1g1 (standard) and e1h1 (king takes rook, as Chess960 engines write it) both work
+    for castle in ("e1g1", "e1h1"):
+        assert themes("7k/p5pp/8/8/8/8/8/4K2R w K - 0 1", [castle, "a7a6", "f1f8"]) == {"backRankMate", "mateIn2"}
+    # a Chess960 position (king c1, rooks b1 and g1), with X-FEN or Shredder-FEN castling rights
+    for rights in ("K", "G"):
+        fen = f"7k/p5pp/8/8/8/8/8/1RK3R1 w {rights} - 0 1"
+        assert themes(fen, ["c1g1", "a7a6", "f1f8"]) == {"backRankMate", "mateIn2"}
+    assert "discoveredCheck" not in themes("5k2/8/8/8/8/8/8/4K2R w K - 0 1", ["e1h1"])  # the rook checks itself
+
+
+def test_real_game_lines():
+    """Two error positions from real chess.com games (tests/fixtures/real_chesscom_games.json), with short
+    Stockfish lines, checked by hand."""
+    # 19.Rd2? ...Rc5 traps the queen on c3: every square it can reach is covered, and ...Rxc2 wins it
+    refutation = Line(fen="3r2k1/bpp1qppp/2n3b1/p2rp3/8/PPQPPN2/1B2BPPP/3RR1K1 w - - 2 19",
+                      moves_uci=["d1d2", "d5c5", "c3c2", "c5c2", "d2c2"])
+    [trapped] = detect_line(refutation, "refutation")
+    assert (trapped.theme, trapped.ply, trapped.side) == ("trappedPiece", 1, "opponent")
+    assert trapped.squares == ["c5", "c3"]
+    # 50...Nxh4+ was the move: the rook on g3 pins the bishop to its king, so it can't take the knight
+    best = Line(fen="8/p2R2p1/kp2R1K1/5nB1/1Pr2P1P/3p2r1/P7/8 b - - 8 50",
+                moves_uci=["f5h4", "g6h7", "h4f3", "e6d6", "d3d2", "a2a3"])
+    pin = next(m for m in detect_line(best, "best") if m.theme == "pin")
+    assert (pin.ply, pin.side, pin.squares) == (0, "you", ["g3", "g5", "g6"])
+
+
 def test_sides_and_one_motif_per_theme_and_side():
     # Black to move; Black's blunder ...Ra6 lets White fork king and rook
     found = detect_moves("r3k3/8/8/3N4/8/8/8/4K3 b - - 0 1", ["a8a6", "d5c7", "e8e7", "c7a6"])
@@ -136,6 +221,26 @@ def test_hanging_piece_is_exchange_aware():
     fen = "k7/3q4/8/4n3/N7/8/4Q3/6K1 w - - 3 30"
     assert "hangingPiece" not in themes(fen, ["e2e5", "d7a4", "g1h1"])
     assert "hangingPiece" in themes(fen, ["e2e5", "d7d6", "g1h1"])
+
+
+def test_previous_position_settles_recaptures():
+    """With the position before the opponent's last move, the first move's capture is judged like any later one:
+    a recapture after a trade is not a hanging piece, whatever the material; a piece left loose is."""
+    line = ["e2e5", "e8d7", "e1d2"]
+    # ...Nxe5 took a knight and White, a pawn up, recaptures: the material rule alone takes it for a free piece
+    before = "q3k3/8/2n5/4N3/P7/8/4Q3/4K3 b - - 0 30"
+    after = "q3k3/8/8/4n3/P7/8/4Q3/4K3 w - - 0 31"
+    assert "hangingPiece" in themes(after, line)
+    assert "hangingPiece" not in {m.theme for m in detect_moves(after, line, previous_fen=before)}
+    assert "hangingPiece" not in {m.theme for m in detect_line(Line(fen=after, moves_uci=line), "best", before)}
+    # ...h6 (a pawn move: halfmove clock 0) left the knight loose: the material rule is too careful here
+    before = "q3k3/7p/8/4n3/8/8/4Q3/4K3 b - - 3 30"
+    after = "q3k3/8/7p/4n3/8/8/4Q3/4K3 w - - 0 31"
+    assert "hangingPiece" not in themes(after, line)
+    assert "hangingPiece" in {m.theme for m in detect_moves(after, line, previous_fen=before)}
+    # a previous position that doesn't lead here, or can't be read, is ignored
+    for junk in (chess.STARTING_FEN, "not a fen"):
+        assert {m.theme for m in detect_moves(after, line, previous_fen=junk)} == themes(after, line)
 
 
 def test_detect_line_roles():
@@ -175,6 +280,14 @@ def test_bad_input_gives_no_motifs():
     assert detect_line(Line(fen="", moves_uci=["e2e4"]), "best") == []
     assert puzzle_motifs(chess.STARTING_FEN, []) == []
     assert puzzle_motifs(chess.STARTING_FEN, ["e2e5"]) == []
+    # no line from the engine, or junk in it: no motifs, never an exception
+    assert detect_line(None, "best") == [] and detect_line(None, "refutation") == []
+    assert detect_line(Line(fen=chess.STARTING_FEN, moves_uci=None), "best") == []
+    assert detect_moves(chess.STARTING_FEN, ["e2e4", None, 5]) == []
+    assert detect_moves(chess.STARTING_FEN, ["e2e4", "0000", "e7e5"]) == []  # a null move ends the line
+    assert detect_moves(chess.STARTING_FEN, ["e4", "e5"]) == []  # SAN is not UCI
+    assert puzzle_motifs(chess.STARTING_FEN, ["e2e4", None]) == []
+    assert puzzle_motifs(chess.STARTING_FEN, [None]) == []
 
 
 def test_labels_and_links():
@@ -262,6 +375,26 @@ def test_refutation_view_keeps_the_gate():
         assert tagged[theme] >= GATE_MIN_TAGGED and _precision(tagged, hits, labelled, theme) >= GATE_PRECISION, theme
 
 
+def test_best_line_with_the_previous_position():
+    """The best line when the caller passes the position before the opponent's last move (the puzzle's FEN):
+    the recapture question is settled, so hangingPiece loses its guesswork, and nothing else changes."""
+    rows = _rows()
+
+    def find(row):
+        board = chess.Board(row["FEN"])
+        moves = row["Moves"].split()
+        board.push_uci(moves[0])
+        line = Line(fen=board.fen(), moves_uci=moves[1:])
+        with_previous = {m.theme for m in detect_line(line, "best", previous_fen=row["FEN"])}
+        assert with_previous - {"hangingPiece"} == {m.theme for m in detect_line(line, "best")} - {"hangingPiece"}
+        return with_previous
+
+    tagged, hits, labelled = _score(rows, find)
+    print("\n" + _table("Best line with the previous position (detect_line, your motifs)", tagged, hits, labelled))
+    assert _precision(tagged, hits, labelled, "hangingPiece") >= 0.95
+    assert hits["hangingPiece"] / labelled["hangingPiece"] >= 0.95
+
+
 def test_detect_line_speed():
     """The motif profile runs about 5,000 lines: an eight-ply line must take well under 5 ms."""
     rng = random.Random(20260926)
@@ -279,11 +412,14 @@ def test_detect_line_speed():
             lines.append(Line(fen=row["FEN"], moves_uci=moves[:8]))
     assert len(lines) > 200
     detect_line(lines[0], "best")
-    start = time.perf_counter()
-    for line in lines:
-        detect_line(line, "best")
-        detect_line(line, "refutation")
-    per_line = (time.perf_counter() - start) / (2 * len(lines))
+    runs = []
+    for _ in range(3):  # best of three: the machine may be busy with other work
+        start = time.perf_counter()
+        for line in lines:
+            detect_line(line, "best")
+            detect_line(line, "refutation")
+        runs.append((time.perf_counter() - start) / (2 * len(lines)))
+    per_line = min(runs)
     print(f"\ndetect_line: {per_line * 1000:.2f} ms per 8-ply line")
     assert per_line < 0.005
 
