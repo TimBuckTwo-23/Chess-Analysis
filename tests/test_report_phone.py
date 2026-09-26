@@ -341,3 +341,10 @@ def test_insight_with_a_diagram_but_no_formats_renders():
                   diagram=visuals.position_diagram("P", SICILIAN, orientation="black", played="e5", time_class="blitz"))
     rep.modules[0].insights.append(ins)
     check_html(render_html(rep))
+
+
+def test_the_motif_table_under_its_chart_does_not_repeat_the_chart_note():
+    rep = sample_report(views=False)
+    rep.coaching.motif_chart.note = rep.coaching.motif_profile.note = "Per 100 moves of each side."
+    why = _section(render_html(rep), "why")
+    assert why.count("Per 100 moves of each side.") == 1

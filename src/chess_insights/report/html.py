@@ -1654,7 +1654,10 @@ def _chart_html(chart: Chart, *, compact: bool = False, more_tables: Sequence[Ta
     title = text_or_empty(chart.title)
     kind = chart.kind if chart.kind in ("bar", "hbar", "line", "stacked_bar") else "table"
     data = chart_data(chart)
-    extra_tables = "".join(_table_html(t) for t in more_tables if isinstance(t, Table))
+    def unrepeated(t: Table) -> Table:  # a table whose note repeats the chart's is shown without it
+        return replace(t, note="") if text_or_empty(t.note) and text_or_empty(t.note) == text_or_empty(chart.note) else t
+
+    extra_tables = "".join(_table_html(unrepeated(t)) for t in more_tables if isinstance(t, Table))
     if compact:
         token, card = _CHART_SIZE.set((CARD_VB_W, CARD_PLOT_H)), _CARD_CHART.set(True)
         try:
@@ -1683,7 +1686,7 @@ def _chart_html(chart: Chart, *, compact: bool = False, more_tables: Sequence[Ta
             series = series[:MAX_SERIES]
     if not any(v is not None for _, vals in series for v in vals):
         kind = "table"  # only the hidden series carry numbers: show them as a table
-    full = chart.table if isinstance(getattr(chart, "table", None), Table) else None
+    full = unrepeated(chart.table) if isinstance(getattr(chart, "table", None), Table) else None
     if kind == "table":
         parts.append(_table_html(full or chart_table(chart), show_title=False) + extra_tables)
     else:
