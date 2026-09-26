@@ -587,9 +587,15 @@ def test_puzzle_themes_describe_the_printed_solution_never_the_opponents_tactic(
                                                                                     deep_best, None)})
     key = puzzles.puzzle_key(second.game.game_id, second.ply)
     assert coaching.puzzle_lines[key].moves_san == ["Nf6"] and coaching.puzzle_themes[key] == []
-    coaching.puzzle_themes.setdefault(key, ["skewer"])  # what profile._puzzle_lines does
+    coaching.puzzle_themes.setdefault(key, ["skewer"])  # the motif profile leaves a settled key alone
     assert coaching.puzzle_themes[key] == []
     assert "Themes" not in _read_all(puzzles.puzzles_pgn(events, coaching))[1].headers
+    # a deeper search that prefers the move played settles the key with no line: the puzzle stays the game
+    # analysis's single move, and the motif profile adds no line of its own
+    coaching = Coaching()
+    own = make_line(second.fen, [chess.Move.from_uci(second.uci)], -20, None, 20)
+    puzzles.fill_puzzle_lines(ctx, coaching, {(second.epd, second.uci): DeepResult(second.epd, second.uci, own, None)})
+    assert key not in coaching.puzzle_lines and coaching.puzzle_themes[key] == []
 
 
 def test_fill_puzzle_lines_from_deep_and_profile_results(player, monkeypatch):

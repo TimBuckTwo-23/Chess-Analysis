@@ -155,9 +155,9 @@ def fill_puzzle_lines(
     position was re-searched, else from the profile pass; the themes are the motifs you carry out along it (read
     with the position before your opponent's last move), named only when their detector passed the gate
     (``motifs.GATED_THEMES``). An error whose deeper search prefers the move you played gets no line (the puzzle
-    keeps the game analysis's move). Every line set here gets its theme list, empty when nothing was found, so the
-    motif profile (``profile._puzzle_lines``, which only fills keys that have none) never tags it with the patterns
-    of another line."""
+    keeps the game analysis's move). Every key settled here gets its theme list, empty when nothing was found or
+    when the deeper search cleared the move, so the motif profile (``profile._puzzle_lines``, which only fills keys
+    that have none) never adds its shorter line or tags the key with the patterns of another line."""
     from . import motifs
     from .deep import previous_fens, rebase
     from .explain import detect
@@ -175,6 +175,9 @@ def fill_puzzle_lines(
         key = puzzle_key(e.game.game_id, e.ply)
         result = lines.get((e.epd, e.uci))
         line = result.best_line if result is not None else None
+        if line is not None and line.moves_uci and line.moves_uci[0] == e.uci:
+            coaching.puzzle_themes[key] = []  # the deeper search prefers your move: settled, with no line
+            continue
         if line is None or not line.moves_uci:
             line = by_ply.get((e.game.game_id, e.ply))
         if line is None or not line.moves_uci or line.moves_uci[0] == e.uci:
