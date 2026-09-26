@@ -190,3 +190,40 @@ def test_the_markdown_shows_the_endgame_boards_with_their_game_label():
     html = render_html(report_of(ModuleResult("engine_stats", "Engine review", "s"), coaching=coaching,
                                  game_labels={GAME.format(9): LABEL}))
     assert html.count(f">{LABEL}<span aria-hidden=\"true\"> ↗</span></a>") == 2  # the board and the table row
+
+
+def test_an_explanation_links_its_game_once():
+    exp = Explanation(epd=" ".join(SICILIAN.split()[:4]), fen=SICILIAN, played="5...e5", best="5...a6",
+                      best_line=None, refutation=None, text="Template text.", time_class="blitz",
+                      game_url=GAME.format(4), games=[GAME.format(5)],
+                      diagram=board("", link=GAME.format(4)))
+    html = render_html(report_of(ModuleResult("mistakes", "Positions", "s"), coaching=Coaching(explanations=[exp]),
+                                 game_labels={GAME.format(4): LABEL}))
+    card = re.search(r'<article class="card why" id="why-1">.*?</article>', html, re.S).group(0)
+    assert card.count(f'href="{GAME.format(4)}"') == 1 and f">{LABEL}<" in card  # in the Review line, labelled
+    assert card.count(f'href="{GAME.format(5)}"') == 1
+    # a board whose game is not in the Review line keeps its link
+    exp.diagram = board("", link=GAME.format(6))
+    html = render_html(report_of(ModuleResult("mistakes", "Positions", "s"), coaching=Coaching(explanations=[exp])))
+    card = re.search(r'<article class="card why" id="why-1">.*?</article>', html, re.S).group(0)
+    assert card.count(f'href="{GAME.format(6)}"') == 1 and card.count(f'href="{GAME.format(4)}"') == 1
+
+
+def test_a_long_numeric_header_wraps_on_a_phone():
+    """Numbers stay on one line, but a header like "Your blunders /100 (short of time)" must wrap, or the key
+    columns a phone shows no longer fit its width."""
+    from chess_insights.report.html import build_css
+
+    css = build_css()
+    assert ".ci .num{text-align:right;white-space:nowrap}" in css
+    assert css.index(".ci th.num{white-space:normal}") > css.index(".ci .num{")
+
+
+def test_a_finding_links_its_game_once():
+    ins = finding(board("A recent draw", link=GAME.format(7)))
+    ins.example_games = [GAME.format(7), GAME.format(8)]
+    html = render_html(report_of(ModuleResult("endings", "How your games end", "s", insights=[ins]),
+                                 game_labels={GAME.format(7): LABEL}))
+    card = re.search(r'<article class="card insight.*?</article>', html, re.S).group(0)
+    assert card.count(f'href="{GAME.format(7)}"') == 1 and card.count(f">{LABEL}<") == 1  # in "Review"
+    assert "Analyse on Lichess" in card  # the board keeps its other link

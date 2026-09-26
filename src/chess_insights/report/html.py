@@ -1774,13 +1774,15 @@ def _format_chip_html(formats: Any, page: Optional[PageIndex] = None, *, counts:
     return f'<span class="fmt-chip" title="{_esc(title)}"><span class="sr-only">{_esc(title)}: </span>{segments}</span>'
 
 
-def _insight_visuals(ins: Insight, page: PageIndex, anchor: Optional[str]) -> str:
-    """The finding's chart and board (compact), when it has them."""
+def _insight_visuals(ins: Insight, page: PageIndex, anchor: Optional[str], reviewed: Sequence[str] = ()) -> str:
+    """The finding's chart and board (compact), when it has them. The board links its game only when the card's
+    "Review" line (``reviewed``) does not already."""
     parts = []
     if isinstance(getattr(ins, "chart", None), Chart):
         parts.append(_chart_html(ins.chart, compact=True))
     if isinstance(getattr(ins, "diagram", None), Diagram):
-        parts.append(_position_html(ins.diagram, f"{anchor or 'ins'}-d-", page, variant="card"))
+        d = ins.diagram if safe_url(ins.diagram.link) not in reviewed else replace(ins.diagram, link="")
+        parts.append(_position_html(d, f"{anchor or 'ins'}-d-", page, variant="card"))
     parts = [p for p in parts if p]
     return f'<div class="insight-vis">{"".join(parts)}</div>' if parts else ""
 
@@ -1807,7 +1809,9 @@ def _insight_html(
     )
     if text_or_empty(ins.detail):
         parts.append(f'<p class="insight-detail">{_esc(ins.detail)}</p>')
-    parts.append(_insight_visuals(ins, page, anchor))
+    plan_no = page.plan_by_id.get(text_or_empty(ins.id))
+    reviewed = [] if plan_no else page.games_for(ins.example_games)  # a plan item lists them instead
+    parts.append(_insight_visuals(ins, page, anchor, reviewed))
     why = page.why_by_insight.get(text_or_empty(ins.id))
     if not why and isinstance(getattr(ins, "diagram", None), Diagram):
         why = page.why_by_epd.get(boards.epd(ins.diagram.fen))
@@ -1816,7 +1820,6 @@ def _insight_html(
         text = "Why this goes wrong" if kind == "weakness" and page.why_kind.get(why) != "choice" else (
             "The engine's lines for this position")
         parts.append(f'<p class="why-line"><a class="why-link" href="#{_esc(why)}">{_esc(text)}</a></p>')
-    plan_no = page.plan_by_id.get(text_or_empty(ins.id))
     steps = [text_or_empty(s) for s in (ins.study or []) if text_or_empty(s)]
     if plan_no:
         parts.append(
@@ -1830,7 +1833,7 @@ def _insight_html(
             )
         else:
             parts.append(f'<div class="study"><p class="mini-label">What to do</p><ul class="todo">{items}</ul></div>')
-    games = "" if plan_no else _games_html(page.games_for(ins.example_games), "Review", page.labels)
+    games = _games_html(reviewed, "Review", page.labels)
     parts.append(f'<div class="insight-meta">{_confidence_html(ins.confidence)}{games}</div>')
     parts.append("</article>")
     return "".join(parts)
@@ -2583,10 +2586,13 @@ def _explanation_html(exp: Explanation, k: int, page: PageIndex) -> str:
         + "</div>"
     )
 
+    game_urls = ([exp.game_url] if text_or_empty(exp.game_url) else []) + list(exp.games or [])
+    reviewed = page.games_for(game_urls)
     d = _explanation_diagram(exp)
     fig = strips = ""
-    if d is not None:
-        fig = _position_html(replace(d, strips=[]), f"{anchor}-", page, "why", show_title=False)
+    if d is not None:  # the board links its game only when the card's "Review" line does not already
+        link = "" if safe_url(d.link) in reviewed else d.link
+        fig = _position_html(replace(d, strips=[], link=link), f"{anchor}-", page, "why", show_title=False)
         strips = _strips_html(d.strips or [], d.orientation)
 
     text = []
@@ -2621,8 +2627,7 @@ def _explanation_html(exp: Explanation, k: int, page: PageIndex) -> str:
     sources = list(exp.sources or []) + list(getattr(exp.opening, "sources", None) or [])
     extra.append(_sources_html(sources))
     foot = []
-    game_urls = ([exp.game_url] if text_or_empty(exp.game_url) else []) + list(exp.games or [])
-    games = _games_html(page.games_for(game_urls), "Review", page.labels)
+    games = _games_html(reviewed, "Review", page.labels)
     if games:
         foot.append(games)
     finding = page.anchor_by_id.get(text_or_empty(exp.insight_id))
@@ -3385,6 +3390,7 @@ details.study[open] summary{margin-bottom:8px}
 .ci td.wide{min-width:18ch}
 .ci td:first-child:not(.num){min-width:13ch}
 .ci .num{text-align:right;white-space:nowrap}
+.ci th.num{white-space:normal}
 .ci td.mono{font-family:var(--font-mono);font-size:13px}
 .ci tbody tr:hover{background:var(--accent-wash)}
 .foot{display:grid;gap:10px;margin-top:48px;padding-top:24px;border-top:1px solid var(--hairline);font-size:13px;color:var(--ink-2)}
