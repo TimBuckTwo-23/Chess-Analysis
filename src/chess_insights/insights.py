@@ -97,7 +97,8 @@ STUDY_LIBRARY: dict[str, dict[str, object]] = {
     "tactics": {
         "label": "Tactics",
         "actions": [
-            "Solve themed puzzle sets (forks, pins, mating patterns) until the patterns become automatic.",
+            "Solve themed puzzle sets (forks, pins, mating patterns: lichess.org/training/themes) until the patterns "
+            "become automatic.",
             "In every position, scan checks, captures and threats for both sides before choosing a move.",
         ],
     },
@@ -375,18 +376,94 @@ def _round_robin(
     return out
 
 
-def practice_actions(modules: Iterable[ModuleResult]) -> list[str]:
-    """Study actions built from facts, not claims: your own mistakes as puzzles (needs the engine)."""
+class PracticeActions(list):
+    """What :func:`practice_actions` returns: the actions for the "your own positions" item (a plain list of
+    strings, as before), plus ``drills``: one action per drill pack (coach/drills.py), keyed by Lichess theme in
+    pack order, for the tactics and blunders items of the study plan (:func:`drill_actions_for`)."""
+
+    def __init__(self, actions: Iterable[str] = (), drills: Optional[dict[str, str]] = None):
+        super().__init__(actions)
+        self.drills: dict[str, str] = dict(drills or {})
+
+
+# Plan items that get a drill pack, and the packs that fit a finding (by its id) better than any other.
+DRILL_CATEGORIES = ("tactics", "blunders")
+_DRILL_THEMES_BY_ID = (
+    ("hung-material", ("hangingPiece",)),
+    ("missed-mates", ("mate", "mateIn1", "mateIn2", "mateIn3", "backRankMate")),
+)
+
+
+def drill_pack_action(drill: Any) -> str:
+    """'30 fork puzzles in me-drill-fork.pgn, or lichess.org/training/fork (you missed 23 forks in 300 games ...).'"""
+    where = f" in {drill.file}, or" if getattr(drill, "file", "") else " at"
+    link = str(getattr(drill, "link", "") or "").replace("https://", "")
+    reason = f" ({drill.reason})" if getattr(drill, "reason", "") else ""
+    return f"{drill.title}{where} {link}{reason}."
+
+
+def is_generic_puzzle_action(action: str) -> bool:
+    """A generic 'solve puzzles' tip (STUDY_LIBRARY, engine TACTIC_TEXT), which a drill pack replaces."""
+    text = str(action).lower()
+    return "puzzle" in text and "your own" not in text
+
+
+def _own_themes(lead: Insight) -> list[str]:
+    """The drill themes a finding is about: its pattern (motif findings), or the patterns behind its engine tag."""
+    themes = [str(lead.evidence["theme"])] if (lead.evidence or {}).get("theme") else []
+    for key, extra in _DRILL_THEMES_BY_ID:
+        if key in lead.id:
+            themes += list(extra)
+    return list(dict.fromkeys(themes))
+
+
+def drill_actions_for(leads: Sequence[Insight], practice: Sequence[str]) -> dict[str, str]:
+    """Lead finding id -> the drill action for its plan item, for the tactics and blunders items ({} without packs).
+
+    Items whose finding is about a pattern with a pack get that pack first; the others take the remaining packs in
+    pack order (your most-missed pattern first). A pack serves two items only when there are more items than packs.
+    """
+    drills: dict[str, str] = getattr(practice, "drills", None) or {}
+    eligible = [lead for lead in leads if lead.category in DRILL_CATEGORIES]
+    if not drills or not eligible:
+        return {}
+    chosen: dict[str, str] = {}
+    for lead in eligible:
+        theme = next((t for t in _own_themes(lead) if t in drills and t not in chosen.values()), None)
+        if theme:
+            chosen[lead.id] = theme
+    for lead in eligible:
+        if lead.id not in chosen:
+            free = [t for t in drills if t not in chosen.values()]
+            own = [t for t in _own_themes(lead) if t in drills]
+            chosen[lead.id] = (free or own or list(drills))[0]
+    return {lead_id: drills[theme] for lead_id, theme in chosen.items()}
+
+
+def practice_actions(modules: Iterable[ModuleResult], coaching: Any = None) -> PracticeActions:
+    """Study actions built from facts, not claims: your own mistakes as puzzles (needs the engine), and one
+    puzzle-pack action per drill pack of the coaching layer (``coaching.drills``) for the tactics and blunders items.
+
+    The result is a list (the positions item's actions, as before) with the pack actions in ``.drills``.
+    """
     m = next((m for m in modules if m.key == "mistakes"), None)
     stats = (m.stats if m else None) or {}
     n = stats.get("puzzles_exported") or 0
+    drills = {
+        d.theme: drill_pack_action(d)
+        for d in (getattr(coaching, "drills", None) or [])
+        if getattr(d, "puzzles", None) and getattr(d, "theme", "openings") != "openings"
+    }
     if not n:
-        return []
+        return PracticeActions([], drills)
     where = f"in {stats['puzzle_file']}" if stats.get("puzzle_file") else "(export them with --puzzles)"
-    return [
-        f"Solve 10 of your own puzzles a day: {n} positions from your games where your move cost a lot, {where}. "
-        "Import the file into a Lichess study or any chess program."
-    ]
+    return PracticeActions(
+        [
+            f"Solve 10 of your own puzzles a day: {n} positions from your games where your move cost a lot, "
+            f"{where}. Import the file into a Lichess study or any chess program."
+        ],
+        drills,
+    )
 
 
 def build_study_plan(
@@ -401,7 +478,9 @@ def build_study_plan(
     Each item takes its title, reasons and target from its most important finding, lists the others it
     covers, and gets at most ``max_actions`` actions: the findings' own, taken in turn, near-duplicates
     left out; generic training advice only fills empty places. ``practice`` actions (your own puzzles)
-    go to the positions item, which is created for them when no repeated-position finding exists.
+    go to the positions item, which is created for them when no repeated-position finding exists; with drill
+    packs (``practice.drills``, from :func:`practice_actions`) each tactics and blunders item gets one pack
+    action in place of the generic "solve puzzles" tips.
     """
     groups: dict[str, list[Insight]] = {}
     for ins in sorted(weaknesses, key=lambda i: (-i.priority, i.id)):
@@ -411,6 +490,7 @@ def build_study_plan(
     info = {k: plan_group(members[0].category if members else "positions") for k, members in groups.items()}
     order = sorted(groups, key=lambda k: (info[k][3], -(groups[k][0].priority if groups[k] else 0.0), k))
     plan: list[StudyItem] = []
+    drill_actions = drill_actions_for([groups[k][0] for k in order[:max_items] if groups[k]], practice)
     for key in order[:max_items]:
         members = groups[key]
         _, label, effort, _ = info[key]
@@ -429,13 +509,18 @@ def build_study_plan(
             )
             continue
         lead = members[0]
-        reserved = 1 if key == "positions" and practice else 0
-        actions = _round_robin([m.study for m in members], max_actions - reserved)
+        drill = drill_actions.get(lead.id, "")
+        keep = (lambda a: not is_generic_puzzle_action(a)) if drill else (lambda a: True)
+        reserved = 1 if (key == "positions" and practice) or drill else 0
+        actions = _round_robin([[a for a in m.study if keep(a)] for m in members], max_actions - reserved)
         for tip in STUDY_LIBRARY.get(lead.category, {}).get("actions", []):  # type: ignore[union-attr]
             if len(actions) >= max_actions - reserved:
                 break
-            _add_action(actions, str(tip))
-        if reserved:
+            if keep(str(tip)):
+                _add_action(actions, str(tip))
+        if drill:
+            actions = _round_robin([[drill]], max_actions, taken=actions)
+        elif reserved:
             actions = _round_robin([list(practice)], max_actions, taken=actions)
         games = _round_robin([m.example_games for m in members], MAX_PLAN_GAMES, fuzzy_within=False)
         ids: list[str] = []
