@@ -213,7 +213,7 @@ def test_views_name_their_format_in_every_section_head():
     assert heads and all("Blitz only" in h for h in heads), heads
     assert "Blitz only" not in "".join(re.findall(r"<h2 [^>]*>(.*?)</h2>", _view(html, "all"), re.S))
     style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
-    assert ".fmt-bar{position:sticky;top:0" in style and ".fmt [id]{scroll-margin-top:" in style
+    assert ".fmt-bar{position:sticky;top:env(safe-area-inset-top,0px)" in style and ".fmt [id]{scroll-margin-top:" in style
 
 
 def test_a_line_under_the_tabs_says_which_formats_have_no_view():

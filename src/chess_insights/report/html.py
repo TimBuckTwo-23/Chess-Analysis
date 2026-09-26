@@ -3839,7 +3839,7 @@ details.strip[open]>summary{margin-bottom:6px}
 .prog--down{background:var(--neutral-wash);color:var(--neutral)}
 .fmt{display:block;margin-top:24px}
 .fmt-radio{position:absolute;opacity:0;width:1px;height:1px;margin:0;pointer-events:none}
-.fmt-bar{position:sticky;top:0;z-index:6;display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:fit-content;max-width:100%;padding:4px;border:1px solid var(--hairline);border-radius:10px;background:var(--surface);box-shadow:0 2px 8px var(--scroll-shadow)}
+.fmt-bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:6;display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:fit-content;max-width:100%;padding:4px;border:1px solid var(--hairline);border-radius:10px;background:var(--surface);box-shadow:0 2px 8px var(--scroll-shadow)}
 .fmt [id]{scroll-margin-top:60px}
 .fmt-missing{margin-top:8px;font-size:13px;color:var(--muted);max-width:72ch}
 .h-fmt{font:500 15px/1.3 var(--font-sans);letter-spacing:0;color:var(--muted);white-space:nowrap}
