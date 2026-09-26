@@ -916,24 +916,29 @@ def _engine_note(pos: ChoicePosition, labels: dict[str, str]) -> str:
 
 
 def choice_diagram(pos: ChoicePosition) -> Diagram:
-    """The position with your moves as arrows: your usual move red ("played"), the better move green when one
-    is known (your usual move itself when it is the better one), the others grey."""
+    """The position with your moves as arrows: your usual move red ("played"), the better move green when the
+    engine names one (your usual move itself when it is the better one), the others grey. Green means the
+    engine's move everywhere in the report, so a move that is only the best-scoring one for you
+    (``best_by == "results"``) is blue ("line"; the report's key calls it "best for you so far")."""
     usual = pos.usual
     best = pos.best
+    by_engine = pos.best_by == "engine"
     played = None if best == usual.san else usual.san
     others = [(m.san, "neutral") for m in pos.moves[1:] if m.san != best]
+    if best and not by_engine:
+        others.insert(0, (best, "line"))
     caption = "; ".join(_move_result(m) for m in pos.moves) + "."
     labels = {m.san: m.label for m in pos.moves}
     caption += _engine_note(pos, labels)
     if best and pos.best_by == "results":
-        caption += f" {labels[best]} has scored best for you so far (fair estimate)."
+        caption += f" {labels[best]} (blue) has scored best for you so far (fair estimate)."
     caption += f" {formats_note(pos.formats)}."
     return position_diagram(
         f"Your choice {pos.where[0].lower()}{pos.where[1:]} ({_colour(pos.color)})",
         pos.fen,
         orientation=pos.color,
         played=played,
-        best=best,
+        best=best if by_engine else None,
         others=others,
         caption=caption,
         link=usual.urls[0] if usual.urls else "",
@@ -1001,14 +1006,15 @@ def better_choice(grp: OpeningGroup, points: Sequence[ChoicePoint], th: Threshol
 
 def choice_finding_strip(p: ChoicePoint, this: OpeningGroup, best: OpeningGroup) -> Optional[Strip]:
     """For a finding whose advice is a choice point: that position as one small board, the move into this
-    opening as a red arrow and the better-scoring move you also play there as a green one. None when the moves
-    can't be replayed on a board."""
+    opening as a red arrow and the better-scoring move you also play there as a blue one (green is the engine's
+    move in the report, and this one is only better by your results). None when the moves can't be replayed on a
+    board."""
     board, ucis = play_line(p.prefix)
     if len(ucis) != len(p.prefix):
         return None
     arrows = [
         a
-        for san, kind in ((option_san(p, this), "played"), (option_san(p, best), "best"))
+        for san, kind in ((option_san(p, this), "played"), (option_san(p, best), "line"))
         if (a := move_arrow(board, san, kind)) is not None
     ]
     frame = Frame(
@@ -1016,8 +1022,8 @@ def choice_finding_strip(p: ChoicePoint, this: OpeningGroup, best: OpeningGroup)
         move=move_label(len(p.prefix) - 1, p.prefix[-1]) if p.prefix else "",
         last_move=ucis[-1] if ucis else "",
         caption=(
-            f"{best.label} {pct(best.summary.score)} in {best.n} games, {this.label} {pct(this.summary.score)} in "
-            f"{this.n}"
+            f"{best.label} (blue) {pct(best.summary.score)} in {best.n} games, {this.label} (red) "
+            f"{pct(this.summary.score)} in {this.n}"
         ),
         arrows=arrows,
     )

@@ -391,10 +391,11 @@ def test_choice_points_are_a_reusable_list_of_positions():
 def test_choice_points_become_boards_with_your_moves_as_arrows():
     mr = analyse(openings, choice_world())
     d = next(d for d in mr.diagrams if "after 1.e4 e5 2.Nf3 Nc6 (White)" in d.title)
-    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("f1", "c4", "best")]
+    # green is the engine's move everywhere in the report: the move that only scored best for you is blue
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("f1", "c4", "line")]
     assert d.caption.startswith(
         "3.Bb5: 30 games, 20% (−30 per 100 games vs your rating); 3.Bc4: 30 games, 80% (+30 per 100 games vs your "
-        "rating). 3.Bc4 has scored best for you so far (fair estimate)."
+        "rating). 3.Bc4 (blue) has scored best for you so far (fair estimate)."
     )
     assert "Blitz 45 · Rapid 15 games" in d.caption and d.orientation == "white" and d.last_move == "b8c6"
     table = next(t for t in mr.tables if t.title == "Your choices at key moves")
@@ -406,8 +407,9 @@ def test_choice_points_become_boards_with_your_moves_as_arrows():
     choice = ins.diagram.strips[-1]
     assert choice.title == "Your choice after 1.e4 e5 2.Nf3 Nc6: 3.Bc4 or 3.Bb5"
     frame = choice.frames[0]
-    assert frame.fen == d.fen and frame.move == "2...Nc6" and frame.caption == "3.Bc4 80% in 30 games, 3.Bb5 20% in 30"
-    assert [(a.start, a.end, a.kind) for a in frame.arrows] == [("f1", "b5", "played"), ("f1", "c4", "best")]
+    assert frame.fen == d.fen and frame.move == "2...Nc6"
+    assert frame.caption == "3.Bc4 (blue) 80% in 30 games, 3.Bb5 (red) 20% in 30"
+    assert [(a.start, a.end, a.kind) for a in frame.arrows] == [("f1", "b5", "played"), ("f1", "c4", "line")]
 
 
 def engine_evals(games, drops: dict, best: str = "d4", only: str = "") -> dict:
@@ -442,9 +444,9 @@ def test_a_sound_usual_move_is_not_drawn_as_an_engine_mistake():
     pos = openings.choice_positions(AnalysisContext("t", games, evals=engine_evals(games, {"Bb5": 1.5, "Bc4": 1.0})))[0]
     assert pos.engine_best == "d4" and pos.best == "Bc4" and pos.best_by == "results"
     d = openings.choice_diagram(pos)
-    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("f1", "c4", "best")]
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("f1", "c4", "line")]
     assert ("Stockfish's first choice is 3.d4, but it rates your 3.Bb5 almost as good (it lost 1.5 percentage points "
-            "of winning chances on average, 10 analysed games). 3.Bc4 has scored best for you so far") in d.caption
+            "of winning chances on average, 10 analysed games). 3.Bc4 (blue) has scored best for you so far") in d.caption
     # your usual move not analysed: the engine's choice is mentioned, not drawn
     pos = openings.choice_positions(
         AnalysisContext("t", games, evals=engine_evals(games, {"Bb5": 1.5, "Bc4": 1.0}, only="Bc4"))
@@ -485,14 +487,20 @@ def test_real_stockfish_verdicts_feed_the_choice_boards(stockfish_path):
     check_diagram(d)
     assert "Stockfish" in d.caption
 
-def test_when_your_usual_move_scores_best_it_is_green_not_red():
+def test_when_your_usual_move_scores_best_it_is_blue_not_red():
     games = choice_world()
     for g in list(games):  # the Italian becomes the more played move
         if g.moves_san[4] == "Bc4":
             games.append(make_game(color="white", moves_san=ITALIAN, outcome="win", end_time=g.end_time))
     pos = openings.choice_positions(AnalysisContext("t", sorted(games, key=lambda g: g.end_time)))[0]
-    assert pos.usual.san == "Bc4" and pos.best == "Bc4"
-    assert [a.kind for a in openings.choice_diagram(pos).arrows] == ["best", "neutral"]
+    assert pos.usual.san == "Bc4" and pos.best == "Bc4" and pos.best_by == "results"
+    d = openings.choice_diagram(pos)
+    assert [a.kind for a in d.arrows] == ["line", "neutral"]  # best by your results, not the engine's move
+    # the report's key says what blue means on these boards
+    from chess_insights.report.html import _arrow_key_html
+
+    key = _arrow_key_html(d)
+    assert "ak-line" in key and "best for you so far Bc4" in key and "ak-best" not in key
 
 
 # --------------------------------------------------------------------------- module tables and charts name their formats

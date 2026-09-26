@@ -280,9 +280,11 @@ def test_the_costliest_puzzles_get_a_board_each_in_table_order(mixed):
     boards = [d for d in mis.diagrams if d.title.startswith("Puzzle ")]
     assert len(boards) == len(puzzles.rows) == mistakes.PUZZLE_TABLE_ROWS
     assert [d.link for d in boards] == [row[6] for row in puzzles.rows]
-    assert [d.fen.replace(" ", "_") for d in boards] == [
+    # the Lichess board opens from your side, as the report's board is drawn
+    assert [d.fen.replace(" ", "_") + ("?color=black" if d.orientation == "black" else "") for d in boards] == [
         row[5].removeprefix("https://lichess.org/analysis/") for row in puzzles.rows
     ]
+    assert any(d.orientation == "black" for d in boards) and any(d.orientation == "white" for d in boards)
     for d, row in zip(boards, puzzles.rows):
         assert row[2] in d.caption and row[3] in d.caption and visuals.FORMAT_NAMES[d.time_class] == row[1]
         assert [a.kind for a in d.arrows] == ["played", "best"]

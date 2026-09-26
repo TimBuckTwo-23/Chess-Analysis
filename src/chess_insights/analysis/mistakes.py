@@ -46,7 +46,7 @@ PUZZLE_LIMIT = 300  # the costliest puzzles exported by --puzzles
 PUZZLE_TABLE_ROWS = 10  # the costliest puzzles listed in the report, each with a Lichess board link
 LICHESS_STUDY_CHAPTERS = 64  # a Lichess study holds at most this many puzzles
 MAX_INSIGHTS = 3
-MAX_DIAGRAMS = 4  # boards of repeated mistakes (the costliest puzzles get one each on top)
+TABLE_ROWS = 15  # repeated mistakes listed in the table, each with a board (the costliest puzzles get one each too)
 STRIP_PLIES = 4  # small boards under a position: your move and the three moves played after it
 
 
@@ -480,6 +480,12 @@ def _strip_on(board: chess.Board, title: str, moves_uci: list[str], captions: li
     return Strip(title=title, frames=frames)
 
 
+def analysis_url(fen: str, color: str = "white") -> str:
+    """The position on the Lichess analysis board, seen from ``color``'s side (yours)."""
+    url = "https://lichess.org/analysis/" + fen.replace(" ", "_")
+    return url + "?color=black" if color == "black" else url
+
+
 def _slug(epd: str) -> str:
     return hashlib.sha1(epd.encode()).hexdigest()[:10]
 
@@ -676,7 +682,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     ]
     mix = f" Engine-analysed games: {formats_note(analysed_formats, '')}." if analysed_formats else ""
     rows = []
-    for r in repeated[:15]:
+    listed = repeated[:TABLE_ROWS]
+    for r in listed:
         e = r.first
         rows.append(
             [
@@ -722,7 +729,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                         e.move_label,
                         e.best_label or "",
                         e.drop / 100.0,
-                        "https://lichess.org/analysis/" + e.fen.replace(" ", "_"),
+                        analysis_url(e.fen, e.game.color),
                         e.game.url,
                     ]
                     for e in costliest
@@ -736,10 +743,10 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             )
         )
 
-    # A board for each repeated mistake shown (the findings reuse them), then one per costliest puzzle, in the
-    # table's order.
+    # A board for every repeated mistake in the table, in its order (the findings reuse theirs), then one per
+    # costliest puzzle, in that table's order: a picture for every position the section lists.
     boards: dict[int, Optional[Diagram]] = {}
-    for r in distinct[:MAX_DIAGRAMS]:
+    for r in listed:
         boards[id(r)] = _repeated_diagram(r, ctx.evals)
     diagrams = [d for d in boards.values() if d is not None]
     for i, e in enumerate(costliest, 1):

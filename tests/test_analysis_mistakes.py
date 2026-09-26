@@ -387,3 +387,22 @@ def test_a_follow_up_mistake_in_the_same_games_is_folded_into_the_first():
     weak_root = rep(16, 30.0, games, significant=False)
     kept, folded = mistakes.fold_follow_ups([follow, weak_root])
     assert kept == [follow, weak_root] and not folded
+
+
+def test_every_repeated_mistake_in_the_table_gets_a_board():
+    """A picture for every row: six wrong replies in one position, each in two games, are six rows and six boards
+    (the findings reuse the first ones' boards, in the table's order)."""
+    replies = ["Nd4", "d6", "a6", "h6", "Qe7", "Be7"]
+    specs = [_game(10 * k + j, LINE + [r, "Nc3", "Nf6"], {5: "Nf6"}) for k, r in enumerate(replies) for j in (1, 2)]
+    res = mistakes.analyze(_ctx(specs))
+    table = next(t for t in res.tables if t.title == "Repeated mistakes")
+    assert len(table.rows) == 6
+    repeated = [d for d in res.diagrams if not d.title.startswith("Puzzle ")]
+    assert [d.title.split(": ")[-1] for d in repeated] == [row[5] for row in table.rows]
+    assert all(d.strips and d.orientation == "black" for d in repeated)
+    assert all(any(ins.diagram is d for d in repeated) for ins in res.insights)  # the findings' boards are the rows'
+    # the costliest puzzles table opens each position on Lichess from your side
+    puzzles = next(t for t in res.tables if t.title == "Your costliest mistakes (puzzles)")
+    assert all(row[5].endswith("?color=black") for row in puzzles.rows)
+    assert mistakes.analysis_url(LINE_FEN := "8/8/8/8/8/8/8/K6k w - - 0 1") == \
+        "https://lichess.org/analysis/" + LINE_FEN.replace(" ", "_")
