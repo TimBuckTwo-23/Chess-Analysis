@@ -3,8 +3,10 @@
 ``mistakes.puzzles_to_pgn`` writes one move per puzzle (the engine's best move). Where the coaching layer has more
 (``Coaching.puzzle_lines``: your errors' best lines from the deep and profile passes), the solution becomes the
 best line (up to ``SOLUTION_PLIES`` plies), a ``Themes`` header carries the motif tags (Lichess theme names, only
-those whose detector passed the gate) and the comment is the explanation when one matches the position. Every
-other puzzle stays exactly as ``mistakes.puzzles_to_pgn`` writes it.
+those whose detector passed the gate) and the explanation, when one matches the position and your move, is the
+comment after the solution's first move: the comment before it stays the puzzle's question, since the explanation
+names the better move (a Lichess study shows that first comment before you try). Every other puzzle stays exactly
+as ``mistakes.puzzles_to_pgn`` writes it.
 """
 
 from __future__ import annotations
@@ -45,9 +47,20 @@ def _solution(fen: str, line: Line) -> list[chess.Move]:
     return out
 
 
+def _played_uci(x: Explanation) -> str:
+    """The move an explanation is about, in UCI (its refutation starts with it; else its label read in its FEN)."""
+    if x.refutation is not None and x.refutation.moves_uci:
+        return x.refutation.moves_uci[0]
+    try:
+        board = chess.Board(x.fen)
+        return board.parse_san(x.played.split(".")[-1]).uci()
+    except ValueError:
+        return ""
+
+
 def _explanations(coaching: Coaching) -> dict[tuple[str, str], Explanation]:
-    """(EPD, your move as "5...e5") -> its explanation."""
-    return {(x.epd, x.played): x for x in coaching.explanations if x.text}
+    """(EPD, your move in UCI) -> its explanation (by UCI, so a transposition with other move numbers matches)."""
+    return {(x.epd, _played_uci(x)): x for x in coaching.explanations if x.text}
 
 
 def _one(event: MistakeEvent, number: int) -> str:
@@ -62,7 +75,7 @@ def _pgn_comment(text: str) -> str:
 
 def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
     """``mistakes.puzzles_to_pgn`` plus, where the coaching layer has them: the best line (up to 8 plies) as the
-    solution, a ``Themes`` header with the motif tags and the explanation as the comment."""
+    solution, a ``Themes`` header with the motif tags and the explanation as the comment after the first move."""
     if coaching is None or not (coaching.puzzle_lines or coaching.explanations):
         return puzzles_to_pgn(events)
     explained = _explanations(coaching)
@@ -73,7 +86,7 @@ def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
             continue
         line = coaching.puzzle_lines.get(puzzle_key(e.game.game_id, e.ply))
         moves = _solution(e.fen, line) if line is not None else []
-        explanation = explained.get((e.epd, e.move_label))
+        explanation = explained.get((e.epd, e.uci))
         if not moves and explanation is not None and explanation.best_line is not None:
             moves = _solution(e.fen, explanation.best_line)
         if moves and moves[0].uci() == e.uci:  # a deeper search that prefers your move is no puzzle solution
@@ -89,14 +102,17 @@ def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
         if themes:
             at = next((i for i, h in enumerate(headers) if h.startswith("[Annotator ")), len(headers))
             headers.insert(at, f'[Themes "{" ".join(dict.fromkeys(themes))}"]')
-        if explanation is not None:
-            comment = explanation.text
-        else:
-            comment = (f"In the game you played {e.move_label}, losing {e.drop:.0f} percentage points of winning "
-                       f"chances. Find the better move and the line that follows.")
+        question = (f"In the game you played {e.move_label}, losing {e.drop:.0f} percentage points of winning "
+                    f"chances. Find the better move and the line that follows.")
         board = chess.Board(e.fen)
-        movetext = board.variation_san(moves)
-        chunks.append("\n".join(headers) + f"\n\n{{{_pgn_comment(comment)}}} {movetext} *\n")
+        if explanation is None:
+            movetext = board.variation_san(moves)
+        else:  # the explanation right after the solution's first move: "5...Nf6 {After 5...e5, ...} 6.Nxc6 ..."
+            movetext = f"{board.variation_san(moves[:1])} {{{_pgn_comment(explanation.text)}}}"
+            if len(moves) > 1:
+                board.push(moves[0])
+                movetext += " " + board.variation_san(moves[1:])
+        chunks.append("\n".join(headers) + f"\n\n{{{_pgn_comment(question)}}} {movetext} *\n")
     return "\n".join(chunks)
 
 

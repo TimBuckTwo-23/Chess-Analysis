@@ -12,7 +12,7 @@ import pytest
 
 from chess_insights import engine as sf
 from chess_insights.analysis.mistakes import move_label
-from chess_insights.coach import concepts, deep
+from chess_insights.coach import concepts, deep, explain
 from chess_insights.coach.config import CoachConfig
 from chess_insights.context import AnalysisContext
 from chess_insights.models import CriticalPosition
@@ -327,3 +327,25 @@ def test_gate_concepts_for_5e5_compare_line_ends_not_the_move(habit_lines, stock
             assert deltas.get("Mobility", 0) <= -concepts.MIN_DELTA, (other.moves_san[0], deltas)
             assert deltas.get("King safety", 0) <= -concepts.MIN_DELTA, (other.moves_san[0], deltas)
             assert deltas.get("Threats", 0) >= 0  # the threat that looked good right after the move is gone
+
+
+@pytest.mark.engine
+def test_gate_explanations_teach_the_plans_lessons(habit_lines, stockfish_path):
+    """The texts for the three habits at depth 20: the refutation, what it costs and what to check next time."""
+    positions = [pos for pos, _ in habit_lines.values()]
+    lines = {(pos.epd, pos.played_uci): result for pos, result in habit_lines.values()}
+    notes: list[str] = []
+    out = {x.played: x for x in explain.explain_all(AnalysisContext("t", []), positions, lines,
+                                                     CoachConfig(stockfish=stockfish_path), notes)}
+    # 4.e4: d4 is attacked twice and defended once, so the pawn goes (the plan's "count attackers and defenders")
+    assert out["4.e4"].text.startswith("After 4.e4, Stockfish's answer is 4...Qxd4")
+    assert "you lose a pawn" in out["4.e4"].text and "count the attackers and defenders" in out["4.e4"].text
+    assert out["5...e5"].text.startswith("After 5...e5, Stockfish's answer is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    assert "you lose the bishop pair" in out["5...e5"].facts
+    assert out["2...Nc6"].text.startswith("After 2...Nc6, Stockfish's answer is 3.d5")
+    for x in out.values():
+        assert x.sources[0].name == "Stockfish 16, depth 20" or not x.sources[0].name.startswith("Stockfish 16")
+        assert [s.title for s in x.diagram.strips][0] == f"After your {x.played}"
+    if any("Stockfish 16" in n for n in notes):  # a newer Stockfish: no classical terms to check
+        return
+    assert "king safety" in out["5...e5"].text and out["5...e5"].chart is not None

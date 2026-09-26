@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 STRIP_FRAMES = 4  # small boards per line
+# Below this many win-% points the deeper search does not even call your move an inaccuracy (engine.JUDGEMENT_DROPS):
+# the text then says your move is close to Stockfish's choice instead of explaining an error.
+CLOSE_DROP = min(drop for drop, _ in sf.JUDGEMENT_DROPS)
 TEXT_PLIES = 4  # moves of a line quoted in the text
 
 # theme -> (the pattern in words, what to check next time when your move allowed it)
@@ -69,6 +72,10 @@ CONCEPT_CHECKS = {
     "pawn structure": "ask which squares a pawn move gives up for good",
     "material": "count the attackers and defenders of every pawn and piece your move touches",
     "piece placement": "ask where each piece is headed before you move it",
+    "knight placement": "ask where each piece is headed before you move it",
+    "bishop placement": "ask where each piece is headed before you move it",
+    "rook placement": "ask where each piece is headed before you move it",
+    "queen placement": "ask where each piece is headed before you move it",
     "threats": "look at what your opponent threatens after your move",
     "space": "ask whether your move gives your opponent room to expand",
     "passed pawns": "count how many moves each passed pawn needs to promote",
@@ -165,7 +172,13 @@ class Comparison:
 
     deltas: list[ConceptDelta] = field(default_factory=list)  # refutation end minus best end, your side
     facts: list[str] = field(default_factory=list)  # what is worse for you at the refutation end, in words
-    material_lost: int = 0  # material the refutation takes from you, against the position before your move
+    # Material (pawn 1, knight and bishop 3, rook 5, queen 9) the refutation takes from you: against the position
+    # before your move AND against the better line (the smaller of the two, so a pawn you lose either way is not
+    # blamed on your move) ...
+    material_lost: int = 0
+    # ... and what the better line wins for you, against the position before your move and against the refutation
+    # (54.gxh6 takes a rook that 54.d6 leaves alone).
+    material_missed: int = 0
 
 
 class _Concepts:
@@ -184,8 +197,12 @@ class _Concepts:
             return Comparison()
         me = chess.WHITE if color == "white" else chess.BLACK
         b_facts, r_facts = concepts.board_facts(b_end, color), concepts.board_facts(r_end, color)  # type: ignore[arg-type]
-        out = Comparison(facts=concepts.fact_differences(b_facts, r_facts),
-                         material_lost=concepts.material(chess.Board(fen), me) - r_facts.material)
+        before = concepts.material(chess.Board(fen), me)
+        out = Comparison(
+            facts=concepts.fact_differences(b_facts, r_facts),
+            material_lost=max(0, min(before, b_facts.material) - r_facts.material),
+            material_missed=max(0, b_facts.material - max(before, r_facts.material)),
+        )
         b_table = self.eval.table(b_end.fen())
         r_table = self.eval.table(r_end.fen()) if b_table is not None else None
         if b_table is not None and r_table is not None:
@@ -201,13 +218,49 @@ def _gap(best: Line, refutation: Line) -> float:
     return ((best.cp_end or 0) - (refutation.cp_end or 0)) / 100.0
 
 
+def win_drop(best: Line, refutation: Line) -> float:
+    """Win-% points your move loses in the deeper search (the game analysis's measure of an error)."""
+    return sf.win_percent(best.cp_end, best.mate_end) - sf.win_percent(refutation.cp_end, refutation.mate_end)
+
+
+def shown_line(best: Line, refutation: Line) -> Line:
+    """The line after your move that the text and the strip show. When the deeper search's first choice is your
+    own move, its MultiPV line (so your move reads with the same number as in the other positions' texts), unless
+    that line stops at your move."""
+    if best.moves_uci and refutation.moves_uci and best.moves_uci[0] == refutation.moves_uci[0] \
+            and len(best.moves_uci) > 1:
+        return best
+    return refutation
+
+
+def _mate_line(best: Line, refutation: Line) -> bool:
+    """A forced mate decides one of the lines: then material and concepts along the way say nothing."""
+    return (refutation.mate_end is not None and refutation.mate_end < 0) or (
+        best.mate_end is not None and best.mate_end > 0)
+
+
 # --------------------------------------------------------------------------- the words
-def _what_it_wins(cmp: Comparison, gap: float) -> str:
-    """"you lose a pawn" (when the engine's verdict backs it: at least half a pawn of evaluation per pawn of
-    material), else the two concepts the refutation leaves you worst on; plus the first board fact."""
+def _material_backed(cmp: Comparison, gap: float) -> tuple[int, int]:
+    """(material lost, material missed) that the text may name: each backed by the engine's verdict, at least half a
+    pawn of evaluation per pawn of material named (the loss first). Material counted in the middle of a line can be
+    passing (a knight won for two pawns that come back later), and the verdict is what tells."""
+    lost = cmp.material_lost if cmp.material_lost >= 1 and gap >= cmp.material_lost / 2 else 0
+    missed = cmp.material_missed if cmp.material_missed >= 1 and gap >= (lost + cmp.material_missed) / 2 else 0
+    return lost, missed
+
+
+def _what_it_wins(cmp: Comparison, gap: float, best_label: str = "") -> str:
+    """"you lose a pawn" / "5.Nxe5 would have won 3 pawns' worth of material" (when the engine's verdict backs it),
+    else the two concepts the refutation leaves you worst on; plus the first board fact."""
     parts = []
-    if cmp.material_lost >= 1 and gap >= cmp.material_lost / 2:
-        parts.append(f"you lose {_material_words(cmp.material_lost)}")
+    lost, missed = _material_backed(cmp, gap)
+    if lost or missed:
+        material = []
+        if lost:
+            material.append(f"you lose {_material_words(lost)}")
+        if missed:
+            material.append(f"{best_label or 'the better move'} would have won {_material_words(missed)}")
+        parts.append(", and ".join(material))
     else:
         worse = [c for c in cmp.deltas if c.value < 0 and c.term != "Material"][:2]
         if worse:
@@ -215,7 +268,7 @@ def _what_it_wins(cmp: Comparison, gap: float) -> str:
             if len(worse) > 1:
                 text += f" and {abs(worse[1].value):.2f} on {worse[1].label}"
             parts.append(text)
-    if cmp.facts:
+    if cmp.facts and not (lost and missed):  # a third item would make the sentence too long
         parts.append(cmp.facts[0])
     if len(parts) == 2:
         return f"{parts[0]}, and {parts[1]}"
@@ -223,7 +276,7 @@ def _what_it_wins(cmp: Comparison, gap: float) -> str:
 
 
 def _check_next_time(allowed: Sequence[Motif], missed: Sequence[Motif], gated: frozenset, cmp: Comparison,
-                     material: bool, mated: bool) -> str:
+                     gap: float, mated: bool, mating: bool = False) -> str:
     """What to look at before a move like this one, from the motif, else the material, else the worst concept."""
     if mated:
         return MOTIF_WORDS["mateIn1"][1]
@@ -232,10 +285,11 @@ def _check_next_time(allowed: Sequence[Motif], missed: Sequence[Motif], gated: f
         return MOTIF_WORDS[named[0].theme][1]
     if allowed:
         return GENERIC_CHECK
-    if missed:
+    if missed or mating:
         return MISSED_CHECK
-    if material:
-        return CONCEPT_CHECKS["material"]
+    lost, gained = _material_backed(cmp, gap)
+    if lost or gained:
+        return CONCEPT_CHECKS["material"] if lost else MISSED_CHECK
     worse = [c for c in cmp.deltas if c.value < 0 and c.label in CONCEPT_CHECKS and c.term != "Material"]
     if worse:
         return CONCEPT_CHECKS[worse[0].label]
@@ -252,44 +306,61 @@ def explanation_text(
     gated: frozenset,
     depth: Optional[int] = None,
 ) -> str:
-    """At most three sentences: what the refutation does, what it wins, what to check next time."""
+    """At most three sentences: what the refutation does, what it wins, what to check next time.
+
+    When the deeper search finds your move as good as its own (the same move) or close to it (less than
+    ``CLOSE_DROP`` win-% points behind: not even an inaccuracy), the text says so instead of explaining an error
+    that is not one.
+    """
     played = pos.move_label
     best_label = _label(pos.fen, best.moves_uci[0]) if best.moves_uci else ""
     opponent = "Black" if pos.color == "white" else "White"
+    same = bool(best.moves_uci) and best.moves_uci[0] == pos.played_uci
+    refutation = shown_line(best, refutation)
     ref_v, best_v = verdict(refutation, pos.color), verdict(best, pos.color, short=True)
     gap = _gap(best, refutation)
     answer = _line_text(refutation, 1, TEXT_PLIES)
-    same = bool(best.moves_uci) and best.moves_uci[0] == pos.played_uci
+    close = not same and win_drop(best, refutation) < CLOSE_DROP
+    at = f" at depth {depth}" if depth else ""
 
     if pos.kind == "choice":
         if same:
             first = f"Stockfish agrees with your {played} ({ref_v})"
+        elif close:
+            first = f"Your {played} ({ref_v}) is close to Stockfish's first choice, {best_label} ({best_v})"
         else:
             first = f"Stockfish prefers {best_label} ({verdict(best, pos.color)}) to your {played} ({ref_v})"
         first += f"; its main line after {played} is {answer}." if answer else "."
-        wins = _what_it_wins(cmp, gap) if not same else ""
+        wins = _what_it_wins(cmp, gap, best_label) if not (same or close) else ""
         return first + (f" Compared with {best_label}, {wins}." if wins else "")
 
     if same:
-        at = f" at depth {depth}" if depth else ""
         return (f"A deeper look{at} makes your {played} Stockfish's own first choice ({ref_v}), so the verdict of the "
                 f"quicker game analysis on it does not hold up" + (f"; the main line is {answer}." if answer else "."))
+    if close:
+        return (f"A deeper look{at} finds your {played} ({ref_v}) close to Stockfish's first choice, {best_label} "
+                f"({best_v}), so the quicker game analysis was too harsh on it"
+                + (f"; the main line after {played} is {answer}." if answer else "."))
 
     mated = refutation.mate_end is not None and refutation.mate_end < 0
+    mating = best.mate_end is not None and best.mate_end > 0
     if mated:
-        first = f"After {played}, {opponent} mates in {abs(refutation.mate_end)}: {answer}."
+        first = f"After {played}, {opponent} mates in {abs(refutation.mate_end)}" + (f": {answer}." if answer else ".")
     elif allowed:
-        first = f"After {played}, {opponent} has {_motif_name(allowed[0], gated)}: {answer}."
+        first = f"After {played}, {opponent} has {_motif_name(allowed[0], gated)}" + (f": {answer}." if answer else ".")
     elif missed:
         first = f"You had {_motif_name(missed[0], gated)}: {_line_text(best, 0, TEXT_PLIES + 1)}."
     elif answer:
         first = f"After {played}, Stockfish's answer is {answer}."
     else:
         first = f"Stockfish prefers {best_label} to {played}."
-    wins = _what_it_wins(cmp, gap)
-    second = f"Stockfish rates the line {ref_v}, against {best_v} after {best_label}" + (f": {wins}." if wins else ".")
-    check = _check_next_time(allowed, missed, gated, cmp, cmp.material_lost >= 1 and gap >= cmp.material_lost / 2,
-                             mated)
+    if mated:  # the mate is the whole story: no material or concepts on the way to it
+        second = f"Stockfish prefers {best_label} ({verdict(best, pos.color)})."
+    else:
+        wins = "" if mating else _what_it_wins(cmp, gap, best_label)
+        second = f"Stockfish rates the line {ref_v}, against {best_v} after {best_label}" + (
+            f": {wins}." if wins else ".")
+    check = _check_next_time(allowed, missed, gated, cmp, gap, mated, mating)
     return f"{first} {second} Next time, {check}."
 
 
@@ -321,10 +392,24 @@ def _strip(title: str, fen: str, moves: Sequence[str], last_caption: str, marks:
     return visuals.line_strip(title, fen, list(moves), max_frames=STRIP_FRAMES, captions=captions, marks=marks)
 
 
+def _last_move(start: Optional[str], moves_before: Sequence[str], epd: str) -> str:
+    """UCI of the move that led to the position (highlighted on the board); "" when the moves don't lead there."""
+    if not moves_before:
+        return ""
+    try:
+        board = chess.Board(start or chess.STARTING_FEN)
+        for san in moves_before:
+            board.push_san(san)
+    except ValueError:
+        return ""
+    return board.peek().uci() if board.epd() == epd else ""
+
+
 def build_diagram(games: _Games, pos: CriticalPosition, best: Line, refutation: Line,
-                  allowed: Sequence[Motif], missed: Sequence[Motif], gated: frozenset) -> Diagram:
+                  allowed: Sequence[Motif], missed: Sequence[Motif], gated: frozenset, close: bool = False) -> Diagram:
     """The board before your move (your move red, the better one green, your side at the bottom, motif squares
-    marked) with two strips: the refutation after your move and the better line, each ending on the verdict."""
+    marked, the move before it highlighted) with two strips: the refutation after your move and the better line,
+    each ending on the verdict. ``close``: the better line is only slightly better (its strip is "Stockfish's")."""
     played = pos.move_label
     best_uci = best.moves_uci[0] if best.moves_uci else None
     best_label = _label(pos.fen, best_uci) if best_uci else ""
@@ -346,6 +431,7 @@ def build_diagram(games: _Games, pos: CriticalPosition, best: Line, refutation: 
         caption=caption,
         link=pos.url,
         time_class=pos.time_class,
+        last_move=_last_move(games.start.get(pos.game_id), pos.moves_before, pos.epd),
         marks=_marks(list(allowed) + list(missed), gated),
     )
     after = _after(pos.fen, pos.played_uci)
@@ -357,7 +443,7 @@ def build_diagram(games: _Games, pos: CriticalPosition, best: Line, refutation: 
                              _frame_marks(allowed, gated, 1, n)))
     if best.moves_uci and not same:
         n = min(STRIP_FRAMES, len(best.moves_uci))
-        title = f"Stockfish's {best_label}" if pos.kind == "choice" else f"The better {best_label}"
+        title = f"Stockfish's {best_label}" if pos.kind == "choice" or close else f"The better {best_label}"
         strips.append(_strip(title, pos.fen, best.moves_uci, verdict(best, pos.color),
                              _frame_marks(missed, gated, 0, n)))
     diagram.strips = [s for s in strips if s.frames]
@@ -370,7 +456,7 @@ def concept_chart(pos: CriticalPosition, best_label: str, deltas: Sequence[Conce
     return visuals.comparison_chart(
         f"{pos.move_label} against {best_label}, in pawns",
         [c.label[:1].upper() + c.label[1:] for c in deltas],
-        [("You", [c.value for c in deltas])],
+        [("Difference for you", [c.value for c in deltas])],
         value_format="signed_float2",
         kind="hbar",
         reference=0.0,
@@ -396,10 +482,14 @@ def explain_position(
     refutation = rebase(result.refutation, pos.fen) if result.refutation.fen != pos.fen else result.refutation
     if not refutation.moves_uci or refutation.moves_uci[0] != pos.played_uci:
         return None
-    allowed, missed = split_motifs(best, refutation)
     same = best.moves_uci[0] == pos.played_uci
+    close = not same and win_drop(best, refutation) < CLOSE_DROP  # the deeper search hardly minds your move
+    shown = shown_line(best, refutation)  # the line after your move in the text and the strip
+    # No motifs, drill themes or concept comparison for a move the deeper search does not call an error, and no
+    # concepts when a forced mate decides a line (material and structure on the way to it say nothing).
+    allowed, missed = ([], []) if same or close else split_motifs(best, refutation)
     cmp = Comparison()
-    if concept_tool is not None and not same:
+    if concept_tool is not None and not (same or close or _mate_line(best, refutation)):
         cmp = concept_tool.compare(pos.fen, best, refutation, pos.color)
     depths = [x.depth for x in (best, refutation) if x.depth]
     depth = min(depths) if depths else result.depth
@@ -429,7 +519,7 @@ def explain_position(
         game_url=pos.url,
         games=list(pos.games),
         repeats=pos.repeats,
-        diagram=build_diagram(games, pos, best, refutation, allowed, missed, gated),
+        diagram=build_diagram(games, pos, best, shown, allowed, missed, gated, close),
         chart=concept_chart(pos, best_label, cmp.deltas),
         drill_themes=list(dict.fromkeys(m.theme for m in kept)),
     )

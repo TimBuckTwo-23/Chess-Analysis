@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 CHOICE_SHARE = 0.2  # choice points get up to this share of the slots the repeated mistakes leave free
+FAMILY_SHARE = 0.7  # a choice point is named after an opening family only when this share of its games has it
 
 
 def _time_class(games: Iterable[Game]) -> str:
@@ -60,6 +61,16 @@ def _insight_ids(modules: Sequence[ModuleResult]) -> dict[tuple[str, str], str]:
                 continue
             out[(board.epd(), move.uci())] = ins.id
     return out
+
+
+def _family(games: Sequence[Game]) -> str:
+    """The opening family most of ``games`` share ("" when they spread over several: after 1.e4, 1...e5 leads to
+    the Italian, the Ruy Lopez and the Scotch, and naming one of them would be wrong)."""
+    counts = Counter(g.opening_family for g in games if g.opening_family)
+    if not counts:
+        return ""
+    family, n = counts.most_common(1)[0]
+    return family if n >= FAMILY_SHARE * len(games) else ""
 
 
 def _repeated(
@@ -185,7 +196,7 @@ def _choices(ctx: "AnalysisContext") -> list[CriticalPosition]:
                     kind="choice",
                     repeats=len(games),
                     games=[g.url for g in games if g.url],
-                    opening_family=games[0].opening_family or "",
+                    opening_family=_family(games),
                     moves_before=list(point.prefix),
                 )
             )

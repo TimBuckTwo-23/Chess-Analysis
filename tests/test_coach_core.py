@@ -103,6 +103,18 @@ def test_the_cap_keeps_habits_and_errors_first(player):
     assert all(p.insight_id is None for p in critical.select_critical(ctx, [], 150))
 
 
+def test_a_choice_point_is_named_after_an_opening_only_when_most_of_its_games_share_it(player):
+    ctx, modules = player
+    choices = [p for p in critical.select_critical(ctx, modules, 150) if p.kind == "choice"]
+    assert [(p.move_label, p.opening_family) for p in choices] == [("1...c5", "Sicilian Defense"),
+                                                                  ("1...e5", "Italian Game")]
+    games = [g for g in ctx.games if g.moves_san == SICILIAN]
+    assert critical._family(games) == "Sicilian Defense"
+    mixed = games[:2] + [dataclasses.replace(g, opening_family=f) for g, f in zip(games[2:], ["Ruy Lopez", "Other"])]
+    assert critical._family(mixed) == ""  # 1...e5 leads to several openings: naming one would be wrong
+    assert critical._family([dataclasses.replace(g, opening_family=None) for g in games]) == ""
+
+
 def test_chess960_games_are_left_out(player):
     ctx, modules = player
     games = [dataclasses.replace(g, rules="chess960") for g in ctx.games]
@@ -162,6 +174,7 @@ def test_explanation_of_a_habit_position(motif_hooks):
     assert ex.motifs == [] and ex.drill_themes == [] and ex.chart is None  # no concepts without Stockfish 16
     d = ex.diagram
     assert d.fen == pos.fen and d.orientation == "black" and d.time_class == "blitz" and d.link == pos.url
+    assert d.last_move == "f3d4"  # 5.Nxd4, the move that led to the position, is highlighted
     assert [(a.start, a.end, a.kind) for a in d.arrows] == [("e6", "e5", "played"), ("g8", "f6", "best")]
     assert d.title == "Sicilian Defense: 5...e5" and "in 3 games" in d.caption
     assert [s.title for s in d.strips] == ["After your 5...e5", "The better 5...Nf6"]
@@ -207,7 +220,9 @@ def test_missed_motif_and_mate_texts(motif_hooks, monkeypatch):
     mated = _result(pos, ref=("e6e5", "d4b5"), ref_cp=-1000, ref_mate=-2)
     ex = explain.explain_position(games, pos, mated, None, frozenset())
     assert ex.text.startswith("After 5...e5, White mates in 2: 6.Ndb5.")
-    assert "mate in 2 for White" in ex.text and ex.diagram.strips[0].frames[-1].caption == "mate in 2 for White"
+    # the mate is the whole story: the better move and its verdict, no material or concepts on the way
+    assert "Stockfish prefers 5...Nf6 (−0.39 for you)." in ex.text and "lose" not in ex.text
+    assert ex.diagram.strips[0].frames[-1].caption == "mate in 2 for White"
 
 
 def test_a_deeper_search_that_prefers_your_move_says_so(motif_hooks):
@@ -217,6 +232,79 @@ def test_a_deeper_search_that_prefers_your_move_says_so(motif_hooks):
     assert "Stockfish's own first choice" in ex.text and "does not hold up" in ex.text
     assert [a.kind for a in ex.diagram.arrows] == ["played"] and len(ex.diagram.strips) == 1
     assert len(_sentences(ex.text)) <= 3
+    # the MultiPV line and its number, as the other positions' texts quote this move (not the second search's)
+    same = _result(pos, best=("e6e5", "d4b5", "a7a6"), best_cp=-20, ref_cp=-35)
+    ex = explain.explain_position(explain._Games(AnalysisContext("t", [])), pos, same, None, frozenset())
+    assert "(−0.20 for you)" in ex.text and "−0.35" not in ex.text
+    assert ex.diagram.strips[0].frames[-1].caption == "−0.20 for you"
+
+
+class _NoConcepts:
+    """A concept tool that must not be asked."""
+
+    def compare(self, *args):
+        raise AssertionError("no concept comparison expected")
+
+
+def test_a_move_the_deeper_search_finds_close_to_its_choice_is_not_explained_as_an_error(motif_hooks, monkeypatch):
+    """Less than an inaccuracy behind (CLOSE_DROP win-% points): say so, with no motifs, drills or concepts."""
+    monkeypatch.setattr(motifs, "GATED_THEMES", frozenset({"fork"}))
+    motif_hooks["refutation"] = [Motif(theme="fork", line="refutation", ply=1, squares=["b5"], side="opponent")]
+    games = explain._Games(AnalysisContext("t", []))
+    pos = _position(kind="error")
+    close = _result(pos, best_cp=-39, ref_cp=-60)  # 46.4 against 43.5 win-%: 2.9 points
+    assert explain.win_drop(close.best_line, close.refutation) < explain.CLOSE_DROP
+    ex = explain.explain_position(games, pos, close, _NoConcepts(), frozenset({"fork"}))
+    assert ex.text == ("A deeper look at depth 20 finds your 5...e5 (−0.60 for you) close to Stockfish's first choice, "
+                       "5...Nf6 (−0.39), so the quicker game analysis was too harsh on it; the main line after 5...e5 "
+                       "is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    assert ex.motifs == [] and ex.drill_themes == [] and ex.chart is None and ex.diagram.marks == []
+    assert [s.title for s in ex.diagram.strips] == ["After your 5...e5", "Stockfish's 5...Nf6"]
+    # at a choice point: close to Stockfish's first choice, without a comparison of concepts
+    ex = explain.explain_position(games, _position(kind="choice"), close, _NoConcepts(), frozenset({"fork"}))
+    assert ex.text == ("Your 5...e5 (−0.60 for you) is close to Stockfish's first choice, 5...Nf6 (−0.39); its main "
+                       "line after 5...e5 is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    # a real error (10.5 points) is explained as one
+    ex = explain.explain_position(games, pos, _result(pos), None, frozenset({"fork"}))
+    assert "White has a fork" in ex.text and ex.drill_themes == ["fork"]
+
+
+def test_a_mate_in_either_line_leaves_material_and_concepts_out(motif_hooks):
+    pos = _position(kind="error")
+    games = explain._Games(AnalysisContext("t", []))
+    mated = _result(pos, ref=("e6e5", "d4b5"), ref_cp=-1000, ref_mate=-2)
+    assert explain.explain_position(games, pos, mated, _NoConcepts(), frozenset()).chart is None
+    mating = _result(pos, best_cp=1000)
+    mating.best_line.mate_end = 3
+    ex = explain.explain_position(games, pos, mating, _NoConcepts(), frozenset())
+    assert "against mate in 3 for you after 5...Nf6." in ex.text and "lose" not in ex.text
+    assert "your own checks, captures and threats" in ex.text
+
+
+def test_material_is_blamed_on_your_move_only_against_both_the_start_and_the_better_line():
+    tool = explain._Concepts(None)  # no Stockfish: board facts and material only
+    # 1.Kb2 lets Black take the rook on h1; 1.Rxh5+ would have won the queen
+    fen = "7k/8/8/7q/8/8/8/K6R w - - 0 1"
+    best = make_line(fen, [chess.Move.from_uci(u) for u in ("h1h5", "h8g7")], 900, None, 20)
+    ref = make_line(fen, [chess.Move.from_uci(u) for u in ("a1b2", "h5h1")], -1000, None, 20)
+    cmp = tool.compare(fen, best, ref, "white")
+    assert (cmp.material_lost, cmp.material_missed) == (5, 9)
+    assert explain._what_it_wins(cmp, gap=19.0, best_label="1.Rxh5+") == (
+        "you lose 5 pawns' worth of material, and 1.Rxh5+ would have won 9 pawns' worth of material")
+    # the e4 pawn falls whatever you play: it is not what your move lost
+    fen = "4r2k/8/8/8/4P3/8/8/K7 w - - 0 1"
+    best = make_line(fen, [chess.Move.from_uci(u) for u in ("a1b2", "e8e4")], -500, None, 20)
+    ref = make_line(fen, [chess.Move.from_uci(u) for u in ("a1b1", "e8e4")], -560, None, 20)
+    cmp = tool.compare(fen, best, ref, "white")
+    assert (cmp.material_lost, cmp.material_missed) == (0, 0)
+    assert explain._what_it_wins(cmp, gap=0.6) == ""
+    # without the engine's backing (half a pawn of evaluation per pawn) the material is not named: 4.e4 loses the d4
+    # pawn, but the knight 4.d5 wins a few moves in comes back as pawns (+0.75 against -0.55)
+    assert explain._what_it_wins(Comparison(material_lost=1, material_missed=3), gap=1.3) == "you lose a pawn"
+    assert explain._what_it_wins(Comparison(material_lost=1, material_missed=3), gap=0.4) == ""
+    assert explain._what_it_wins(Comparison(material_missed=3), gap=1.5, best_label="4.d5") == (
+        "4.d5 would have won 3 pawns' worth of material")
+    tool.close()
 
 
 def test_choice_point_text(motif_hooks):
@@ -326,9 +414,17 @@ def test_puzzle_pgn_with_lines_themes_and_explanations(player):
     assert len(list(games[0].mainline_moves())) == puzzles.SOLUTION_PLIES
     assert games[0].headers["Themes"] == "fork hangingPiece"
     assert games[0].comment.startswith(f"In the game you played {first.move_label}")
-    # the explanation matches the second puzzle's position and move: its text (braces made safe) and themes
+    # the explanation matches the second puzzle's position and move: its text (braces made safe) and themes. It names
+    # the better move, so it comes after the solution's first move; before it the puzzle still only asks
     assert [m.uci() for m in games[1].mainline_moves()] == res.best_line.moves_uci[: puzzles.SOLUTION_PLIES]
-    assert games[1].comment == "After 5...e5, White plays (6.Ndb5)." and games[1].headers["Themes"] == "pin"
+    assert games[1].comment.startswith("In the game you played 5...e5") and "Nf6" not in games[1].comment
+    first_move = games[1].next()
+    assert first_move.move.uci() == "g8f6" and first_move.comment == "After 5...e5, White plays (6.Ndb5)."
+    assert games[1].headers["Themes"] == "pin"
+    # an explanation is matched by position and move, not by its label: "6...e5" after a transposition still counts
+    coaching.explanations[0].played = "6...e5"
+    again = _read_all(puzzles.puzzles_pgn(events, coaching))
+    assert again[1].next().comment == "After 5...e5, White plays (6.Ndb5)."
     # nothing for the last one: exactly the single-move puzzle
     single = mistakes.puzzles_to_pgn([last]).replace("puzzle 1", f"puzzle {len(events)}")
     assert pgn.endswith(single) and "Themes" not in games[-1].headers
@@ -364,7 +460,8 @@ def test_fill_puzzle_lines_from_deep_and_profile_results(player, monkeypatch):
 
 # --------------------------------------------------------------------------- build_coaching
 class _Fake:
-    """A scripted engine: the first legal move in UCI order, +30 cp for the side to move."""
+    """A scripted engine: the first legal move in UCI order, +60 cp for the side to move (so every move but
+    the first is an error of about 13 win-% points)."""
 
     def __init__(self):
         self.id, self.options = {"name": "Fake 1"}, {}
@@ -372,7 +469,7 @@ class _Fake:
     def analyse(self, board, limit, multipv=None, game=None, info=None):
         infos = []
         for i, move in enumerate(sorted(board.legal_moves, key=lambda m: m.uci())[: multipv or 1]):
-            infos.append({"score": chess.engine.PovScore(chess.engine.Cp(30 - 20 * i), board.turn), "pv": [move],
+            infos.append({"score": chess.engine.PovScore(chess.engine.Cp(60 - 20 * i), board.turn), "pv": [move],
                           "depth": limit.depth})
         return infos if multipv is not None else infos[0]
 

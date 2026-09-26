@@ -147,6 +147,36 @@ def test_fact_differences_name_only_what_gets_worse_for_you():
     assert len(fact_differences(board_facts(chess.Board(), "white"), board_facts(worse, "white"), limit=1)) <= 1
 
 
+def test_the_bishop_pair_counts_against_the_opponents_and_holes_need_an_enemy_minor_piece():
+    # 5.d3 Bc5 6.Be3 Bb6 7.Bxb6 axb6: both sides give up the bishop pair, so nothing changes between you
+    both = chess.Board("r1bqk2r/1ppp1pp1/1pn2n1p/4p3/2B1P3/3P1N2/PPP2PPP/RN1Q1RK1 w kq - 0 8")
+    start = chess.Board("r1bqkb1r/pppp1pp1/2n2n1p/4p3/2B1P3/5N2/PPPP1PPP/RNBQ1RK1 w kq - 0 5")
+    assert board_facts(both, "white").bishop_pair is False and board_facts(start, "white").bishop_pair
+    assert fact_differences(board_facts(start, "white"), board_facts(both, "white")) == []
+    # only your opponent keeps it
+    opp_keeps = chess.Board("r1bqk2r/pppp1pp1/2n2n1p/2b1p3/4P3/3P1N2/PPP2PPP/RN1Q1RK1 w kq - 0 8")
+    both_lose = chess.Board("r1bqk2r/1ppp1pp1/1pn2n1p/4p3/4P3/3P1N2/PPP2PPP/RN1Q1RK1 w kq - 0 8")
+    assert fact_differences(board_facts(both_lose, "white"), board_facts(opp_keeps, "white")) == [
+        "your opponent keeps the bishop pair"]
+    # a new hole matters only while your opponent has a knight or bishop to put there
+    # (c2-c4 and e2-e4 leave d3 and d4 for good)
+    rooks = chess.Board("3rk3/8/8/8/2P1P3/8/PP1P1PPP/3RK3 w - - 0 30")
+    rooks_before = chess.Board("3rk3/8/8/8/8/8/PPPPPPPP/3RK3 w - - 0 30")
+    assert board_facts(rooks, "white").holes == ["d3", "d4"] and not board_facts(rooks, "white").opp_minor
+    assert fact_differences(board_facts(rooks_before, "white"), board_facts(rooks, "white")) == []
+    knight = chess.Board("3rk3/8/2n5/8/2P1P3/8/PP1P1PPP/3RK3 w - - 0 30")
+    knight_before = chess.Board("3rk3/8/2n5/8/8/8/PPPPPPPP/3RK3 w - - 0 30")
+    assert fact_differences(board_facts(knight_before, "white"), board_facts(knight, "white")) == [
+        "d3 and d4 become holes in your camp (no pawn of yours can cover them)"]
+
+
+def test_concept_labels_are_plain_words():
+    assert all(concepts.LABELS[t] for t in concepts.TERMS)
+    assert concepts.LABELS["Bishops"] == "bishop placement" and concepts.LABELS["Mobility"] == "piece activity"
+    deltas = concept_deltas({"Bishops": (0.3, 0.3)}, {"Bishops": (0.0, 0.0)}, "white", 24, 24)
+    assert deltas[0].label == "bishop placement"
+
+
 # --------------------------------------------------------------------------- the eval helper
 FAKE_NEWER = '''
 import sys

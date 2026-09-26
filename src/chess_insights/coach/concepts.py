@@ -32,11 +32,11 @@ log = logging.getLogger(__name__)
 
 TERMS = ("Material", "Imbalance", "Pawns", "Knights", "Bishops", "Rooks", "Queens", "Mobility", "King safety",
          "Threats", "Passed", "Space", "Winnable")
-LABELS = {
-    "Material": "material", "Imbalance": "piece balance", "Pawns": "pawn structure", "Knights": "knights",
-    "Bishops": "bishops", "Rooks": "rooks", "Queens": "queen", "Mobility": "piece activity",
-    "King safety": "king safety", "Threats": "threats", "Passed": "passed pawns", "Space": "space",
-    "Winnable": "winning chances",
+LABELS = {  # plain words: "you stand 0.30 pawns worse on <label>"
+    "Material": "material", "Imbalance": "piece balance", "Pawns": "pawn structure", "Knights": "knight placement",
+    "Bishops": "bishop placement", "Rooks": "rook placement", "Queens": "queen placement",
+    "Mobility": "piece activity", "King safety": "king safety", "Threats": "threats", "Passed": "passed pawns",
+    "Space": "space", "Winnable": "winning chances",
 }
 MIN_DELTA = 0.15  # pawns
 COMPARE_PLIES = 6  # where the two lines are compared: this many plies from the position before your move ...
@@ -287,6 +287,7 @@ class BoardFacts:
     doubled_files: list[str] = field(default_factory=list)
     backward: list[str] = field(default_factory=list)
     holes: list[str] = field(default_factory=list)
+    opp_minor: bool = True  # your opponent has a knight or bishop left (a hole only matters if one can sit there)
 
 
 def _rel_rank(square: int, color: chess.Color) -> int:
@@ -348,6 +349,7 @@ def board_facts(board: chess.Board, color: Color) -> BoardFacts:
         doubled_files=doubled,
         backward=sorted(backward),
         holes=sorted(holes),
+        opp_minor=bool(board.pieces(chess.KNIGHT, not me) or board.pieces(chess.BISHOP, not me)),
     )
 
 
@@ -363,16 +365,19 @@ def fact_differences(best: BoardFacts, refutation: BoardFacts, limit: int = 3) -
     centre", "d5 becomes a hole in your camp". At most ``limit``, the most important first.
     """
     out = []
-    if best.bishop_pair and not refutation.bishop_pair:
-        out.append("you lose the bishop pair")
-    elif refutation.opp_bishop_pair and not best.opp_bishop_pair:
-        out.append("your opponent gets the bishop pair")
+    # The bishop pair counts against the opponent's: when both sides give it up (5.d3 Bc5 6.Be3 Bb6 7.Bxb6) nothing
+    # changes between you.
+    if best.bishop_pair - best.opp_bishop_pair > refutation.bishop_pair - refutation.opp_bishop_pair:
+        if best.bishop_pair and not refutation.bishop_pair:
+            out.append("you lose the bishop pair")
+        else:
+            out.append("your opponent keeps the bishop pair")
     if (best.can_castle or best.castled) and not (refutation.can_castle or refutation.castled):
         out.append("you lose the right to castle")
     if refutation.king_in_centre and not best.king_in_centre:
         out.append("your king stays in the centre")
     new_holes = [h for h in refutation.holes if h not in best.holes]
-    if len(refutation.holes) > len(best.holes) and new_holes:
+    if len(refutation.holes) > len(best.holes) and new_holes and refutation.opp_minor:
         out.append(f"{_squares(new_holes)} {'becomes a hole' if len(new_holes) == 1 else 'become holes'} in your "
                    f"camp (no pawn of yours can cover {'it' if len(new_holes) == 1 else 'them'})")
     if len(refutation.isolated) > len(best.isolated):
