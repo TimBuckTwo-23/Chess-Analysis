@@ -417,6 +417,10 @@ def test_evaluations_past_ten_pawns_are_named_not_printed(motif_hooks):
               label="piece activity")]
     assert explain._what_it_wins(Comparison(deltas=deltas), gap=5.0) == (
         "a few moves later you stand far worse on king safety and 0.38 on piece activity")
+    deltas = [ConceptDelta("King safety", -12.4, label="king safety"), ConceptDelta("Mobility", -10.5,
+              label="piece activity")]
+    assert explain._what_it_wins(Comparison(deltas=deltas), gap=5.0) == (
+        "a few moves later you stand far worse on king safety and far worse on piece activity")
 
 
 def test_the_explanation_carries_the_format_of_its_games():

@@ -353,7 +353,8 @@ def _what_it_wins(cmp: Comparison, gap: float, best_label: str = "") -> str:
         if worse:
             text = f"a few moves later you stand {_amount(worse[0].value)} worse on {worse[0].label}"
             if len(worse) > 1:
-                text += f" and {_amount(worse[1].value).replace(' pawns', '')} on {worse[1].label}"
+                second = _amount(worse[1].value)
+                text += f" and {'far worse' if second == 'far' else second.replace(' pawns', '')} on {worse[1].label}"
             parts.append(text)
     if cmp.facts and not (lost and missed):  # a third item would make the sentence too long
         parts.append(cmp.facts[0])
