@@ -1,0 +1,7 @@
+{
+ "url": "https://explorer.lichess.org/masters?fen=r1bqkbnr/ppp1pppp/2n5/8/2pP4/2N5/PP2PPPP/R1BQKBNR%20w%20KQkq%20-%202%204&topGames=2",
+ "status": 401,
+ "content_type": "text/html; charset=utf-8",
+ "recorded": "2026-09-26T17:21:00+00:00",
+ "body": "<html>\r\n<head><title>401 Authorization Required</title></head>\r\n<body>\r\n<center><h1>401 Authorization Required</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
+}

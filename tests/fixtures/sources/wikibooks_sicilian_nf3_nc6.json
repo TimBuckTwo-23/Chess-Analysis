@@ -1,0 +1,25 @@
+{
+ "url": "https://en.wikibooks.org/w/api.php?action=query&prop=extracts&explaintext=1&exsentences=4&titles=Chess_Opening_Theory%2F1.+e4%2F1...c5%2F2.+Nf3%2F2...Nc6&format=json&redirects=1",
+ "status": 200,
+ "content_type": "",
+ "recorded": "2026-09-26T17:21:05+00:00",
+ "body": {
+  "batchcomplete": "",
+  "query": {
+   "normalized": [
+    {
+     "from": "Chess_Opening_Theory/1. e4/1...c5/2. Nf3/2...Nc6",
+     "to": "Chess Opening Theory/1. e4/1...c5/2. Nf3/2...Nc6"
+    }
+   ],
+   "pages": {
+    "42318": {
+     "pageid": 42318,
+     "ns": 0,
+     "title": "Chess Opening Theory/1. e4/1...c5/2. Nf3/2...Nc6",
+     "extract": "\n== 2...Nc6 ==\nBlack develops the knight to its natural square c6, where it controls the centre. This move is sometimes called the old Sicilian. Black forestalls a decision on a pawn move for a little longer: if they get to play ...d5 in one move later, they will have saved a tempo by not playing 2...d6.\n3."
+    }
+   }
+  }
+ }
+}

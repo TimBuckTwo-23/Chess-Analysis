@@ -1,0 +1,24 @@
+{
+ "url": "https://en.wikibooks.org/w/api.php?action=query&prop=extracts&explaintext=1&exsentences=4&titles=Chess_Opening_Theory%2F1.+d4%2F1...d5%2F2.+c4%2F2...dxc4%2F3.+Nc3%2F3...Nc6%2F4.+e4&format=json&redirects=1",
+ "status": 200,
+ "content_type": "",
+ "recorded": "2026-09-26T17:21:07+00:00",
+ "body": {
+  "batchcomplete": "",
+  "query": {
+   "normalized": [
+    {
+     "from": "Chess_Opening_Theory/1. d4/1...d5/2. c4/2...dxc4/3. Nc3/3...Nc6/4. e4",
+     "to": "Chess Opening Theory/1. d4/1...d5/2. c4/2...dxc4/3. Nc3/3...Nc6/4. e4"
+    }
+   ],
+   "pages": {
+    "-1": {
+     "ns": 0,
+     "title": "Chess Opening Theory/1. d4/1...d5/2. c4/2...dxc4/3. Nc3/3...Nc6/4. e4",
+     "missing": ""
+    }
+   }
+  }
+ }
+}
