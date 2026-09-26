@@ -70,7 +70,7 @@ def player():
 def test_repeated_mistakes_first_then_costliest_errors_then_choice_points(player):
     ctx, modules = player
     picked = critical.select_critical(ctx, modules, 150)
-    assert [p.kind for p in picked] == ["repeated", "error", "error", "choice", "choice"]
+    assert [p.kind for p in picked] == ["repeated", "error", "error", "choice"]
     rep = picked[0]
     sic = [g for g in ctx.games if g.moves_san == SICILIAN]
     assert rep.move_label == "5...e5" and rep.played_san == "e5" and rep.played_uci == "e6e5"
@@ -85,11 +85,13 @@ def test_repeated_mistakes_first_then_costliest_errors_then_choice_points(player
     assert [(p.move_label, round(p.drop), p.time_class, p.repeats) for p in picked[1:3]] == [
         ("7.Re1", 40, "rapid", 1), ("8.a3", 12, "bullet", 1)]
     assert picked[1].insight_id is None and picked[1].best_san == "h3"
-    # the choice point after 1.e4: the moves you play there (4 x 1...c5, 2 x 1...e5), from the opening tree
-    assert [(p.move_label, p.repeats, p.moves_before) for p in picked[3:]] == [("1...c5", 4, ["e4"]),
-                                                                             ("1...e5", 2, ["e4"])]
-    # the engine's view where the games were analysed (the 1...c5 games), nothing otherwise
-    assert [(p.drop, p.best_san) for p in picked[3:]] == [(0.0, "c5"), (0.0, None)]
+    # the choice point after 1.e4 (4 x 1...c5, 2 x 1...e5, from openings.choice_positions): your usual move there
+    assert [(p.move_label, p.repeats, p.moves_before) for p in picked[3:]] == [("1...c5", 4, ["e4"])]
+    # the engine's view in the analysed games: Stockfish's first choice is your move, which lost nothing
+    choice = picked[3]
+    assert (choice.drop, choice.best_san, choice.time_class) == (0.0, "c5", "")  # blitz and bullet games
+    assert choice.games == [g.url for g in sorted(sic, key=lambda g: g.end_time, reverse=True)]
+    assert choice.url == choice.games[0] and not critical.engine_mistake(choice)
     assert len({(p.epd, p.played_uci) for p in picked}) == len(picked)
 
 
@@ -106,13 +108,66 @@ def test_the_cap_keeps_habits_and_errors_first(player):
 def test_a_choice_point_is_named_after_an_opening_only_when_most_of_its_games_share_it(player):
     ctx, modules = player
     choices = [p for p in critical.select_critical(ctx, modules, 150) if p.kind == "choice"]
-    assert [(p.move_label, p.opening_family) for p in choices] == [("1...c5", "Sicilian Defense"),
-                                                                  ("1...e5", "Italian Game")]
+    assert [(p.move_label, p.opening_family) for p in choices] == [("1...c5", "Sicilian Defense")]
+    # when the games of your usual move spread over several openings, the position gets no opening name
+    spread = {g.game_id: f for g, f in zip([g for g in ctx.games if g.moves_san == SICILIAN],
+                                           ["Sicilian Defense", "Sicilian Defense", "Ruy Lopez", "Other"])}
+    games = [dataclasses.replace(g, opening_family=spread.get(g.game_id, g.opening_family)) for g in ctx.games]
+    choices = [p for p in critical.select_critical(dataclasses.replace(ctx, games=games), [], 150)
+               if p.kind == "choice"]
+    assert [(p.move_label, p.opening_family) for p in choices] == [("1...c5", "")]
     games = [g for g in ctx.games if g.moves_san == SICILIAN]
     assert critical._family(games) == "Sicilian Defense"
     mixed = games[:2] + [dataclasses.replace(g, opening_family=f) for g, f in zip(games[2:], ["Ruy Lopez", "Other"])]
     assert critical._family(mixed) == ""  # 1...e5 leads to several openings: naming one would be wrong
     assert critical._family([dataclasses.replace(g, opening_family=None) for g in games]) == ""
+
+
+def _choice_ctx(drop: float, formats=("blitz",) * 4):
+    """Four games of 1...c5 (the formats given) and two of 1...e5 after 1.e4; in the 1...c5 games Stockfish prefers
+    1...e5 and says 1...c5 lost ``drop`` win-% points."""
+    games, evals = [], {}
+    for i, tc in enumerate(formats):
+        g = make_game(moves_san=list(SICILIAN), color="black", time_class=tc, opening_family="Sicilian Defense",
+                      minutes_ago=100 - i)
+        games.append(g)
+        evals[g.game_id] = _evals(g, {1: (50.0, 50.0 - drop, "e5")})
+    for i in range(2):
+        games.append(make_game(moves_san=list(OPEN_GAME), color="black", minutes_ago=30 - i))
+    games.sort(key=lambda g: g.end_time)
+    return AnalysisContext("tester", games, evals=evals, options={"openings.min_choice_games": 2})
+
+
+@pytest.mark.parametrize("drop", [3.0, 6.0])  # 8 and up: an error, listed as one
+def test_choice_points_come_from_the_openings_sections_positions(drop):
+    """Your usual move at each of openings.choice_positions; a mistake exactly when the openings section draws
+    Stockfish's move as the better one (it lost at least engine_min_drop win-% points on average)."""
+    from chess_insights.analysis import openings
+
+    ctx = _choice_ctx(drop)
+    (pos,) = openings.choice_positions(ctx)
+    (choice,) = [p for p in critical.select_critical(ctx, [], 150) if p.kind == "choice"]
+    assert (choice.played_san, choice.played_uci) == (pos.usual.san, pos.usual.uci) == ("c5", "c7c5")
+    assert (choice.ply, choice.fen, choice.moves_before, choice.color) == (pos.ply, pos.fen, pos.moves_before, "black")
+    assert choice.repeats == pos.usual.games == 4 and choice.games == pos.usual.urls  # newest first
+    assert choice.game_id == pos.usual.game_ids[0] and choice.url == pos.usual.urls[0]
+    assert choice.time_class == "blitz" and choice.opening_family == "Sicilian Defense"
+    assert choice.best_san == pos.engine_best == "e5" and choice.drop == pytest.approx(drop)
+    assert critical.engine_mistake(choice) == (pos.best_by == "engine" and pos.best != pos.usual.san) == (drop >= 5)
+    # games in two formats: no single format
+    (mixed,) = [p for p in critical.select_critical(_choice_ctx(drop, ("blitz", "bullet") * 2), [], 150)
+                if p.kind == "choice"]
+    assert mixed.time_class == ""
+
+
+def test_engine_mistake_needs_a_verdict_from_the_game_analysis():
+    pos = _position(kind="choice")
+    assert critical.engine_mistake(pos)  # 20 points and Stockfish prefers 5...Nf6
+    assert not critical.engine_mistake(dataclasses.replace(pos, drop=4.9))
+    assert not critical.engine_mistake(dataclasses.replace(pos, drop=0.0), min_drop=0.0)  # 0.0: no verdict at all
+    assert not critical.engine_mistake(dataclasses.replace(pos, best_san="e5"))  # Stockfish's own move
+    assert not critical.engine_mistake(dataclasses.replace(pos, best_san=None))
+    assert critical.engine_mistake(dataclasses.replace(pos, kind="error", drop=0.0))  # errors are errors
 
 
 def test_chess960_games_are_left_out(player):
@@ -319,6 +374,68 @@ def test_choice_point_text(motif_hooks):
     assert ex.diagram.strips[1].title == "Stockfish's 5...Nf6"
 
 
+def test_a_choice_point_below_the_openings_bar_is_not_explained_as_an_error(motif_hooks, monkeypatch):
+    """Under engine_min_drop win-% points on average in the analysed games, Stockfish's move and yours stand side by
+    side: no "Stockfish prefers", no comparison of what it wins, no motifs, drills or concepts."""
+    monkeypatch.setattr(motifs, "GATED_THEMES", frozenset({"fork"}))
+    motif_hooks["refutation"] = [Motif(theme="fork", line="refutation", ply=1, squares=["b5"], side="opponent")]
+    games = explain._Games(AnalysisContext("t", []))
+    pos = dataclasses.replace(_position(kind="choice"), drop=2.3)
+    ex = explain.explain_position(games, pos, _result(pos), _NoConcepts(), frozenset({"fork"}))
+    assert ex.text == ("Stockfish's first choice here is 5...Nf6 (−0.39 for you); after your 5...e5 (−1.57 for you) "
+                       "its main line is 6.Ndb5 a6 7.Nd6+ Bxd6. In the games it analysed, your 5...e5 lost 2.3 "
+                       "percentage points of winning chances on average, less than an inaccuracy: in the opening "
+                       "several moves are often about equally good.")
+    assert "prefers" not in ex.text and "Compared with" not in ex.text
+    assert ex.motifs == [] and ex.drill_themes == [] and ex.chart is None and ex.diagram.marks == []
+    assert ex.diagram.strips[1].title == "Stockfish's 5...Nf6"
+    # no analysed game with the move (drop 0.0): no average is quoted, and still no verdict
+    pos = dataclasses.replace(pos, drop=0.0)
+    ex = explain.explain_position(games, pos, _result(pos), _NoConcepts(), frozenset({"fork"}))
+    assert ex.text.startswith("Stockfish's first choice here is 5...Nf6") and "percentage points" not in ex.text
+    # the run's own bar (openings.engine_min_drop) decides: at 2 points this is a mistake
+    pos = dataclasses.replace(pos, drop=2.3)
+    ex = explain.explain_position(games, pos, _result(pos), None, frozenset({"fork"}), choice_min_drop=2.0)
+    assert ex.text.startswith("Stockfish prefers 5...Nf6") and ex.drill_themes == ["fork"]
+
+
+def test_evaluations_past_ten_pawns_are_named_not_printed(motif_hooks):
+    pos = _position(kind="error")
+    games = explain._Games(AnalysisContext("t", []))
+    lost = _result(pos, best_cp=-120, ref_cp=-3468)
+    ex = explain.explain_position(games, pos, lost, None, frozenset())
+    assert "34.68" not in ex.text and "Stockfish rates the line as a lost position for you, against −1.20" in ex.text
+    assert ex.diagram.strips[0].frames[-1].caption == "a lost position for you"
+    won = _result(pos, best_cp=2150, ref_cp=150)
+    ex = explain.explain_position(games, pos, won, None, frozenset())
+    assert "21.50" not in ex.text and "against a winning position for you after 5...Nf6" in ex.text
+    assert explain.verdict(won.best_line, "black", short=True) == "a winning position for you"
+    assert explain.verdict(won.refutation, "black") == "+1.50 for you"
+    assert explain.verdict(make_line(pos.fen, [], 1000, None, 20), "black") == "+10.00 for you"  # 10 pawns: a number
+    assert explain.verdict(make_line(pos.fen, [], -1000, -3, 20), "black") == "mate in 3 for White"
+    deltas = [ConceptDelta("King safety", -12.4, label="king safety"), ConceptDelta("Mobility", -0.38,
+              label="piece activity")]
+    assert explain._what_it_wins(Comparison(deltas=deltas), gap=5.0) == (
+        "a few moves later you stand far worse on king safety and 0.38 on piece activity")
+
+
+def test_the_explanation_carries_the_format_of_its_games():
+    """The format views keep an explanation by its time class: set from the games whenever they share one."""
+    blitz = [make_game(time_class="blitz") for _ in range(2)]
+    bullet = make_game(time_class="bullet")
+    games = explain._Games(AnalysisContext("t", blitz + [bullet]))
+    pos = dataclasses.replace(_position(), time_class="", games=[g.url for g in blitz], url=blitz[0].url,
+                              game_id=blitz[0].game_id)
+    assert games.single_format(pos) == "blitz"
+    ex = explain.explain_position(games, pos, _result(pos), None, frozenset())
+    assert ex.time_class == "blitz" and ex.diagram.time_class == "blitz"
+    assert games.single_format(dataclasses.replace(pos, games=[blitz[0].url, bullet.url])) == ""
+    one = dataclasses.replace(pos, games=[], url="", game_id=bullet.game_id, repeats=1)
+    assert games.single_format(one) == "bullet"
+    # games the context does not hold: the position's own format
+    assert games.single_format(dataclasses.replace(pos, games=["https://elsewhere/1"], time_class="rapid")) == "rapid"
+
+
 def test_what_it_wins_material_or_concepts():
     deltas = [ConceptDelta("King safety", -0.85, label="king safety"), ConceptDelta("Mobility", -0.38,
               label="piece activity"), ConceptDelta("Material", -0.5, label="material"),
@@ -493,7 +610,7 @@ def test_build_coaching_end_to_end_with_a_fake_engine(player, monkeypatch, tmp_p
     monkeypatch.setattr(motifs, "detect_line", lambda line, role: [])
     deep._PROFILE_MEMO.clear()
     coaching = build_coaching(ctx, modules, CoachConfig(workers=2, cache_dir=tmp_path / "coach"))
-    assert coaching.settings["positions"] == 5 and coaching.settings["engine"] == "Fake 1"
+    assert coaching.settings["positions"] == 4 and coaching.settings["engine"] == "Fake 1"
     assert coaching.settings["explained"] == len(coaching.explanations) >= 3
     kinds = [x.kind for x in coaching.explanations]
     assert kinds[0] == "repeated" and "choice" in kinds
@@ -515,7 +632,7 @@ def test_build_coaching_without_evals_or_stockfish_leaves_notes(player, monkeypa
     assert coaching.explanations == [] and coaching.puzzle_lines == {}
     assert sum("Stockfish not found" in n for n in coaching.notes) == 1  # said once
     assert any("Deep analysis skipped" in n for n in coaching.notes)
-    assert coaching.settings["positions"] == 5
+    assert coaching.settings["positions"] == 4
 
 
 def test_without_engine_data_coaching_still_runs_the_engine_free_steps(monkeypatch):

@@ -6,8 +6,9 @@ Three kinds, in this order:
   ``mistakes.assess``, exactly as the "Positions you keep getting wrong" section finds them), most costly first
   (games x average win chance lost);
 * **error**: every other move of yours that lost at least ``mistakes.MIN_DROP`` win-% points, costliest first;
-* **choice**: the moves you play often at your choice points in the opening (``openings.choice_points``), so the
-  report can show the engine's view of each branch of your main lines.
+* **choice**: your usual move at each choice point of your main lines (``openings.choice_positions``, the positions
+  the openings section draws), so the report can show the engine's view of it. It counts as a mistake only where
+  the openings section says so (``engine_mistake``): in the opening several moves are often about equally good.
 
 Nothing here is tested or claimed: the list only decides which positions the deep analysis looks at.
 """
@@ -144,62 +145,52 @@ def _errors(events: list[mistakes.MistakeEvent], ids: dict[tuple[str, str], str]
     return out
 
 
+def engine_mistake(pos: CriticalPosition, min_drop: float = openings.Thresholds.engine_min_drop) -> bool:
+    """Whether the game analysis calls your move at a choice point an engine mistake, as the openings section does
+    (``openings.ChoicePosition.best_by == "engine"`` with a better move than yours): Stockfish prefers another
+    move and yours lost at least ``min_drop`` win-% points on average in the analysed games
+    (``openings.Thresholds.engine_min_drop``). Below that several opening moves are about equally good, and the
+    choice is not explained as an error. Errors and repeated mistakes are always mistakes."""
+    if pos.kind != "choice":
+        return True
+    return bool(pos.best_san) and pos.best_san != pos.played_san and pos.drop > 0 and pos.drop >= min_drop
+
+
 def _choices(ctx: "AnalysisContext") -> list[CriticalPosition]:
-    """One entry per move you play often at a choice point of your main lines (``openings.choice_points``)."""
-    th = openings.Thresholds.from_ctx(ctx)
-    by_colour: dict = {"white": [], "black": []}
-    for g in ctx.games:
-        if openings.is_eligible(g):
-            by_colour[g.color].append(g)
+    """One entry per choice point of your main lines (``openings.choice_positions``, the positions the openings
+    section draws), for the move you usually play there.
+
+    ``drop`` is the win-% points Stockfish says that move lost on average in the analysed games (0.0 without
+    them: no verdict), ``best_san`` Stockfish's first choice (None without evals); ``engine_mistake`` says
+    whether that makes the move a mistake."""
+    by_id = ctx.games_by_id
     out = []
-    for point in openings.choice_points(by_colour, th):
-        board = chess.Board()
-        try:
-            for san in point.prefix:
-                board.push_san(san)
-        except ValueError:
+    for pos in openings.choice_positions(ctx):
+        usual = pos.usual
+        if not usual.uci or not usual.game_ids:
             continue
-        ply, fen = len(point.prefix), board.fen()
-        for option in point.options:
-            games = sorted(option.games, key=lambda g: g.end_time, reverse=True)
-            if not games:
-                continue
-            san = games[0].moves_san[ply]
-            try:
-                move = board.parse_san(san)
-            except ValueError:
-                continue
-            # The engine's view of this move in the analysed games: win chance lost, and its preferred move.
-            drops: list[float] = []
-            bests: Counter = Counter()
-            for g in games:
-                ev = ctx.evals.get(g.game_id)
-                p = next((p for p in ev.plies if p.ply == ply), None) if ev is not None else None
-                if p is None:
-                    continue
-                drops.append(0.0 if p.best_san == san else max(0.0, p.win_before - p.win_after))
-                if p.best_san:
-                    bests[p.best_san] += 1
-            out.append(
-                CriticalPosition(
-                    game_id=games[0].game_id,
-                    url=games[0].url,
-                    ply=ply,
-                    fen=fen,
-                    played_uci=move.uci(),
-                    played_san=san,
-                    move_label=mistakes.move_label(fen, san),
-                    best_san=bests.most_common(1)[0][0] if bests else None,
-                    drop=sum(drops) / len(drops) if drops else 0.0,
-                    time_class=_time_class(games),
-                    color=point.color,
-                    kind="choice",
-                    repeats=len(games),
-                    games=[g.url for g in games if g.url],
-                    opening_family=_family(games),
-                    moves_before=list(point.prefix),
-                )
+        games = [by_id[gid] for gid in usual.game_ids if gid in by_id]  # most recent first
+        family = pos.opening_family if pos.opening_family and _family(games) == pos.opening_family else ""
+        out.append(
+            CriticalPosition(
+                game_id=usual.game_ids[0],
+                url=usual.urls[0] if usual.urls else "",
+                ply=pos.ply,
+                fen=pos.fen,
+                played_uci=usual.uci,
+                played_san=usual.san,
+                move_label=mistakes.move_label(pos.fen, usual.san),
+                best_san=pos.engine_best,
+                drop=float(usual.engine_drop) if usual.engine_drop is not None else 0.0,
+                time_class=next(iter(usual.formats)) if len(usual.formats) == 1 else "",
+                color=pos.color,
+                kind="choice",
+                repeats=usual.games,
+                games=list(usual.urls),
+                opening_family=family,
+                moves_before=list(pos.moves_before),
             )
+        )
     return out
 
 
@@ -208,8 +199,8 @@ def select_critical(ctx: "AnalysisContext", modules: list[ModuleResult], max_pos
     first), then choice points in your main lines; one entry per (EPD, move); at most ``max_positions``.
 
     Choice points keep a place when there are more errors than slots: they get up to ``CHOICE_SHARE`` of the slots
-    the repeated mistakes leave free (there are few of them: at most ``openings.Thresholds.max_choice_points``
-    positions with two or three moves each). Standard chess only.
+    the repeated mistakes leave free (there are few of them: at most ``openings.Thresholds.max_choice_diagrams``
+    positions, one move each). Standard chess only.
     """
     if max_positions <= 0 or not ctx.evals:
         return []

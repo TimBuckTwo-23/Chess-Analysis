@@ -27,9 +27,11 @@ import chess
 
 from .. import engine as sf
 from .. import visuals
+from ..analysis import openings
 from ..analysis.mistakes import format_line
 from ..models import Chart, ConceptDelta, CriticalPosition, Diagram, Explanation, Line, Mark, Motif, Source, Strip
 from . import concepts, motifs
+from .critical import engine_mistake
 from .config import CoachConfig
 from .deep import rebase
 
@@ -44,7 +46,14 @@ STRIP_FRAMES = 4  # small boards per line
 # the text then says your move is close to Stockfish's choice instead of explaining an error.
 CLOSE_DROP = min(drop for drop, _ in sf.JUDGEMENT_DROPS)
 CLOSE_GAP = 1.0  # ... and less than this many pawns: in a lopsided position -10 against -6 is a few win-% points
+# At a choice point your usual move is a mistake only when it lost at least this many win-% points on average in the
+# analysed games (the openings section's bar, ``openings.Thresholds.engine_min_drop``; ``explain_all`` reads the run's
+# setting).
+CHOICE_MIN_DROP = openings.Thresholds.engine_min_drop
 TEXT_PLIES = 4  # moves of a line quoted in the text
+# Past this many centipawns (10 pawns) the text names the result ("a winning position for you") instead of a number
+# such as −34.68: the size of a lopsided evaluation means nothing to a reader.
+BIG_EVAL = 1000
 
 # theme -> (the pattern in words, what to check next time when your move allowed it)
 MOTIF_WORDS: dict[str, tuple[str, str]] = {
@@ -93,7 +102,8 @@ def pawns(cp: float) -> str:
 
 def verdict(line: Optional[Line], color: str, short: bool = False) -> str:
     """The engine's verdict on a line from your side: "−1.52 for you", "mate in 3 for White", "mate in 2 for you";
-    ``short`` leaves "for you" off a number ("−0.39")."""
+    past ``BIG_EVAL`` "a winning position for you" / "a lost position for you" instead of a number; ``short`` leaves
+    "for you" off a number ("−0.39")."""
     if line is None:
         return "unclear"
     if line.mate_end is not None:
@@ -102,7 +112,20 @@ def verdict(line: Optional[Line], color: str, short: bool = False) -> str:
             return f"mate in {n} for you" if n else "checkmate for you"
         winner = "Black" if color == "white" else "White"
         return f"mate in {n} for {winner}" if n else f"checkmate for {winner}"
-    return pawns(line.cp_end or 0) + ("" if short else " for you")
+    cp = line.cp_end or 0
+    if abs(cp) > BIG_EVAL:
+        return "a winning position for you" if cp > 0 else "a lost position for you"
+    return pawns(cp) + ("" if short else " for you")
+
+
+def _is_number(text: str) -> bool:
+    """A verdict given as a number ("−1.52 for you"), not in words."""
+    return text[:1] in "+−-" and text[1:2].isdigit()
+
+
+def _amount(value: float) -> str:
+    """'0.30 pawns' for a concept difference; 'far' past ``BIG_EVAL`` (a number that size means nothing)."""
+    return "far" if abs(value) * 100 > BIG_EVAL else f"{abs(value):.2f} pawns"
 
 
 def _label(fen: str, uci: str) -> str:
@@ -126,6 +149,11 @@ def _line_text(line: Line, start: int, plies: int) -> str:
     return format_line(line.moves_san[start : start + plies], board.fen())
 
 
+def _chances(drop: float) -> str:
+    """'12 percentage points' / '2.3 percentage points' (of winning chances), as the openings section writes them."""
+    return f"{drop:.0f} percentage points" if drop >= 9.95 else f"{drop:.1f} percentage points"
+
+
 def _material_words(n: int) -> str:
     return "a pawn" if n == 1 else f"{n} pawns' worth of material"
 
@@ -139,11 +167,23 @@ class _Games:
 
     def __init__(self, ctx: "AnalysisContext") -> None:
         self.time_class = {g.url: g.time_class for g in ctx.games if g.url}
+        self.by_id = {g.game_id: g.time_class for g in ctx.games}
         self.start = {g.game_id: g.initial_fen for g in ctx.games}
 
     def format_mix(self, urls: Sequence[str]) -> dict[str, int]:
         """Games per time class behind a position, in the report's format order."""
         return visuals.ordered_formats(Counter(self.time_class[u] for u in urls if u in self.time_class))
+
+    def single_format(self, pos: CriticalPosition) -> str:
+        """The position's format when all its games share one ("" for several): read from the games themselves (the
+        format views keep an explanation by it), else ``pos.time_class`` when a game is not in the context."""
+        urls = list(pos.games) or ([pos.url] if pos.url else [])
+        formats = {self.time_class.get(u) for u in urls}
+        if not urls and pos.game_id in self.by_id:
+            formats = {self.by_id[pos.game_id]}
+        if not formats or None in formats or "" in formats:
+            return pos.time_class
+        return formats.pop() if len(formats) == 1 else ""
 
 
 # --------------------------------------------------------------------------- motifs and concepts
@@ -236,9 +276,10 @@ class _Concepts:
             return Comparison()
         me = chess.WHITE if color == "white" else chess.BLACK
         b_facts, r_facts = concepts.board_facts(b_end, color), concepts.board_facts(r_end, color)  # type: ignore[arg-type]
-        before = concepts.material(chess.Board(fen), me)
+        start = chess.Board(fen)
+        before = concepts.material(start, me)
         out = Comparison(
-            facts=concepts.fact_differences(b_facts, r_facts),
+            facts=concepts.fact_differences(b_facts, r_facts, start=concepts.board_facts(start, color)),  # type: ignore[arg-type]
             material_lost=max(0, min(before, b_facts.material) - r_facts.material),
             material_missed=max(0, b_facts.material - max(before, r_facts.material)),
         )
@@ -310,9 +351,9 @@ def _what_it_wins(cmp: Comparison, gap: float, best_label: str = "") -> str:
     else:
         worse = [c for c in cmp.deltas if c.value < 0 and c.term != "Material"][:2]
         if worse:
-            text = f"a few moves later you stand {abs(worse[0].value):.2f} pawns worse on {worse[0].label}"
+            text = f"a few moves later you stand {_amount(worse[0].value)} worse on {worse[0].label}"
             if len(worse) > 1:
-                text += f" and {abs(worse[1].value):.2f} on {worse[1].label}"
+                text += f" and {_amount(worse[1].value).replace(' pawns', '')} on {worse[1].label}"
             parts.append(text)
     if cmp.facts and not (lost and missed):  # a third item would make the sentence too long
         parts.append(cmp.facts[0])
@@ -351,11 +392,15 @@ def explanation_text(
     cmp: Comparison,
     gated: frozenset,
     depth: Optional[int] = None,
+    choice_min_drop: float = CHOICE_MIN_DROP,
 ) -> str:
     """At most three sentences: what the refutation does, what it wins, what to check next time.
 
     When the deeper search finds your move as good as its own (the same move) or close to it (``is_close``: not even
-    an inaccuracy), the text says so instead of explaining an error that is not one.
+    an inaccuracy), the text says so instead of explaining an error that is not one. At a choice point the text
+    says Stockfish prefers another move only when the game analysis calls yours a mistake, as the openings section
+    does (``critical.engine_mistake`` with ``choice_min_drop``); otherwise it gives Stockfish's first choice and its
+    line after your move side by side, without a verdict.
     """
     played = pos.move_label
     best_label = _label(pos.fen, best.moves_uci[0]) if best.moves_uci else ""
@@ -369,14 +414,25 @@ def explanation_text(
     at = f" at depth {depth}" if depth else ""
 
     if pos.kind == "choice":
+        mistake = not (same or close) and engine_mistake(pos, choice_min_drop)
         if same:
             first = f"Stockfish agrees with your {played} ({ref_v})"
         elif close:
             first = f"Your {played} ({ref_v}) is close to Stockfish's first choice, {best_label} ({best_v})"
-        else:
+        elif mistake:
             first = f"Stockfish prefers {best_label} ({verdict(best, pos.color)}) to your {played} ({ref_v})"
+        else:  # below the openings section's bar: two good moves side by side, not an error
+            first = f"Stockfish's first choice here is {best_label} ({verdict(best, pos.color)})"
+            first += f"; after your {played} ({ref_v}) its main line is {answer}." if answer else \
+                f", and it rates your {played} {ref_v if _is_number(ref_v) else 'as ' + ref_v}."
+            if pos.drop > 0:  # 0.0: no analysed game with the move, so no average to quote
+                bar = "less than an inaccuracy" if pos.drop < CLOSE_DROP else \
+                    f"under the {choice_min_drop:g} this report counts as a mistake at a choice point"
+                first += (f" In the games it analysed, your {played} lost {_chances(pos.drop)} of winning chances on "
+                          f"average, {bar}: in the opening several moves are often about equally good.")
+            return first
         first += f"; its main line after {played} is {answer}." if answer else "."
-        wins = _what_it_wins(cmp, gap, best_label) if not (same or close) else ""
+        wins = _what_it_wins(cmp, gap, best_label) if mistake else ""
         return first + (f" Compared with {best_label}, {wins}." if wins else "")
 
     if same:
@@ -403,8 +459,8 @@ def explanation_text(
         second = f"Stockfish prefers {best_label} ({verdict(best, pos.color)})."
     else:
         wins = "" if mating else _what_it_wins(cmp, gap, best_label)
-        second = f"Stockfish rates the line {ref_v}, against {best_v} after {best_label}" + (
-            f": {wins}." if wins else ".")
+        second = f"Stockfish rates the line {ref_v if _is_number(ref_v) else 'as ' + ref_v}, against {best_v} after " \
+                 f"{best_label}" + (f": {wins}." if wins else ".")
     check = _check_next_time(allowed, missed, gated, cmp, gap, mated, mating)
     return f"{first} {second} Next time, {check}."
 
@@ -475,7 +531,7 @@ def build_diagram(games: _Games, pos: CriticalPosition, best: Line, refutation: 
         best=None if same else best_uci,
         caption=caption,
         link=pos.url,
-        time_class=pos.time_class,
+        time_class=games.single_format(pos),
         last_move=_last_move(games.start.get(pos.game_id), pos.moves_before, pos.epd),
         marks=_marks(list(allowed) + list(missed), gated),
     )
@@ -519,6 +575,7 @@ def explain_position(
     result: "DeepResult",
     concept_tool: Optional[_Concepts],
     gated: frozenset,
+    choice_min_drop: float = CHOICE_MIN_DROP,
 ) -> Optional[Explanation]:
     """The Explanation of one position from its deep result (None without both lines)."""
     if result.best_line is None or result.refutation is None or not result.best_line.moves_uci:
@@ -529,13 +586,15 @@ def explain_position(
         return None
     same = best.moves_uci[0] == pos.played_uci
     close = not same and is_close(best, refutation)  # the deeper search hardly minds your move
+    # a choice point the game analysis does not call a mistake: two good moves side by side, not an error
+    fine = same or close or not engine_mistake(pos, choice_min_drop)
     shown = shown_line(best, refutation)  # the line after your move in the text and the strip
-    # No motifs, drill themes or concept comparison for a move the deeper search does not call an error, and no
-    # concepts when a forced mate decides a line (material and structure on the way to it say nothing).
+    # No motifs, drill themes or concept comparison for a move that is not an error, and no concepts when a forced
+    # mate decides a line (material and structure on the way to it say nothing).
     previous = previous_position(games.start.get(pos.game_id), pos.moves_before, pos.epd)
-    allowed, missed = ([], []) if same or close else split_motifs(best, refutation, previous)
+    allowed, missed = ([], []) if fine else split_motifs(best, refutation, previous)
     cmp = Comparison()
-    if concept_tool is not None and not (same or close or _mate_line(best, refutation)):
+    if concept_tool is not None and not (fine or _mate_line(best, refutation)):
         cmp = concept_tool.compare(pos.fen, best, refutation, pos.color)
     depths = [x.depth for x in (best, refutation) if x.depth]
     depth = min(depths) if depths else result.depth
@@ -557,12 +616,12 @@ def explain_position(
         motifs=kept,
         concepts=cmp.deltas,
         facts=cmp.facts,
-        text=explanation_text(pos, best, refutation, allowed, missed, cmp, gated, depth),
+        text=explanation_text(pos, best, refutation, allowed, missed, cmp, gated, depth, choice_min_drop),
         sources=sources,
         insight_id=pos.insight_id,
         kind=pos.kind,
         drop=pos.drop,
-        time_class=pos.time_class,
+        time_class=games.single_format(pos),
         color=pos.color,
         game_url=pos.url,
         games=list(pos.games),
@@ -587,13 +646,14 @@ def explain_all(
         return []
     gated = frozenset(getattr(motifs, "GATED_THEMES", frozenset()) or ())
     games = _Games(ctx)
+    min_drop = openings.Thresholds.from_ctx(ctx).engine_min_drop
     tool = _Concepts(sf.find_stockfish(cfg.stockfish))
     out: list[Explanation] = []
     failed = 0
     try:
         for pos, result in todo:
             try:
-                explanation = explain_position(games, pos, result, tool, gated)
+                explanation = explain_position(games, pos, result, tool, gated, min_drop)
             except Exception as exc:  # noqa: BLE001 — one odd position must not cost the others their explanation
                 failed += 1
                 log.warning("could not explain %s %s: %s", pos.move_label, pos.fen, exc)
