@@ -180,6 +180,15 @@ def test_too_few_new_games_are_not_compared():
         ", 40% of the 100 before (too few new games to compare yet)")
 
 
+def test_no_new_games():
+    previous, report, games = two_reports(before_late=40, n_before=100, new_late=0, n_new=0)
+    progress.annotate(report, CoachConfig(previous=previous), games)
+    [line] = report.coaching.progress
+    last = datetime.fromisoformat(previous["date_to"])
+    assert line.improved is None and line.text == f"{LATE}: 40 → 40 in all your games (no new games since " \
+                                                  f"{last.day} {last:%b})"
+
+
 def test_without_the_games_or_with_other_games_nothing_is_judged():
     previous, report, games = two_reports(before_late=40, n_before=100, new_late=0, n_new=40)
     progress.annotate(report, CoachConfig(previous=previous))  # no games: the periods can't be told apart

@@ -210,7 +210,7 @@ def _count_line(metric: str, before: float, now: float, p: Periods) -> tuple[Pro
     label = _label(metric)
     fresh = now - before
     valid = p.comparable and 0 <= before <= p.before and 0 <= fresh <= p.new
-    if not valid:
+    if not valid or not p.new:
         line = compare(metric, before, now)
         line.text += f" in all your games ({_new_games(p)})"
         return line, None
