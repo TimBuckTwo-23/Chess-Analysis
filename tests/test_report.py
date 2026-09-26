@@ -851,8 +851,9 @@ def test_diagram_svg_is_sanitised_by_allowlist(svg):
     (board,) = _board_parts(html)
     tags = set(re.findall(r"<([a-zA-Z]+)", board))
     assert {t.lower() for t in tags} <= BOARD_TAGS, tags
-    # a rejected SVG falls back to a board drawn from the FEN by python-chess
-    assert "<use" in board and "white-king" in board and "black-king" in board
+    # a rejected SVG falls back to a board drawn from the FEN, with pieces from the page's one sprite
+    assert 'href="#ci-pc-wK"' in board and 'href="#ci-pc-bK"' in board
+    assert html.count('class="ci-sprite"') == 1
 
 
 def test_diagram_svg_from_python_chess_is_kept_with_unique_ids():

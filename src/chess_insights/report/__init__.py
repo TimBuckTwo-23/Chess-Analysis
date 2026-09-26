@@ -1,7 +1,10 @@
 """Report writers: self-contained HTML, GitHub Markdown and JSON.
 
 Renderers only ever see a :class:`~chess_insights.models.Report` and are generic
-over module contents (KPIs, charts, tables, insights).
+over module contents (KPIs, charts, tables, insights, boards). Boards are drawn from
+FEN + annotations by :mod:`.boards` (inline SVG, one piece sprite per page); a report
+with ``format_reports`` gets one view per format, and ``Report.coaching`` its own
+sections ("Why these moves go wrong", "Practice").
 """
 
 from __future__ import annotations

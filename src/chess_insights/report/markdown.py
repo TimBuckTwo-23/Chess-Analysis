@@ -10,8 +10,43 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Optional, Sequence
 
-from ..models import VALUE_FORMATS, Chart, Insight, Kpi, ModuleResult, Report, StudyItem, Table
+from ..models import (
+    VALUE_FORMATS,
+    Chart,
+    Coaching,
+    Diagram,
+    Drill,
+    DrillPuzzle,
+    Explanation,
+    Insight,
+    Kpi,
+    ModuleResult,
+    Motif,
+    OpeningFacts,
+    Report,
+    ReviewItem,
+    Source,
+    Strip,
+    StudyItem,
+    Table,
+)
+from . import boards
 from .html import (
+    EXPLANATION_KINDS,
+    WHY_OPEN,
+    clean_formats,
+    format_chip_text,
+    format_text,
+    format_name,
+    format_views,
+    line_text,
+    maia_text,
+    motif_words,
+    peer_label,
+    tablebase_text,
+    training_url,
+    view_coaching,
+    view_scope_text,
     lichess_analysis_url,
     DEMO_NOTE,
     GLYPH_MEANINGS,
@@ -40,6 +75,7 @@ from .html import (
     report_title,
     safe_url,
     text_or_empty,
+    to_number,
     url_link_text,
     valid_urls,
 )
@@ -159,6 +195,60 @@ def md_table(table: Table) -> list[str]:
     return lines
 
 
+def chart_text(chart: Chart) -> str:
+    """A small chart as one line of numbers: "Bullet +4%, Blitz +7%" or "Bullet: You 47%, Expected 50%; ..."."""
+    data = chart_data(chart)
+    if not data.has_values:
+        return ""
+    fmt = data.fmt
+    if len(data.series) == 1:
+        body = ", ".join(
+            f"{label} {format_value(v, fmt)}" for label, v in zip(data.labels, data.series[0][1]) if v is not None
+        )
+    else:
+        body = "; ".join(
+            f"{label}: " + ", ".join(f"{name} {format_value(vals[i], fmt)}" for name, vals in data.series if vals[i] is not None)
+            for i, label in enumerate(data.labels)
+        )
+    if data.reference is not None:
+        body += f" (reference {format_value(data.reference, fmt)})"
+    title = text_or_empty(chart.title)
+    return f"{title}: {body}" if title else body
+
+
+def _position_lines(d: Diagram, labels: Optional[dict[str, str]] = None, *, indent: str = "", title: bool = True,
+                    why: str = "", strips: bool = True) -> list[str]:
+    """A board in text: title, caption, the FEN in code with a Lichess link, the arrows in words, the lines.
+    ``title=False`` (an explanation, which names the move and format itself) gives just "Position"."""
+    links = [
+        md_link(u, t)
+        for u, t in ((d.link, (labels or {}).get(d.link) or "game"), (lichess_analysis_url(d.fen), "analyse on Lichess"))
+        if u
+    ]
+    tc = text_or_empty(getattr(d, "time_class", ""))
+    head = f"**{md_text(d.title)}**" if title and text_or_empty(d.title) else "Position"
+    if tc and title:
+        head += f" ({md_text(format_name(tc).lower())} game)"
+    parts = [md_text(d.caption)] if text_or_empty(d.caption) else []
+    parts.append(md_code(d.fen) or "")
+    line = f"{indent}- {head}: " + " ".join(p for p in parts if p)
+    if links:
+        line += " · " + " · ".join(links)
+    if why:
+        line += f" · {why}"
+    out = [line]
+    board = boards.parse_board(d.fen)
+    arrows = boards.arrows_text(board, d.arrows or []) if board is not None else ""
+    if arrows:
+        out.append(f"{indent}  - Arrows: {md_text(arrows)}")
+    for strip in (getattr(d, "strips", None) or []) if strips else []:
+        if isinstance(strip, Strip):
+            moves = boards.compact_labels([getattr(f, "move", "") for f in strip.frames or []])
+            if moves:
+                out.append(f"{indent}  - {md_text(strip.title) or 'Line'}: {md_code(moves)}")
+    return out
+
+
 def _insight_line(
     ins: Insight,
     *,
@@ -166,20 +256,32 @@ def _insight_line(
     with_kind: bool,
     labels: Optional[dict[str, str]] = None,
     plan_no: Optional[int] = None,
+    view_tc: str = "",
+    why: str = "",
 ) -> list[str]:
     glyph = glyph_for(ins)
     label = f"{md_text(f'{KIND_LABELS[insight_kind(ins)]} · {category_label(ins.category)}')}: " if with_kind else ""
     head = f"- `{glyph}` **{label}{md_text(ins.title)}**"
     if text_or_empty(ins.detail):
         head += f" — {md_text(ins.detail)}"
-    head += f" _({confidence_label(ins.confidence)})_"
+    formats = clean_formats(getattr(ins, "formats", None))
+    fmt = format_chip_text(formats) if formats and list(formats) != [view_tc] else ""
+    head += f" _({confidence_label(ins.confidence)}{' · ' + md_text(fmt) if fmt else ''})_"
     if plan_no:
         head += f" · what to do: study plan item {plan_no}"
     else:
         games = _games_line(ins.example_games, "review", labels)
         if games:
             head += f" · {games}"
+    if why:
+        head += f" · {why}"
     lines = [head]
+    if isinstance(getattr(ins, "chart", None), Chart):
+        text = chart_text(ins.chart)
+        if text:
+            lines.append(f"  - Chart: {md_text(text)}")
+    if isinstance(getattr(ins, "diagram", None), Diagram):
+        lines += _position_lines(ins.diagram, labels, indent="  ")
     if show_study and not plan_no:
         lines += [f"  - {md_text(s)}" for s in (ins.study or []) if text_or_empty(s)]
     return lines
@@ -220,6 +322,7 @@ def _study_plan(items: Sequence[StudyItem], labels: Optional[dict[str, str]] = N
 
 def _glance(report: Report, sections: dict[str, str], plan: dict[str, int]) -> list[str]:
     lines = ["## At a glance", ""]
+    report_formats = clean_formats(getattr(report, "formats", None))
     for heading, insights, empty in (
         ("Weaknesses", report.weaknesses or [], "No clear weaknesses yet."),
         ("Strengths", report.strengths or [], "No clear strengths yet."),
@@ -231,6 +334,9 @@ def _glance(report: Report, sections: dict[str, str], plan: dict[str, int]) -> l
         for ins in insights:
             iid = text_or_empty(ins.id)
             where = [sections.get(iid, "")] + ([f"plan item {plan[iid]}"] if iid in plan else [])
+            formats = clean_formats(getattr(ins, "formats", None))
+            if formats and set(formats) != set(report_formats or formats):
+                where.append(format_text(formats))  # only when the finding is about some formats, not all
             where_text = " · ".join(w for w in where if w)
             lines.append(f"- `{glyph_for(ins)}` {md_text(ins.title)}" + (f" — _{md_text(where_text)}_" if where_text else ""))
         lines.append("")
@@ -270,7 +376,13 @@ def _chart(chart: Chart) -> list[str]:
 
 
 def _module(
-    module: ModuleResult, labels: Optional[dict[str, str]] = None, plan: Optional[dict[str, int]] = None
+    module: ModuleResult,
+    labels: Optional[dict[str, str]] = None,
+    plan: Optional[dict[str, int]] = None,
+    *,
+    view_tc: str = "",
+    why_by_id: Optional[dict[str, int]] = None,
+    why_by_epd: Optional[dict[str, int]] = None,
 ) -> list[str]:
     title = text_or_empty(module.title) or text_or_empty(module.key) or "Section"
     lines = [f"## {md_text(title)}", ""]
@@ -280,11 +392,12 @@ def _module(
         lines += [_kpi_line(k) for k in module.kpis] + [""]
     for chart in module.charts or []:
         lines += _chart(chart)
-    for d in getattr(module, "diagrams", None) or []:
-        links = [
-            md_link(u, t) for u, t in ((d.link, (labels or {}).get(d.link) or "game"), (lichess_analysis_url(d.fen), "analyse on Lichess")) if u
-        ]
-        lines += [f"- **{md_text(d.title)}**: {md_text(d.caption)} {md_code(d.fen)} " + " · ".join(links), ""]
+    diagrams = [d for d in getattr(module, "diagrams", None) or [] if isinstance(d, Diagram)]
+    for d in diagrams:
+        n = (why_by_epd or {}).get(boards.epd(d.fen))
+        lines += _position_lines(d, labels, why=f"why: explanation {n} below" if n else "")
+    if diagrams:
+        lines.append("")
     for table in module.tables or []:
         if text_or_empty(table.title):
             lines += [f"#### {md_text(table.title)}", ""]
@@ -295,15 +408,17 @@ def _module(
         lines += ["### Findings", ""]
         ranked = sorted(module.insights, key=lambda i: -(i.priority if i.priority == i.priority else 0.0))
         for ins in ranked:
+            n = (why_by_id or {}).get(text_or_empty(ins.id))
             lines += _insight_line(
-                ins, show_study=True, with_kind=True, labels=labels, plan_no=(plan or {}).get(text_or_empty(ins.id))
+                ins, show_study=True, with_kind=True, labels=labels, plan_no=(plan or {}).get(text_or_empty(ins.id)),
+                view_tc=view_tc, why=f"why: explanation {n} below" if n else "",
             )
         lines.append("")
     return lines
 
 
 def render_markdown(report: Report) -> str:
-    """The whole report as GitHub-flavoured Markdown."""
+    """The whole report as GitHub-flavoured Markdown: the main report, then one part per format."""
     token = NO_GAME_LINKS.set(bool(getattr(report, "demo", False)))
     try:
         return _render(report)
@@ -311,20 +426,16 @@ def render_markdown(report: Report) -> str:
         NO_GAME_LINKS.reset(token)
 
 
-def _render(report: Report) -> str:
-    lines = [f"# {md_text(report_title(report))}", ""]
-    meta = [f"**{games_text(report.n_games)}**"]
-    span = date_range_text(report.date_from, report.date_to)
-    if span:
-        meta.append(span)
-    if text_or_empty(report.filters):
-        meta.append(md_text(report.filters))
-    lines.append(" · ".join(meta))
-    if text_or_empty(report.engine_note):
-        lines += ["", f"_{md_text(report.engine_note)}_"]
-    if getattr(report, "demo", False):
-        lines += ["", f"**{md_text(DEMO_NOTE)}**"]
-    lines.append("")
+def _formats_line(label: str, formats: Any) -> str:
+    counts = clean_formats(formats)
+    if not counts:
+        return ""
+    return f"{label}: " + " · ".join(f"{md_text(format_name(tc))} {n:,}" for tc, n in counts.items())
+
+
+def _body(report: Report, coaching: Any) -> list[str]:
+    """Headline, glance lists, study plan, sections and coaching of one report (the main one or one format's)."""
+    lines: list[str] = []
     for line in headline_lines(report):
         lines += [f"> {md_text(line)}", ">"]
     lines[-1] = ""
@@ -338,8 +449,57 @@ def _render(report: Report) -> str:
     lines += _glance(report, sections, plan)
     lines += _study_plan(report.study_plan or [], labels)
 
-    for module in report.modules or []:
-        lines += ["---", ""] + _module(module, labels, plan)
+    exps = [e for e in (getattr(coaching, "explanations", None) or []) if isinstance(e, Explanation)]
+    why_by_id: dict[str, int] = {}
+    why_by_epd: dict[str, int] = {}
+    for k, e in enumerate(exps, 1):
+        if text_or_empty(e.insight_id):
+            why_by_id.setdefault(text_or_empty(e.insight_id), k)
+        why_by_epd.setdefault(boards.epd(e.epd or e.fen), k)
+    modules = list(report.modules or [])
+    keys = [text_or_empty(m.key) for m in modules]
+    at = next((keys.index(k) + 1 for k in ("mistakes", "engine_stats") if k in keys), len(modules))
+    view_tc = text_or_empty(getattr(report, "time_class", "")).lower()
+    for i, module in enumerate(modules):
+        lines += ["---", ""] + _module(module, labels, plan, view_tc=view_tc, why_by_id=why_by_id, why_by_epd=why_by_epd)
+        if i + 1 == at:
+            lines += _coaching(coaching, labels, view_tc)
+    if at == 0:
+        lines += _coaching(coaching, labels, view_tc)
+    return lines
+
+
+def _render(report: Report) -> str:
+    lines = [f"# {md_text(report_title(report))}", ""]
+    meta = [f"**{games_text(report.n_games)}**"]
+    span = date_range_text(report.date_from, report.date_to)
+    if span:
+        meta.append(span)
+    if text_or_empty(report.filters):
+        meta.append(md_text(report.filters))
+    lines.append(" · ".join(meta))
+    for extra in (_formats_line("Formats", report.formats), _formats_line("Engine-analysed games", report.engine_formats)):
+        if extra:
+            lines += ["", extra]
+    if text_or_empty(report.engine_note):
+        lines += ["", f"_{md_text(report.engine_note)}_"]
+    if getattr(report, "demo", False):
+        lines += ["", f"**{md_text(DEMO_NOTE)}**"]
+    views = format_views(report)
+    if views:
+        names = ", ".join(md_text(format_name(tc)) for tc, _ in views)
+        lines += ["", f"_This is every format together. The same analysis on each format's games alone follows the "
+                      f"main report: {names}._"]
+    lines.append("")
+    lines += _body(report, getattr(report, "coaching", None))
+
+    for tc, sub in views:
+        lines += ["---", "", f"# {md_text(view_scope_text(sub))}", ""]
+        if list(clean_formats(sub.engine_formats)) not in ([], [tc]):
+            lines += [_formats_line("Engine-analysed games", sub.engine_formats), ""]
+        if text_or_empty(sub.engine_note):
+            lines += [f"_{md_text(sub.engine_note)}_", ""]
+        lines += _body(sub, view_coaching(sub, report, tc))
 
     lines += ["---", "", "### How this report works", ""]
     lines += [f"- {md_text(note)}" for note in METHOD_NOTES]
@@ -347,3 +507,224 @@ def _render(report: Report) -> str:
     if generated:
         lines += ["", f"_Generated {generated} by chess-insights._"]
     return "\n".join(lines).rstrip() + "\n"
+
+
+# --------------------------------------------------------------------------- coaching
+def _theme_links(themes: Iterable[Any]) -> str:
+    out, seen = [], set()
+    for theme in themes:
+        key = text_or_empty(theme)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        url = training_url(key)
+        out.append(md_link(url, motif_words(key)) if url else md_text(motif_words(key)))
+    return ", ".join(out)
+
+
+def _sources_line(sources: Iterable[Any]) -> str:
+    out, seen = [], set()
+    for src in sources:
+        if not isinstance(src, Source) or not text_or_empty(src.name):
+            continue
+        key = (text_or_empty(src.name), text_or_empty(src.url))
+        if key in seen:
+            continue
+        seen.add(key)
+        name = md_link(src.url, src.name) if safe_url(src.url) else md_text(src.name)
+        extra = ", ".join(x for x in (text_or_empty(src.license), f"retrieved {text_or_empty(src.retrieved)}"
+                                      if text_or_empty(src.retrieved) else "") if x)
+        out.append(name + (f" ({md_text(extra)})" if extra else ""))
+    return " · ".join(out)
+
+
+def _moves_text(stats: Iterable[Any], played: str) -> str:
+    out = []
+    for m in list(stats)[:4]:
+        san = text_or_empty(getattr(m, "san", ""))
+        if not san:
+            continue
+        bits = [format_value(getattr(m, "share", None), "pct")]
+        score = getattr(m, "score", None)
+        if score is not None:
+            bits.append(f"score {format_value(score, 'pct')}")
+        out.append(f"{san}{' (yours)' if san == played else ''} {', '.join(bits)}")
+    return md_text("; ".join(out))
+
+
+def _opening_lines(op: Any, played: str) -> list[str]:
+    if not isinstance(op, OpeningFacts):
+        return []
+    name = " ".join(x for x in (text_or_empty(op.eco), text_or_empty(op.name)) if x)
+    out = [f"- Opening: {md_text(name)}" if name else "- Opening databases"]
+    if op.masters:
+        out.append(f"  - Masters: {_moves_text(op.masters, played)}")
+    if op.peers:
+        out.append(f"  - {md_text(peer_label(op.peer_groups or []))}: {_moves_text(op.peers, played)}")
+    ranks = []
+    if to_number(op.played_rank_masters):
+        ranks.append(f"the masters' choice number {int(to_number(op.played_rank_masters))}")
+    if to_number(op.played_rank_peers):
+        ranks.append(f"number {int(to_number(op.played_rank_peers))} among {peer_label(op.peer_groups or [])}")
+    if ranks and played:
+        out.append(f"  - Your move {md_text(played)} is {md_text(' and '.join(ranks))}.")
+    for line in (op.cloud_lines or [])[:3]:
+        t = line_text(line)
+        if t:
+            out.append(f"  - Engine line (Lichess cloud evaluation): {md_code(t)}")
+    if safe_url(op.master_game):
+        out.append(f"  - {md_link(op.master_game, 'A master game from this position')}")
+    if text_or_empty(op.wiki_text):
+        credit = md_link(op.wiki_url, "Wikibooks, CC BY-SA 4.0") if safe_url(op.wiki_url) else "Wikibooks, CC BY-SA 4.0"
+        out.append(f"  - “{md_text(op.wiki_text)}” ({credit})")
+    return out if len(out) > 1 else []
+
+
+def _explanation(e: Explanation, k: int, labels: Optional[dict[str, str]], view_tc: str) -> list[str]:
+    played, best = text_or_empty(e.played), text_or_empty(e.best)
+    title = md_text(played or "Your move") + (f", better {md_text(best)}" if best and best != played else "")
+    kicker = [EXPLANATION_KINDS.get(text_or_empty(e.kind), "Position")]
+    tc = text_or_empty(e.time_class).lower()
+    if tc and tc != view_tc:
+        kicker.append(format_name(tc))
+    drop = to_number(e.drop)
+    if drop:
+        kicker.append(f"{format_value(drop / 100.0, 'pct')} winning chances lost")
+    if int(to_number(e.repeats) or 0) > 1:
+        kicker.append(f"you played it in {int(e.repeats)} games")
+    lines = [f"### {k}. {title}", "", f"_{md_text(' · '.join(kicker))}_", ""]
+    d = e.diagram if isinstance(e.diagram, Diagram) else None
+    if d is not None:  # the full lines follow, so the strips are not repeated
+        lines += _position_lines(d, labels, title=False, strips=False)
+    elif boards.parse_board(e.fen) is not None:
+        lines.append(f"- Position: {md_code(e.fen)} · {md_link(lichess_analysis_url(e.fen), 'analyse on Lichess')}")
+    if lines[-1]:
+        lines.append("")
+    if text_or_empty(e.text):
+        lines += [md_text(e.text) + (" _(Wording by the AI coach, checked against the engine lines.)_"
+                                     if text_or_empty(e.text_source) == "llm" else ""), ""]
+    items = []
+    for line, label in ((e.refutation, f"What {played or 'your move'} allows"), (e.best_line, f"Better {best}" if best else "Better")):
+        t = line_text(line)
+        if t:
+            items.append(f"- {md_text(label)}: {md_code(t)}")
+    motifs = [m for m in e.motifs or [] if isinstance(m, Motif)]
+    allowed = [m.theme for m in motifs if m.line == "refutation"]
+    missed = [m.theme for m in motifs if m.line == "best"]
+    other = [m.theme for m in motifs if m.line not in ("refutation", "best")]
+    for label, themes in ((f"What {played or 'your move'} allowed", allowed), ("What you missed", missed),
+                          ("Patterns", other), ("Practise", [t for t in e.drill_themes or [] if t not in allowed + missed + other])):
+        links = _theme_links(themes)
+        if links:
+            items.append(f"- {md_text(label)}: {links}")
+    items += [f"- {md_text(f)}" for f in e.facts or [] if text_or_empty(f)]
+    if isinstance(e.chart, Chart):
+        t = chart_text(e.chart)
+        if t:
+            items.append(f"- {md_text(t)}")
+    else:
+        concepts = [f"{text_or_empty(c.label) or text_or_empty(c.term)} {format_value(c.value, 'signed_float2')}"
+                    for c in e.concepts or [] if to_number(getattr(c, "value", None)) is not None]
+        if concepts:
+            items.append(f"- Where the lines end (pawns, from your side): {md_text(', '.join(concepts))}")
+    items += _opening_lines(e.opening, re.sub(r"^\d+\.(?:\.\.)?\s*", "", played))
+    tb = tablebase_text(e.tablebase)
+    if tb:
+        items.append(f"- Endgame tablebase: {md_text(tb)}.")
+    maia = maia_text(e.maia, e)
+    if maia:
+        items.append(f"- How findable: {md_text(maia)}")
+    sources = _sources_line(list(e.sources or []) + list(getattr(e.opening, "sources", None) or []))
+    if sources:
+        items.append(f"- Sources: {sources}")
+    games = _games_line(([e.game_url] if text_or_empty(e.game_url) else []) + list(e.games or []), "Review", labels)
+    if games:
+        items.append(f"- {games}")
+    return lines + items + ([""] if items else [])
+
+
+def _review_lines(items: Iterable[Any]) -> list[str]:
+    out = []
+    for it in items:
+        if not isinstance(it, ReviewItem):
+            continue
+        bits = [f"due {md_text(it.due)}" if text_or_empty(it.due) else "", md_code(it.fen)]
+        if safe_url(it.url):
+            bits.append(md_link(it.url, "open"))
+        out.append(f"- [ ] {md_text(it.title) or 'Position'} — " + " · ".join(b for b in bits if b))
+    return out
+
+
+def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = "") -> list[str]:
+    """The coaching sections: why your moves go wrong (the engine's lines), then practice."""
+    if not isinstance(coaching, Coaching):
+        return []
+    lines: list[str] = []
+    exps = [e for e in coaching.explanations or [] if isinstance(e, Explanation)]
+    why: list[str] = []
+    for k, e in enumerate(exps, 1):
+        if k == WHY_OPEN + 1:
+            why += [f"_{len(exps) - WHY_OPEN} more:_", ""]
+        why += _explanation(e, k, labels, view_tc)
+    if isinstance(coaching.motif_chart, Chart) or isinstance(coaching.motif_profile, Table):
+        why += ["### Patterns in the mistakes", ""]
+        if isinstance(coaching.motif_chart, Chart):
+            why += _chart(coaching.motif_chart)
+        if isinstance(coaching.motif_profile, Table) and coaching.motif_profile is not getattr(coaching.motif_chart, "table", None):
+            why += md_table(coaching.motif_profile) + [""]
+    for table, heading in ((coaching.theory_exit, "Where you leave opening theory"),
+                           (coaching.endgames, "Endgames checked with the tablebase")):
+        if isinstance(table, Table):
+            why += [f"### {heading}", ""] + md_table(table) + [""]
+            if text_or_empty(table.note):
+                why += [f"_{md_text(table.note)}_", ""]
+    notes = [text_or_empty(n) for n in coaching.notes or [] if text_or_empty(n)]
+    if why or notes:
+        lines += ["---", "", "## Why these moves go wrong", ""]
+        if exps:
+            lines += [f"The engine's lines for {len(exps)} position{'s' if len(exps) != 1 else ''} from your games: "
+                      "what your move allowed, what was better, and the pattern to practise.", ""]
+        lines += why
+        if notes:
+            lines += ["_Notes:_", ""] + [f"- {md_text(n)}" for n in notes] + [""]
+
+    practice: list[str] = []
+    progress = []
+    for p in coaching.progress or []:
+        text = text_or_empty(getattr(p, "text", ""))
+        if text:
+            mark = {True: "improved: ", False: "not yet: "}.get(getattr(p, "improved", None), "")
+            progress.append(f"- {mark}{md_text(text)}")
+    if progress:
+        practice += ["### Since your last report", ""] + progress + [""]
+    due = _review_lines(coaching.review_due or [])
+    if due:
+        practice += ["### Due for review", ""] + due + [""]
+    drills = [d for d in coaching.drills or [] if isinstance(d, Drill)]
+    if drills:
+        practice += ["### Puzzle packs", ""]
+        for d in drills:
+            bits = [md_text(d.reason)] if text_or_empty(d.reason) else []
+            if isinstance(d.rating_range, (list, tuple)) and len(d.rating_range) == 2:
+                bits.append(f"puzzles rated {d.rating_range[0]}–{d.rating_range[1]}")
+            if text_or_empty(d.file):
+                bits.append(f"saved as {md_code(d.file)}")
+            if safe_url(d.link):
+                bits.append(md_link(d.link, "practise on Lichess"))
+            practice.append(f"- **{md_text(d.title) or md_text(motif_words(d.theme))}** — " + " · ".join(bits))
+            for p in [p for p in d.puzzles or [] if isinstance(p, DrillPuzzle)][:3]:
+                name = md_link(p.url, f"puzzle {p.puzzle_id}") if safe_url(p.url) else md_text(f"puzzle {p.puzzle_id}")
+                practice.append(f"  - {name} (rated {p.rating}): {md_code(p.fen)}")
+        practice.append("")
+    plan = [p for p in coaching.weekly_plan or [] if text_or_empty(getattr(p, "item", ""))]
+    if plan:
+        practice += ["### Your week", ""] + md_table(Table(
+            "", ["What", "Minutes a week", "Check again", "Note"],
+            [[p.item, p.minutes_per_week, p.recheck_date or None, p.note or None] for p in plan],
+            ["text", "int", "text", "text"])) + [""]
+    upcoming = _review_lines(coaching.review or [])
+    if upcoming:
+        practice += ["### Coming up for review", ""] + upcoming + [""]
+    if practice:
+        lines += ["---", "", "## Practice", ""] + practice
+    return lines
