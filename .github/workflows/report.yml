@@ -264,4 +264,10 @@ jobs:
           cp -R reports/. "$dest/$REPORT_NAME/latest/"
           git -C "$dest" add -A
           git -C "$dest" commit --quiet -m "Report for $REPORT_NAME ($stamp)" || exit 0
-          git -C "$dest" push --quiet origin reports
+          # another run may have pushed to the branch meanwhile: put this commit on top of it and try again
+          for attempt in 1 2 3; do
+            if git -C "$dest" push --quiet origin reports; then exit 0; fi
+            sleep $((attempt * 5))
+            git -C "$dest" pull --quiet --rebase origin reports || true
+          done
+          exit 1

@@ -232,6 +232,16 @@ def test_publishing_copies_every_file_the_run_wrote():
     assert "path: reports/" in block("Attach the report to this run")
 
 
+def test_publishing_retries_when_another_run_pushed_first():
+    """Two runs (a players.txt push and a manual run) can publish at once: the second push is rejected. It now
+    rebases onto the other run's commit and tries again, instead of failing the job."""
+    publish = block("Save the report on the reports branch")
+    loop = re.search(r"for attempt in 1 2 3; do\n(.*?)\n\s*done\n\s*exit 1", publish, re.S)
+    assert loop, publish
+    assert 'if git -C "$dest" push --quiet origin reports; then exit 0; fi' in loop.group(1)
+    assert 'git -C "$dest" pull --quiet --rebase origin reports' in loop.group(1)
+
+
 def test_players_txt_gives_the_time_zone():
     lines = [line.split("#", 1)[0].split() for line in (ROOT / "players.txt").read_text(encoding="utf-8").splitlines()]
     assert ["BigMuffEater", "America/New_York"] in lines
