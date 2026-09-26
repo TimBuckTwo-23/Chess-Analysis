@@ -1,4 +1,3 @@
-# Runs once this folder is its own repository (GitHub only reads workflows at the repo root).
 name: tests
 
 on:

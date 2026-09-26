@@ -51,21 +51,12 @@ The report is built to be read on a phone:
 
 Requires Python 3.10+.
 
-**Get the code.** For now the project lives in the `chess-insights/` folder of the
-`crypto-deriv-market-maker` repository, on the branch `claude/chess-game-analysis-fz9pi3`
-(not on `main`). Clone it into a new folder, so an existing checkout of that repository
-(the trading bot) is not switched to another branch:
+**Get the code:**
 
 ```bash
-git clone https://github.com/TimBuckTwo-23/crypto-deriv-market-maker chess-insights-src
-cd chess-insights-src
-git switch claude/chess-game-analysis-fz9pi3
+git clone https://github.com/TimBuckTwo-23/chess-insights
 cd chess-insights
 ```
-
-(From an existing clone, `git worktree add ..\chess-insights-src claude/chess-game-analysis-fz9pi3`
-gives the same without touching your working copy. Once the folder has its own repository,
-see the end of this file, a plain `git clone` of that is enough.)
 
 **Install and run:**
 
@@ -237,18 +228,3 @@ module map, [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for how every number is c
 pip install -e ".[dev]"
 py -m pytest            # engine tests are skipped automatically if Stockfish isn't found
 ```
-
-## Moving this folder into its own repository
-
-The project lives in `chess-insights/` of a larger repository for now. To give it
-its own GitHub repository with its history:
-
-```bash
-# 1. On github.com, create an empty repository named chess-insights (no README).
-# 2. Then, from a clone of the current repository:
-git subtree split --prefix=chess-insights -b chess-insights-only
-git push https://github.com/<you>/chess-insights.git chess-insights-only:main
-```
-
-The CI workflow in `.github/workflows/ci.yml` starts running once the folder is
-the root of its own repository.

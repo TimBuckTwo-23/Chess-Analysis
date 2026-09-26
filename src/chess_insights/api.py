@@ -29,8 +29,7 @@ import urllib3
 from . import __version__
 
 BASE_URL = "https://api.chess.com/pub"
-# The project lives in github.com/TimBuckTwo-23/crypto-deriv-market-maker (folder chess-insights) until it is split out.
-DEFAULT_USER_AGENT = f"chess-insights/{__version__} (+https://github.com/TimBuckTwo-23/crypto-deriv-market-maker)"
+DEFAULT_USER_AGENT = f"chess-insights/{__version__} (+https://github.com/TimBuckTwo-23/chess-insights)"
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,50}$")
 # "https://www.chess.com/member/Hikaru", "chess.com/member/hikaru/", ".../stats/live/blitz/Hikaru"
 _PROFILE_URL_RE = re.compile(r"^(?:https?://)?(?:www\.)?chess\.com/(?:member|stats/[a-z]+/[a-z0-9]+)/([^/?#\s]+)/?(?:[?#].*)?$", re.I)
