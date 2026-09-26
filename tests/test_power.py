@@ -159,7 +159,8 @@ def test_planted_opening_habit_is_found_at_600_games(effect):
     report = structure_report_for(effect)
     hits = found(report, category, keywords)
     assert hits, [(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses]
-    assert all(i.confidence >= 0.5 and i.formats and i.chart is not None for i in hits)
+    # each finding carries its formats, its chart (you vs your opponents by format) and a board from one of its games
+    assert all(i.confidence >= 0.5 and i.formats and i.chart and i.diagram and i.diagram.fen for i in hits)
     assert not found(report, category, keywords, kind="strength")
     # nothing else about the player's first moves
     others = [i.id for i in report.strengths + report.weaknesses if i.category == "structure" and i not in hits]

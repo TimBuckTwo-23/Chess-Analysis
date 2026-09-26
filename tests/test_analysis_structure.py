@@ -25,6 +25,10 @@ BLACK_UNCASTLED = "e4 e5 Nf3 Nc6 Bc4 Bc5 Nc3 Nf6 d3 d6 Be3 Be6 O-O h6 a3 a6 h3 R
 SCANDINAVIAN = "e4 d5 exd5 Qxd5 Nc3 Qa5 d4 Nf6 Nf3 c6 Bc4 Bf5 Bd2 e6 Qe2 Bb4 O-O-O Nbd7 a3 O-O".split()
 # The same with 8.O-O: only Black moves the queen early; White makes four pawn moves (exd5 included), Black three
 QUEEN_EARLY = "e4 d5 exd5 Qxd5 Nc3 Qa5 d4 Nf6 Nf3 c6 Bc4 Bf5 Bd2 e6 O-O Bb4 a3 Nbd7 Re1 O-O".split()
+# 2.Qh5 is an early queen move (chased by 3...g6); Black castles on move 6, White not by move 10
+QH5 = "e4 e5 Qh5 Nc6 Bc4 g6 Qf3 Nf6 Ne2 Bg7 Nbc3 O-O d3 d6 Bg5 Be6 h3 a6 a3 Rb8".split()
+# White: eight pawn moves in ten, knights out late (9.Ne2, 10.Nd2), bishops at home; Black: four pawn moves, castled
+PAWNY = "e4 e5 d4 Nc6 c3 Nf6 f3 d6 g3 Be7 h3 O-O a3 Re8 b3 Bf8 Ne2 h6 Nd2 a6".split()
 FORMATS = ["blitz", "blitz", "rapid", "bullet"]
 
 
@@ -166,8 +170,66 @@ def test_castling_earlier_is_a_strength():
     mr = run(castled_games(60))
     assert [i.id for i in mr.insights] == ["structure.strength.castled"]
     strength = mr.insights[0]
-    assert strength.title == "You castle earlier than your opponents" and strength.diagram is None
+    assert strength.title == "You castle earlier than your opponents"
     assert strength.example_games and strength.evidence["gap"] == pytest.approx(1.0)
+    # a strength gets a board too: the same moment on your opponent's side, their uncastled king marked
+    d = strength.diagram
+    assert d.title == "Move 10: your opponent hasn't castled yet" and d.link == strength.example_games[0]
+    board = chess.Board(d.fen)
+    opponent = chess.BLACK if d.orientation == "white" else chess.WHITE
+    assert [(m.square, m.kind) for m in d.marks] == [(chess.square_name(board.king(opponent)), "target")]
+    assert d.caption.startswith("Win, ") and "you castled on move " in d.caption
+    assert "after move 10 your opponent hadn't (king on e" in d.caption
+
+
+def test_early_queen_strip_marks_the_queen_when_it_is_chased():
+    mr = run([make_game(moves_san=QH5, color="white", time_class="blitz") for _ in range(40)])
+    queen = next(i for i in mr.insights if i.id == "structure.weakness.early-queen")
+    d = queen.diagram
+    assert d.title == "Your queen comes out on move 2" and d.orientation == "white"
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("d1", "h5", "played")] and d.last_move == "e7e5"
+    [strip] = d.strips
+    assert [f.move for f in strip.frames] == ["2.Qh5", "2...Nc6", "3.Bc4", "3...g6"]
+    assert [f.caption for f in strip.frames] == ["", "", "", "Queen attacked"]
+    assert [(m.square, m.kind) for m in strip.frames[3].marks] == [("h5", "target"), ("g6", "attacker")]
+    # the same games from Black's side: your opponent's early queen move is a grey arrow, and the strip shows
+    # your pawn chasing it
+    mr = run([make_game(moves_san=QH5, color="black", time_class="blitz") for _ in range(40)])
+    strength = next(i for i in mr.insights if i.id == "structure.strength.early-queen")
+    d = strength.diagram
+    assert d.title == "Your opponent's queen comes out on move 2" and d.orientation == "black"
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("d1", "h5", "neutral")]
+    assert "your opponent played 2.Qh5; you made no early queen move of your own" in d.caption
+    assert d.strips[0].frames[3].caption == "Queen attacked"
+
+
+def test_pawn_moves_and_development_boards_mark_the_squares_they_are_about():
+    mr = run([make_game(moves_san=PAWNY, color="white", time_class="rapid") for _ in range(40)])
+    by = {i.id: i for i in mr.insights}
+    assert set(by) == {"structure.weakness.castled", "structure.weakness.minors", "structure.weakness.pawns"}
+    pawns = by["structure.weakness.pawns"].diagram
+    assert pawns.title == "Move 10: many pawn moves"
+    assert sorted(m.square for m in pawns.marks) == ["a3", "b3", "c3", "d4", "e4", "f3", "g3", "h3"]
+    assert {m.kind for m in pawns.marks} == {"focus"}
+    assert "8 of your first 10 moves were pawn moves; your opponent's 4." in pawns.caption
+    minors = by["structure.weakness.minors"].diagram
+    assert sorted((m.square, m.kind) for m in minors.marks) == [("c1", "weak"), ("f1", "weak")]
+    assert "you had 2 of 4 knights and bishops out; your opponent 3." in minors.caption
+
+
+def test_a_piece_that_went_out_and_came_back_is_not_marked_at_home():
+    moves = "e4 e5 Nf3 Nc6 Ng1 Nf6".split()  # the g1 knight went out and came back
+    o = structure.read_opening(make_game(moves_san=moves), 20)
+    board = o.board_after(5)
+    assert o.me.minors_by(3) == 1
+    assert structure.pieces_at_home(board, chess.WHITE, o.ucis) == [chess.B1, chess.C1, chess.F1]
+    assert structure.pieces_at_home(board, chess.BLACK, o.ucis) == [chess.C8, chess.F8]
+
+
+def test_games_without_a_link_still_get_a_board():
+    mr = run(uncastled_games(40, url=""))
+    [ins] = mr.insights
+    assert ins.example_games == [] and ins.diagram is not None and ins.diagram.link == ""
 
 
 def test_early_queen_weakness_shows_the_queen_move_as_a_red_arrow():

@@ -19,6 +19,9 @@ A game counts for a habit only when both players made the moves it looks at (20 
 measured by move 10, 16 for the queen), so a game that ended on move 7 is not "not castled" for either side;
 this also leaves out games under 4 plies. Chess960 and games from a set-up position are left out: their
 pieces don't start on the usual squares.
+
+Every finding carries the formats behind it, a chart of you against your opponents by format, and a board from
+one of its games (:func:`habit_diagram`): your side of it for a weakness, your opponent's for a strength.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from typing import Any, Optional, Sequence
 import chess
 
 from ..context import AnalysisContext
-from ..models import Chart, Diagram, Game, Insight, Kpi, Mark, ModuleResult, Table
+from ..models import Chart, Diagram, Game, Insight, Kpi, Mark, ModuleResult, Strip, Table
 from ..stats import (
     STRICT_ALPHA,
     MeanTest,
@@ -42,7 +45,15 @@ from ..stats import (
     shrink_effect,
     significance,
 )
-from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, comparison_chart, format_counts, position_diagram
+from ..visuals import (
+    FORMAT_NAMES,
+    MIN_FORMAT_GAMES,
+    comparison_chart,
+    format_counts,
+    line_strip,
+    move_label,
+    position_diagram,
+)
 from .results import MAX_EXAMPLES
 
 KEY = "structure"
@@ -167,15 +178,27 @@ def read_opening(g: Game, max_plies: int) -> Optional[Opening]:
     return Opening(game=g, me=sides[me], opp=sides[not me], ucis=ucis)
 
 
-def pieces_at_home(board: chess.Board, color: chess.Color) -> list[int]:
-    """Starting squares still holding their own knight or bishop."""
+def pieces_at_home(board: chess.Board, color: chess.Color, ucis: Sequence[str] = ()) -> list[int]:
+    """Starting squares whose own knight or bishop has not moved yet.
+
+    ``ucis`` are the moves that led to ``board`` from the start: a square no move has left or entered still holds
+    its original piece, so a knight that went out and came back home is not "still at home".
+    """
     rank = 0 if color == chess.WHITE else 7
     homes = ((1, chess.KNIGHT), (2, chess.BISHOP), (5, chess.BISHOP), (6, chess.KNIGHT))  # (file, piece)
+    touched = {sq for move in map(chess.Move.from_uci, ucis) for sq in (move.from_square, move.to_square)}
     return [
         chess.square(file, rank)
         for file, kind in homes
         if board.piece_at(chess.square(file, rank)) == chess.Piece(kind, color)
+        and chess.square(file, rank) not in touched
     ]
+
+
+def moved_pawns(board: chess.Board, color: chess.Color) -> list[int]:
+    """Squares of ``color``'s pawns that have left their starting rank."""
+    start = 1 if color == chess.WHITE else 6
+    return [sq for sq in board.pieces(chess.PAWN, color) if chess.square_rank(sq) != start]
 
 
 # --------------------------------------------------------------------------- habits
@@ -493,7 +516,7 @@ def _target(r: HabitResult) -> tuple[str, str]:
 
 def _examples(r: HabitResult, kind: str) -> list[Opening]:
     """Games that show the finding: you did it and your opponent didn't (by the most), losses first for a
-    weakness and wins first for a strength, then the most recent."""
+    weakness and wins first for a strength, then the most recent; games with a link before games without one."""
     h = r.habit
     sign = 1 if (kind == "weakness") == (h.good < 0) else -1  # +1: you did more of it than your opponent
 
@@ -501,60 +524,101 @@ def _examples(r: HabitResult, kind: str) -> list[Opening]:
         return sign * (h.count(o.me) - h.count(o.opp))
 
     wanted = "loss" if kind == "weakness" else "win"
-    picked = [o for o in r.games if edge(o) > 0 and o.game.url]
-    picked.sort(key=lambda o: (o.game.outcome != wanted, -edge(o), -o.game.end_time.timestamp()))
-    return picked[:MAX_EXAMPLES]
+    picked = [o for o in r.games if edge(o) > 0]
+    picked.sort(key=lambda o: (not o.game.url, o.game.outcome != wanted, -edge(o), -o.game.end_time.timestamp()))
+    return picked
 
 
-def _move_text(board: chess.Board, move: chess.Move) -> str:
-    san = board.san(move)
-    return f"{board.fullmove_number}.{san}" if board.turn == chess.WHITE else f"{board.fullmove_number}...{san}"
+def queen_strip(o: Opening, ply: int, title: str) -> Strip:
+    """The early queen move at ply index ``ply`` and the three plies after it, as small boards; in each, the queen
+    and the pieces attacking it are marked while it is under attack."""
+    board = o.board_after(ply - 1)
+    fen, owner = board.fen(), board.turn
+    moves = o.ucis[ply : ply + 4]
+    marks: list[list[Mark]] = []
+    captions: list[str] = []
+    for uci in moves:
+        board.push(chess.Move.from_uci(uci))
+        frame: list[Mark] = []
+        for sq in board.pieces(chess.QUEEN, owner):
+            attackers = board.attackers(not owner, sq)
+            if attackers:
+                frame += [Mark(chess.square_name(sq), "target")]
+                frame += [Mark(chess.square_name(a), "attacker") for a in attackers]
+        marks.append(frame)
+        captions.append("Queen attacked" if frame else "")
+    return line_strip(title, fen, moves, max_frames=4, captions=captions, marks=marks)
 
 
-def habit_diagram(r: HabitResult, o: Opening) -> Optional[Diagram]:
-    """The board that shows a weakness in one of its example games (your move red, pieces at home marked)."""
+def habit_diagram(r: HabitResult, o: Opening, kind: str = "weakness") -> Optional[Diagram]:
+    """The board that shows a finding in one of its example games, from your side of the board.
+
+    A weakness shows your side: your early queen move as a red arrow (and what followed as a strip), or the
+    position after move N with your uncastled king, your knights and bishops still at home or your moved pawns
+    marked. A strength shows the same moment on your opponent's side (their king, their pieces at home, their
+    early queen move): what you did better, and what there was to play against.
+    """
     h, g = r.habit, o.game
-    color = o.my_color
+    mine = kind == "weakness"
+    color = o.my_color if mine else not o.my_color
+    side, other = (o.me, o.opp) if mine else (o.opp, o.me)
     game = f"{g.outcome.capitalize()}, {g.time_class}"
     if h.key == "early_queen":
-        ply = o.me.queen_ply
-        if ply is None:
+        ply = side.queen_ply
+        if ply is None or ply < 1:
             return None
         board = o.board_after(ply - 1)
         move = chess.Move.from_uci(o.ucis[ply])
-        home = pieces_at_home(board, color)
-        still = f", with {len(home)} of your knights and bishops still at home" if home else ""
-        return position_diagram(
-            f"Your queen comes out on move {o.me.queen_move}",
+        home = pieces_at_home(board, color, o.ucis[:ply])
+        label = move_label(board, move)
+        if mine:
+            title = f"Your queen comes out on move {side.queen_move}"
+            still = f", with {len(home)} of your knights and bishops still at home" if home else ""
+            caption = f"{game}: you played {label}{still}."
+        else:
+            title = f"Your opponent's queen comes out on move {side.queen_move}"
+            caption = (f"{game}: your opponent played {label}; you made no early queen move of your own "
+                       f"(moves 1–{h.by}, captures aside).")
+        diagram = position_diagram(
+            title,
             board.fen(),
             orientation=g.color,
-            played=move.uci(),
-            caption=f"{game}: you played {_move_text(board, move)}{still}.",
+            caption=caption,
             link=g.url,
             time_class=g.time_class,
-            last_move=o.ucis[ply - 1] if ply > 0 else "",
-            marks=[Mark(chess.square_name(sq), "weak") for sq in home],
+            last_move=o.ucis[ply - 1],
+            played=move.uci() if mine else None,  # your move red; your opponent's grey
+            others=() if mine else [(move.uci(), "neutral")],
+            marks=[Mark(chess.square_name(sq), "weak" if mine else "target") for sq in home],
         )
+        strip = queen_strip(o, ply, "What happened next")
+        if strip.frames:
+            diagram.strips = [strip]
+        return diagram
     last = 2 * h.by - 1
     board = o.board_after(last)
-    king = board.king(color)
+    mark = "weak" if mine else "target"
     if h.key == "castled":
-        theirs = (f"your opponent castled on move {o.opp.castle_move}" if o.opp.castle_move
-                  else "your opponent hadn't castled either")
+        king = board.king(color)
         where = f" (king on {chess.square_name(king)})" if king is not None else ""
-        marks = [Mark(chess.square_name(king), "weak")] if king is not None else []
-        title = f"Move {h.by}: you haven't castled yet"
-        caption = f"{game}: after move {h.by} you hadn't castled{where}; {theirs}."
+        marks = [Mark(chess.square_name(king), mark)] if king is not None else []
+        if mine:
+            theirs = (f"your opponent castled on move {other.castle_move}" if other.castle_move
+                      else "your opponent hadn't castled either")
+            title = f"Move {h.by}: you haven't castled yet"
+            caption = f"{game}: after move {h.by} you hadn't castled{where}; {theirs}."
+        else:
+            title = f"Move {h.by}: your opponent hasn't castled yet"
+            caption = f"{game}: you castled on move {other.castle_move}; after move {h.by} your opponent hadn't{where}."
     elif h.key == "minors":
-        home = pieces_at_home(board, color)
-        marks = [Mark(chess.square_name(sq), "weak") for sq in home]
-        title = f"Move {h.by}: pieces still at home"
+        marks = [Mark(chess.square_name(sq), mark) for sq in pieces_at_home(board, color, o.ucis[: last + 1])]
+        title = f"Move {h.by}: pieces still at home" if mine else f"Move {h.by}: your opponent's pieces still at home"
         caption = (
             f"{game}: after move {h.by} you had {o.me.minors_by(h.by)} of 4 knights and bishops out; your opponent "
             f"{o.opp.minors_by(h.by)}."
         )
     else:
-        marks = []
+        marks = [Mark(chess.square_name(sq), "focus") for sq in moved_pawns(board, color)]
         title = f"Move {h.by}: many pawn moves"
         caption = (
             f"{game}: {o.me.pawns_by(h.by)} of your first {h.by} moves were pawn moves; your opponent's "
@@ -580,7 +644,7 @@ def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
     title, study = _TEXT[(h.key, kind)]
     # severity from the gap pulled toward 0 by its noise (winner's curse), in the habit's own units
     shrunk = shrink_effect(r.test.mean, r.test.se, prior_sd=h.full / h.unit / 2.0) * h.unit
-    examples = _examples(r, kind)
+    shown = _examples(r, kind)
     target, metric = _target(r)
     return Insight(
         id=f"{KEY}.{kind}.{h.key.replace('_', '-')}",
@@ -603,10 +667,10 @@ def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
             "target": target,
         },
         study=study,
-        example_games=[o.game.url for o in examples],
+        example_games=[o.game.url for o in shown if o.game.url][:MAX_EXAMPLES],
         formats=format_counts(o.game for o in r.games),
         chart=habit_chart(r),
-        diagram=habit_diagram(r, examples[0]) if kind == "weakness" and examples else None,
+        diagram=habit_diagram(r, shown[0], kind) if shown else None,
     )
 
 
