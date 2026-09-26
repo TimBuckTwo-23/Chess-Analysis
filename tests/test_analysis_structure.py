@@ -167,9 +167,8 @@ def test_castling_later_than_your_opponents_is_a_weakness_with_chart_formats_and
     assert ins.chart.table.rows[3] == ["All games", 60, 0.0, 1.0]
     # ... then your most-played openings, by colour: the gap is in each (the fold rule keeps the finding)
     assert ins.chart.table.rows[4] == ["Italian Game (Black)", 8, 0.0, 1.0] and len(ins.chart.table.rows) == 10
-    fold = ins.evidence["fold"]  # two groups left out, one after the other: the gap is the same without them
-    assert len(fold["groups"]) == 2 and fold["n_without"] == 60 - sum(g["n"] for g in fold["groups"])
-    assert fold["holds"] and fold["gap_without"] == pytest.approx(-1.0)
+    fold = ins.evidence["fold"]  # the biggest part of the gap is an opening like the others: nothing to fold
+    assert fold["holds"] and fold["groups"] == [] and fold["checked"][0]["p_stands_out"] == 1.0
     # a board from the first example game (a loss): your king still at home after move 10, marked
     d = ins.diagram
     assert d is not None and d.link == ins.example_games[0] and d.time_class
@@ -371,9 +370,9 @@ def test_a_gap_in_every_opening_is_still_a_finding():
     mr = run(games)
     [ins] = mr.insights
     assert ins.id == "structure.weakness.castled"
-    fold = ins.evidence["fold"]
-    assert fold["groups"][0] == {"colour": "black", "family": "Caro-Kann Defense", "n": 40} and fold["holds"]
-    assert fold["gap_without"] == pytest.approx(-1.0) and fold["p_adjusted_without"] <= 0.01
+    fold = ins.evidence["fold"]  # the Caro-Kann makes the biggest part of the gap, but no more than the others
+    assert fold["holds"] and fold["groups"] == []
+    assert fold["checked"] == [{"colour": "black", "family": "Caro-Kann Defense", "n": 40, "p_stands_out": 1.0}]
     assert ["Caro-Kann Defense (Black)", 40, 0.0, 1.0] in ins.chart.table.rows  # the openings in the numbers
 
 
@@ -390,6 +389,7 @@ def test_fold_check_leaves_out_the_biggest_part_of_the_gap_and_tests_again():
     [(colour, family, group)] = fold.groups  # the claim fails at the first step
     assert (colour, family, len(group), fold.without.n) == ("black", "Caro-Kann Defense", 40, 60)
     assert not fold.holds and not fold.too_few and fold.without.p_adjusted == 1.0
+    assert fold.checked[0][:3] == ("black", "Caro-Kann Defense", 40) and fold.checked[0][3] < 1e-6  # stands out
     # a habit that is no finding to begin with is not folded
     assert structure.fold_check(dataclasses.replace(r, p_adjusted=0.5), th, {}) is None
     # when your other games are too few to tell, the gap stays an observation about the opening
@@ -480,3 +480,14 @@ def test_null_world_line_habits_change_nothing_but_the_moves():
     games = null_games(120, seed=3, planted={"line_habits": True})
     assert _fingerprint(games) == _fingerprint(null_games(120, seed=3))
     assert [g.moves_san for g in games] != [g.moves_san for g in null_games(120, seed=3)]
+
+
+def test_an_opening_group_stands_out_only_when_its_gap_differs_from_your_other_games():
+    castled = structure.habits(structure.Thresholds())[0]
+    caro = [structure.read_opening(g, 20) for g in caro_kann_world()[:40]]  # you never castle, your opponent does
+    both = [structure.read_opening(g, 20) for g in caro_kann_world()[40:]]  # both castle on move 6
+    out = structure.stands_out_test(castled, caro, both)
+    assert out.mean == pytest.approx(-1.0) and out.p_value < 1e-6
+    same = structure.stands_out_test(castled, caro[:20], caro[20:])
+    assert same.mean == pytest.approx(0.0) and same.p_value == 1.0
+    assert structure.stands_out_test(castled, caro[:1], both).p_value == 1.0  # too few to say

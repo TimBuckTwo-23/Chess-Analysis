@@ -18,8 +18,11 @@ The opening is the same game for both sides but not the same side of it: you cho
 line (in the Caro-Kann Black usually castles later than White, in the Ruy Lopez earlier), so your repertoire
 alone can open a gap. The fold rule (as the colour claim's in ``results``) guards against it: for each would-be
 finding, the (colour, opening family) group that contributes most to the gap is left out and the habit tested
-again (the family's other p-values unchanged, BH again); when the finding no longer passes, it is an observation
-worded "Mostly your <family> games: ...", with that group against your other games, never a strength or weakness.
+again (the family's other p-values unchanged, BH again), and then the next biggest part, up to ``FOLD_GROUPS``
+groups (a main line with each colour). A group is left out only when its gap stands out from your other games
+with that colour (:func:`stands_out_test` at the claim's alpha): an opening that looks like the rest is no reason
+to doubt a habit. When the finding no longer passes, it is an observation worded "Mostly your <family> games:
+...", with those games against your other games, never a strength or weakness.
 
 A game counts for a habit only when both players made the moves it looks at (20 plies for the habits
 measured by move 10, 16 for the queen), so a game that ended on move 7 is not "not castled" for either side;
@@ -379,10 +382,11 @@ class Fold:
     """The fold rule's check of one would-be finding: the opening groups left out, one after the other, each the
     biggest part of the gap left, and the habit tested again without them (``holds``: the finding still passes)."""
 
-    groups: list[tuple[str, str, list[Opening]]]  # (your colour, opening family, its games)
+    groups: list[tuple[str, str, list[Opening]]]  # (your colour, opening family, its games) left out
     without: HabitResult  # the habit on the other games, with its BH-adjusted p-value
     holds: bool
     too_few: bool = False  # the other games are fewer than the minimum: no habit can be told from the opening
+    checked: list[tuple[str, str, int, float]] = field(default_factory=list)  # (colour, family, games, p stands out)
 
     @property
     def games(self) -> list[Opening]:
@@ -745,22 +749,52 @@ def _passes(r: HabitResult, th: Thresholds) -> Optional[tuple[str, float]]:
     return kind, confidence
 
 
+def stands_out_test(habit: Habit, group: Sequence[Opening], others: Sequence[Opening]) -> MeanTest:
+    """Whether one opening group's gap (you minus your opponent, per game, as a share) differs from the gap in
+    ``others`` (your other games with the same colour): a two-sample test, each side's variance never below that
+    of two independent binomial shares (as :func:`paired_share_test`)."""
+    def moments(games: Sequence[Opening]) -> tuple[float, float]:
+        diffs = [(habit.count(o.me) - habit.count(o.opp)) / habit.scale for o in games]
+        mean = sum(diffs) / len(diffs)
+        p = sum(habit.count(o.me) + habit.count(o.opp) for o in games) / (2 * len(games) * habit.scale)
+        s2 = sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)
+        return mean, max(s2, 2.0 * p * (1.0 - p) / habit.scale) / len(diffs)
+
+    n = len(group) + len(others)
+    if len(group) < 2 or len(others) < 2:
+        return MeanTest(n, 0.0, float("inf"), 0.0, 1.0)
+    (m1, v1), (m2, v2) = moments(group), moments(others)
+    if v1 + v2 <= 0.0:
+        return MeanTest(n, m1 - m2, float("inf"), 0.0, 1.0)
+    se = math.sqrt(v1 + v2)
+    z = (m1 - m2) / se
+    return MeanTest(n, m1 - m2, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
+
+
 def fold_check(r: HabitResult, th: Thresholds, family: dict[str, float], steps: int = FOLD_GROUPS) -> Optional[Fold]:
-    """The fold rule for a habit that passes the claim rule (None for any other): leave out the (colour, opening
-    family) group that contributes most to the gap and test the habit again; while it still passes, do the same
-    with the biggest part left, up to ``steps`` groups (your main line with each colour, say). ``family`` holds
-    the raw p-values of the habits judged together; each re-test's replaces this habit's, BH-adjusted again."""
+    """The fold rule for a habit that passes the claim rule (None for any other): take the (colour, opening
+    family) group that contributes most to the gap; when its gap stands out from your other games with that colour
+    (:func:`stands_out_test` at ``th.alpha``), leave it out and test the habit again; while it still passes, do the
+    same with the biggest part left, up to ``steps`` groups (your main line with each colour, say). ``family``
+    holds the raw p-values of the habits judged together; each re-test's replaces this habit's, BH-adjusted
+    again."""
     passed = _passes(r, th)
     if passed is None:
         return None
     h, sign = r.habit, 1.0 if r.gap > 0 else -1.0
-    current, groups = r, []
+    current, groups, checked = r, [], []
     for _ in range(steps):
         shares = current.contributions()
         key = max(shares, key=lambda k: sign * shares[k]) if shares else None
         if key is None or sign * shares[key] <= 0.0:
             break
-        groups.append((key[0], key[1], [o for o in current.games if o.group == key]))
+        group = [o for o in current.games if o.group == key]
+        same_colour = [o for o in current.games if o.group != key and o.game.color == key[0]]
+        out = stands_out_test(h, group, same_colour)
+        checked.append((key[0], key[1], len(group), out.p_value))
+        if out.p_value > th.alpha or out.mean * sign <= 0.0:
+            break  # an opening like your others: no reason to doubt the habit
+        groups.append((key[0], key[1], group))
         rest = [o for o in current.games if o.group != key]
         test = paired_share_test([(h.count(o.me), h.count(o.opp), o.game.color) for o in rest], h.scale)
         raw = {**family, h.key: test.p_value}
@@ -769,8 +803,10 @@ def fold_check(r: HabitResult, th: Thresholds, family: dict[str, float], steps: 
         current = HabitResult(h, rest, test, adjusted[h.key])
         again = _passes(current, th)
         if again is None or again[0] != passed[0]:
-            return Fold(groups, current, holds=False, too_few=current.n < th.min_games)
-    return Fold(groups, current, holds=True, too_few=current.n < th.min_games) if groups else None
+            return Fold(groups, current, holds=False, too_few=current.n < th.min_games, checked=checked)
+    if not checked:
+        return None
+    return Fold(groups, current, holds=True, too_few=current.n < th.min_games, checked=checked)
 
 
 def _gap_text(h: Habit, gap: float) -> str:
@@ -971,6 +1007,7 @@ def _fold_stats(fold: Optional[Fold]) -> Optional[dict[str, Any]]:
     if fold is None:
         return None
     return {"groups": [{"colour": c, "family": f, "n": len(gs)} for c, f, gs in fold.groups], "holds": fold.holds,
+            "checked": [{"colour": c, "family": f, "n": n, "p_stands_out": p} for c, f, n, p in fold.checked],
             "n_without": fold.without.n, "gap_without": fold.without.gap if fold.without.n else None,
             "p_value_without": fold.without.test.p_value, "p_adjusted_without": fold.without.p_adjusted}
 
