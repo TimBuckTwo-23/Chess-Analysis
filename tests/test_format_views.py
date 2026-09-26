@@ -246,7 +246,7 @@ def test_view_engine_note_wording():
     whole = AnalysisContext("t", games, evals)
     blitz = AnalysisContext("t", [g for g in games if g.time_class == "blitz"],
                             {k: v for k, v in evals.items() if k.startswith("blitz")})
-    assert pipeline.view_engine_note("blitz", blitz, whole, "x") == "Stockfish 16 at depth 12 on 3 of your 3 blitz games."
+    assert pipeline.view_engine_note("blitz", blitz, whole, "x") == "Stockfish 16 at depth 12 on all 3 of your blitz games."
     empty = AnalysisContext("t", blitz.games, {})
     assert pipeline.view_engine_note("blitz", empty, whole, "") == (
         "None of your blitz games were in the engine sample. A balanced engine sample (--engine-sample balanced, the "

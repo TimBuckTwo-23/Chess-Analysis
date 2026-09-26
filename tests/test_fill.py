@@ -280,3 +280,11 @@ def test_numpy_counts_are_counts():
     clock = ins("time.c", {"time_class": "blitz", "n": np.int64(2)})
     fill.fill_formats(one_module(right, wrong, clock, key="openings"), ctx_of(games))
     assert right.formats == {"blitz": 3} and wrong.formats == {"blitz": 3, "rapid": 2} and clock.formats == {"blitz": 2}
+
+
+def test_a_tactics_chart_names_the_kind_of_error():
+    ev = {"count": 30, "per100": 1.2, "opp_count": 15, "opp_per100": 0.6, "other_errors_per100": 5.0,
+          "opp_other_errors_per100": 5.1}
+    c = chart_of(ev, id_="engine.weakness.hung-material", category="tactics").chart
+    assert c.labels == ["Material left hanging", "Other errors"] and values(c)["Your opponents"] == [0.6, 5.1]
+    assert chart_of(ev, id_="engine.strength.something-new", category="tactics").chart.labels[0] == "This kind of error"

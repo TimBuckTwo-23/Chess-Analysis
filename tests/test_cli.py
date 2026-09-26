@@ -765,6 +765,9 @@ def test_engine_note_names_the_formats_analysed():
         "Stockfish 16 at depth 12 on the 6 most recent blitz and rapid games: 3 blitz, 3 rapid."
     )
     assert "none of the selected games" in cli.describe_engine_sample("Stockfish 16", 12, games, {})
+    assert cli.describe_engine_sample("Stockfish 16", 12, games, bullet_only, "balanced") == (
+        "Stockfish 16 at depth 12 on 4 games: all bullet (the most recent; no other format to balance with)."
+    )
 
 
 def test_coach_flags_reach_the_coaching_config(chesscom, run, tmp_path, monkeypatch, fake_engine, fake_coaching):

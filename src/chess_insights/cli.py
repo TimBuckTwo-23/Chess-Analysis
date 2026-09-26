@@ -828,7 +828,8 @@ def describe_engine_sample(
                 "games of standard chess or Chess960 with at least 10 moves).")
     mix = f"all {next(iter(counts))}" if len(counts) == 1 else ", ".join(f"{k} {tc}" for tc, k in counts.items())
     if sample == "balanced":
-        return f"{engine} at depth {depth} on {n} games: {mix} (most recent in each)."
+        which = "most recent in each" if len(counts) > 1 else "the most recent; no other format to balance with"
+        return f"{engine} at depth {depth} on {n} games: {mix} ({which})."
     scope = ""
     if time_classes:
         scope = " " + _joined([tc for tc in ("bullet", "blitz", "rapid", "daily") if tc in set(time_classes)])

@@ -287,8 +287,10 @@ def view_engine_note(time_class: str, view: AnalysisContext, whole: AnalysisCont
     first = next(iter(view.evals.values()))
     depth = f" at depth {first.depth}" if first.depth else ""
     k, n = len(view.evals), len(view.games)
-    which = " (the most recent)" if k < n else ""  # both samples take a format's games newest first
-    return f"{first.engine}{depth} on {k} of your {n} {time_class} games{which}."
+    if k >= n:
+        return f"{first.engine}{depth} on all {n} of your {time_class} games."
+    # both samples take a format's games newest first
+    return f"{first.engine}{depth} on {k} of your {n} {time_class} games (the most recent)."
 
 
 def build_format_views(

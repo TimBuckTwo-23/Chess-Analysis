@@ -337,7 +337,7 @@ _PAIRS = {
     "abandoned": ("abandoned", "opponent_abandoned", "int"),
 }
 # (chart title, [(pair row, bar label)], a key the evidence must also have): the first chart whose rows are all in
-# the evidence is drawn. "{phase}" is the evidence's game phase. The key keeps a chart to the finding it describes
+# the evidence is drawn. "{phase}" is the evidence's game phase, "{kind}" the kind of error (from the finding's id). The key keeps a chart to the finding it describes
 # ("per100" is blunders in one finding, mistakes and blunders of one phase in another).
 _PAIR_CHARTS: list[tuple[str, list[tuple[str, str]], Optional[str]]] = [
     ("Blunders per 100 moves, you vs your opponents",
@@ -345,7 +345,7 @@ _PAIR_CHARTS: list[tuple[str, list[tuple[str, str]], Optional[str]]] = [
     ("Mistakes and blunders per 100 moves, you vs your opponents",
      [("per100", "{phase}"), ("rest_per100", "Other phases")], "phase"),
     ("Errors per 100 moves, you vs your opponents",
-     [("per100", "This kind of error"), ("other_errors", "Other errors")], None),
+     [("per100", "{kind}"), ("other_errors", "Other errors")], None),
     ("Blunders per 100 moves, you vs your opponents", [("per100", "Blunders per 100 moves")], "blunders"),
     ("Converting winning positions, you vs your opponents", [("rate", "Winning positions won")], None),
     ("Time trouble, you vs your opponents", [("trouble", "Games in time trouble")], None),
@@ -364,6 +364,16 @@ def _pair_values(ev: dict[str, Any], row: str) -> Optional[tuple[float, float, s
     return mine, theirs, fmt
 
 
+# The tactics findings' kinds of error (engine_stats.TACTIC_TEXT slugs), as the Tactics table names them.
+_ERROR_KINDS = {"missed-tactics": "Missed tactical shots", "hung-material": "Material left hanging"}
+
+
+def _row_label(label: str, ins: Insight) -> str:
+    phase = str(ins.evidence.get("phase") or "This phase").capitalize()
+    kind = next((text for slug, text in _ERROR_KINDS.items() if ins.id.endswith(slug)), "This kind of error")
+    return label.format(phase=phase, kind=kind)
+
+
 # Charts whose rows compare you with yourself (short of time vs with time left, one phase vs the others, one kind
 # of error vs the others): without your opponents' numbers they still show what the finding measured.
 _OWN_COMPARISONS = frozenset({"per100_low", "per100"})
@@ -376,14 +386,13 @@ def _pair_chart(ins: Insight) -> Optional[Chart]:
     with yourself is drawn with your bars only; any other chart needs both players.
     """
     ev = ins.evidence
-    phase = str(ev.get("phase") or "This phase").capitalize()
     for title, rows, needs in _PAIR_CHARTS:
         values = [_pair_values(ev, row) for row, _ in rows]
         if any(v is None for v in values) or (needs and needs not in ev):
             continue
         return comparison_chart(
             title,
-            [label.format(phase=phase) for _, label in rows],
+            [_row_label(label, ins) for _, label in rows],
             [(YOU, [v[0] for v in values]), (OPPONENTS, [v[1] for v in values])],  # type: ignore[index]
             value_format=values[0][2],  # type: ignore[index]
             note=_games_note(ev.get("games", ev.get("n"))),
@@ -398,7 +407,7 @@ def _pair_chart(ins: Insight) -> Optional[Chart]:
             continue
         return comparison_chart(
             title.replace(", you vs your opponents", ""),
-            [label.format(phase=phase) for _, label in rows],
+            [_row_label(label, ins) for _, label in rows],
             [(YOU, mine)],
             value_format=fmt,
             note=_games_note(ev.get("games", ev.get("n")), "your opponents had too few such moves to compare"),
