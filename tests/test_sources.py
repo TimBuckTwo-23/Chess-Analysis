@@ -313,7 +313,15 @@ def test_explorer_answers_are_parsed():
     assert result.moves[0].share == pytest.approx(0.91)
     assert result.moves[0].score == pytest.approx((90 + 140) / 910)  # Black to move: Black's wins + half the draws
     assert result.rank("e6") == 2 and result.rank("c5d4") == 1 and result.rank("Nc6") is None
-    assert result.top_game == "https://lichess.org/abcd1234" and result.eco == "B21"
+    assert result.top_game == "https://lichess.org/import/master/abcd1234/black" and result.eco == "B21"
+    # the lichess database links the game itself; an id that isn't a Lichess id is never put into a link
+    assert lichess_explorer.parse(body, HABITS["sicilian_2nc6"]["before"], "lichess").top_game == (
+        "https://lichess.org/abcd1234"
+    )
+    odd = dict(body, topGames=[{"id": "x/../../evil?"}, {"id": "abcd1234"}])
+    assert lichess_explorer.parse(odd, HABITS["sicilian_2nc6"]["before"], "masters").top_game.endswith(
+        "/abcd1234/black"
+    )
 
 
 def test_explorer_uses_cached_answers_without_a_token(tmp_path):
@@ -522,3 +530,75 @@ def test_every_recorded_explorer_answer_is_a_401(tmp_path):
     f = fetcher(tmp_path, recorded.RecordedSession("explorer_masters_qga_4e4"), notes=notes, lichess_token="x")
     assert lichess_explorer.masters(f, HABITS["qga_4e4"]["before"]) is None
     assert len(notes) == 1 and "LICHESS_TOKEN" in notes[0]
+
+
+# --------------------------------------------------------------------------- review fixes
+def test_dtm_is_in_plies_and_shown_in_moves():
+    assert tablebase.mate_in_moves(23) == 12 and tablebase.mate_in_moves(-24) == -12
+    assert tablebase.mate_in_moves(1) == 1 and tablebase.mate_in_moves(0) is None
+    assert tablebase.mate_in_moves(None) is None
+    # recorded: Black to move is mated in 24 plies (12 moves); after 1...Kd8 White mates in 23 plies (12 moves)
+    lost = tablebase.parse(recorded.load("tablebase_kpk_lost")["body"], "4k3/8/4K3/4P3/8/8/8/8 b - - 0 1")
+    facts = lost.as_dict("e8d8")
+    assert facts["dtm"] == -24 and facts["mate_in"] == -12
+    assert lost.best.dtm == 23 and tablebase.mate_in_moves(lost.best.dtm) == 12
+    rook = tablebase.parse(recorded.load("tablebase_rook_ending")["body"], "8/5k2/8/3R4/5P2/5K2/8/r7 w - - 0 1")
+    assert "mate_in" not in rook.as_dict()  # a draw has no mate
+
+
+def test_the_move_that_keeps_the_result_even_in_an_unsorted_answer():
+    body = recorded.load("tablebase_rook_ending")["body"]
+    shuffled = dict(body, moves=list(reversed(body["moves"])))  # losing moves first
+    result = tablebase.parse(shuffled, "8/5k2/8/3R4/5P2/5K2/8/r7 w - - 0 1")
+    assert result.best.outcome_for_mover == "loss"
+    keep = result.keeping()
+    assert keep is not None and keep.outcome_for_mover == "draw"
+    unsure = tablebase.parse(recorded.load("tablebase_too_many")["body"], chess.STARTING_FEN)
+    assert unsure.keeping() is None
+
+
+def test_rating_descriptions_say_when_a_conversion_is_an_estimate():
+    assert rating_map.is_checked(949, "blitz") and rating_map.is_checked(1000, "blitz")
+    assert not rating_map.is_checked(1010, "blitz") and not rating_map.is_checked(1132, "rapid")
+    assert rating_map.describe(949).endswith("(ChessGoals rating comparison, July 2026)")
+    rapid = rating_map.describe(1132, "rapid")
+    assert rapid.startswith("your chess.com rapid 1132 is roughly") and "rough estimate" in rapid
+    assert "July 2026" not in rapid  # an estimate is not credited to the source
+    own = {"blitz": [[900, 1300], [1000, 1400]]}
+    assert rating_map.describe(949, "blitz", own).endswith("(from the rating table in your settings)")
+    assert not rating_map.is_checked(949, "blitz", own)
+
+
+def test_concept_note_keywords_match_at_word_starts():
+    assert concept_notes.concept_note("attacking chances") is None  # "king" inside "attacking"
+    assert concept_notes.concept_note("the whole board") is None  # "hole" inside "whole"
+    assert concept_notes.concept_note("bypassed") is None
+    assert concept_notes.concept_note("castled late")["key"] == "king_safety"
+    assert concept_notes.concept_note("passed pawn race")["key"] == "passed_pawns"
+
+
+def test_wikibooks_existence_query_stays_short(tmp_path):
+    moves = ["Nf3", "Nf6", "Ng1", "Ng8"] * 10  # 40 plies: only the first 30 are looked up
+    doc = recorded.load("wikibooks_missing")
+    session = recorded.RecordedSession(fallback=lambda url: recorded.response(dict(doc, url=url)))
+    assert wikibooks.snippet(fetcher(tmp_path, session), moves) is None
+    ((url, _),) = session.calls
+    assert len(url) < 6000 and url.count("%7C") == wikibooks.MAX_PLIES - 1  # titles joined by "|"
+
+
+def test_castling_from_lichess_is_standard_uci(tmp_path):
+    """Lichess writes castling as the king taking its rook (recorded PV: "... g8f6 e1h1"); lines keep standard UCI."""
+    f = fetcher(tmp_path, recorded.RecordedSession("cloud_eval_sicilian_5e5_before"))
+    first, _, third = cloud_eval.evaluate(f, HABITS["sicilian_5e5"]["before"]).lines
+    assert first.moves_uci[-1] == "e1g1" and first.moves_san[-1] == "O-O" and len(first.moves_uci) == 10
+    assert third.moves_uci[4] == "e8g8" and third.moves_san[4] == "O-O"
+    board = chess.Board(first.fen)
+    for uci in first.moves_uci:
+        board.push_uci(uci)
+    assert board.fen() == first.fen_end
+    # explorer answers use the same convention (constructed body: no token to record one)
+    fen = "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4"
+    body = {"white": 5, "draws": 0, "black": 5, "moves": [
+        {"uci": "e1h1", "san": "O-O", "white": 5, "draws": 0, "black": 5}]}
+    stat = lichess_explorer.parse(body, fen, "masters").moves[0]
+    assert stat.uci == "e1g1" and stat.san == "O-O"

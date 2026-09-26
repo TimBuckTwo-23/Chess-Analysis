@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
+from urllib.parse import unquote
 
 import chess
 
@@ -27,7 +29,7 @@ from ..models import (
     Chart, Coaching, Color, Diagram, Explanation, Game, ModuleResult, MoveStat, OpeningFacts, Source, Table,
 )
 from ..stats import MINUS, pct
-from ..visuals import comparison_chart, format_counts, move_arrow, ordered_formats
+from ..visuals import comparison_chart, format_counts, line_strip, move_arrow, ordered_formats
 from . import rating_map
 from .config import CoachConfig
 from .sources import cloud_eval, lichess_explorer, openings_db, wikibooks
@@ -139,7 +141,7 @@ def _explanation_positions(ctx: "AnalysisContext", explanations: Sequence[Explan
                 continue
             formats[game.time_class] = formats.get(game.time_class, 0) + 1
             if moves is None:
-                moves = _moves_to(game, e.epd, ply)
+                moves = _moves_to(game, e.epd or e.fen, ply)
         out.append(
             OpeningPosition(
                 fen=e.fen,
@@ -190,6 +192,14 @@ def _choice_positions(ctx: "AnalysisContext", modules: Sequence[ModuleResult]) -
     return out
 
 
+def _count(cell: Any) -> int:
+    """A games cell as an int (0 for anything unreadable: a changed table must not sink the facts)."""
+    try:
+        return int(cell or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _choice_positions_from_table(modules: Sequence[ModuleResult]) -> list[OpeningPosition]:
     """Choice points read from the "Your choices at key moves" table (position, your move, games, score ...)."""
     table = next(
@@ -209,7 +219,7 @@ def _choice_positions_from_table(modules: Sequence[ModuleResult]) -> list[Openin
             continue
         options = [
             Option(
-                san=_san(str(r[1])), label=str(r[1]), games=int(r[2] or 0),
+                san=_san(str(r[1])), label=str(r[1]), games=_count(r[2]),
                 score=r[3] if len(r) > 3 and isinstance(r[3], (int, float)) else None,
             )
             for r in rows
@@ -228,17 +238,25 @@ def _current_rating(games: Sequence[Game], time_class: str) -> Optional[int]:
 def peer_groups(games: Sequence[Game], time_class: str, cfg: CoachConfig) -> tuple[list[int], str]:
     """Lichess rating groups for "players one or two groups above you", and how they were found (for a note).
 
-    Blitz and rapid positions use your current chess.com rating in that format; bullet, daily and mixed positions
-    use your blitz rating (the explorer is asked for blitz and rapid games), then rapid, then bullet.
+    Blitz and rapid positions prefer your current chess.com rating in that format; bullet, daily and mixed
+    positions your blitz rating (the explorer is asked for blitz and rapid games), then rapid, then bullet. A
+    conversion checked against the rating comparison wins over a rough estimate, whatever the order: with blitz 949
+    (checked) and rapid 1132 (estimated), every position uses the blitz conversion.
     """
     order = [time_class] if time_class in ("blitz", "rapid") else []
     order += [tc for tc in ("blitz", "rapid", "bullet") if tc not in order]
+    found: list[tuple[str, int, list[int]]] = []
     for tc in order:
         rating = _current_rating(games, tc)
         groups = rating_map.groups_for(rating, tc, cfg.rating_map) if rating else []
-        if groups:
-            return groups, rating_map.describe(rating, tc, cfg.rating_map)  # type: ignore[arg-type]
-    return [], ""
+        if groups and rating:
+            found.append((tc, rating, groups))
+    if not found:
+        return [], ""
+    tc, rating, groups = next(
+        (f for f in found if rating_map.is_checked(f[1], f[0], cfg.rating_map)), found[0]
+    )
+    return groups, rating_map.describe(rating, tc, cfg.rating_map)
 
 
 def gather(
@@ -346,7 +364,7 @@ def _wiki_text(facts: OpeningFacts) -> str:
     if not facts.wiki_text:
         return ""
     path = facts.wiki_url.split(wikibooks.ROOT + "/", 1)[-1] if wikibooks.ROOT in facts.wiki_url else ""
-    moves = [seg.split(".")[-1].lstrip("_") for seg in path.split("/") if seg]
+    moves = [unquote(seg).split(".")[-1].lstrip("_") for seg in path.split("/") if seg]  # "e8%3DQ" -> "e8=Q"
     return f"After {line_text(moves)}: {facts.wiki_text}" if moves else facts.wiki_text
 
 
@@ -381,6 +399,14 @@ def _diagram(pos: OpeningPosition) -> Optional[Diagram]:
     if pos.formats:
         caption.append("Your games: " + ", ".join(f"{n} {tc}" for tc, n in pos.formats.items()))
     where = f"After {line_text(pos.moves)}" if pos.moves else "Move 1" if pos.kind == "choice" else pos.options[0].label
+    strips = []
+    top = facts.cloud_lines[0] if facts.cloud_lines else None
+    if top is not None and top.moves_uci:  # the engine's line as small boards
+        value = _pawns_for_you(top.cp_end, top.mate_end)
+        value = value if not value or value.startswith("mate") else f"{value} for you"
+        strip = line_strip(f"The engine's line (Lichess cloud{': ' + value if value else ''})", pos.fen, top.moves_uci)
+        if strip.frames:
+            strips.append(strip)
     return Diagram(
         title=f"{where}: {ref} is what {who}" if ref else where,
         fen=pos.fen,
@@ -388,6 +414,7 @@ def _diagram(pos: OpeningPosition) -> Optional[Diagram]:
         link=facts.master_game or (pos.explanation.game_url if pos.explanation else ""),
         orientation=pos.color,
         arrows=arrows,
+        strips=strips,
         time_class=pos.time_class,
     )
 
@@ -409,12 +436,13 @@ def facts_table(positions: Sequence[OpeningPosition], peer_note: str, notes: Seq
             _wiki_text(f),
             f.wiki_url,
             f.master_game,
+            _format_list(pos.formats),
         ])
     if not rows:
         return None
     columns = ["Position", "You play", "Masters play", "Players above you play", "Engine (pawns for you)",
-               "Opening", "Theory (Wikibooks, CC BY-SA 4.0)", "Wikibooks page", "Master game"]
-    formats = ["text", "text", "text", "text", "text", "text", "text", "url", "url"]
+               "Opening", "Theory (Wikibooks, CC BY-SA 4.0)", "Wikibooks page", "Master game", "Your games"]
+    formats = ["text", "text", "text", "text", "text", "text", "text", "url", "url", "text"]
     keep = [i for i in range(len(columns)) if i < 2 or any(r[i] for r in rows)]
     note = [
         "Your choices at key moves and the positions you keep getting wrong, next to what stronger players "
@@ -545,8 +573,8 @@ def theory_exit(games: Sequence[Game], evals: dict[str, Any]) -> tuple[Optional[
     if has_engine:
         note += (
             " First inaccuracy: the average move of your first inaccuracy, mistake or blunder in the "
-            "engine-analysed games; moves after theory: how many moves after the end of named theory it came "
-            "(below 0: while still in theory)."
+            "engine-analysed games (games without one are left out); moves after theory: how many moves after the "
+            "end of named theory it came (below 0: while still in theory)."
         )
     note += f" From {sum(all_counts.values()):,} games ({_format_mix(all_counts)})"
     if has_engine:
@@ -572,13 +600,38 @@ def theory_exit(games: Sequence[Game], evals: dict[str, Any]) -> tuple[Optional[
 
 
 # --------------------------------------------------------------------------- entry point
+def _guarded(notes: list[str], what: str, fn: Callable[[], Any]) -> Any:
+    """Run one part of the annotation; a failure becomes one note, so the other parts still run."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 — opening facts are optional; the theory exit must survive them
+        log.warning("%s failed: %s", what, exc, exc_info=log.isEnabledFor(logging.DEBUG))
+        text = f"{what} skipped ({type(exc).__name__}: {exc})."
+        if text not in notes:
+            notes.append(text)
+        return None
+
+
 def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleResult], cfg: CoachConfig) -> None:
     """Set ``Explanation.opening`` for opening positions, ``coaching.theory_exit``, and add facts under the
-    openings tables."""
+    openings tables. The facts and the theory exit fail separately (each leaves a note), and one position that
+    fails leaves the others alone."""
+    notes = coaching.notes
+    openings_mod = next((m for m in modules if m.key == "openings"), None)
+    _guarded(notes, "Opening facts", lambda: _annotate_facts(ctx, coaching, modules, openings_mod, cfg))
+    exit_table = _guarded(notes, "Theory exit", lambda: theory_exit(ctx.games, ctx.evals))
+    table, chart = exit_table if exit_table is not None else (None, None)
+    coaching.theory_exit = table
+    if chart is not None and openings_mod is not None:
+        openings_mod.charts.append(chart)
+
+
+def _annotate_facts(
+    ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleResult], openings_mod: Optional[ModuleResult],
+    cfg: CoachConfig,
+) -> None:
     notes = coaching.notes
     fetcher = Fetcher.from_config(cfg, notes, max_requests=MAX_REQUESTS)
-    openings_mod = next((m for m in modules if m.key == "openings"), None)
-
     explained = _explanation_positions(ctx, coaching.explanations)
     choices = _choice_positions(ctx, modules) if openings_mod is not None else []
     todo = (choices + explained)[:MAX_POSITIONS]
@@ -592,10 +645,14 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
         if tc not in groups_by_tc:
             groups_by_tc[tc] = peer_groups(ctx.games, tc, cfg)
         groups, how = groups_by_tc[tc]
-        pos.facts = gather(fetcher, norm, pos.moves, pos.options[0].san if pos.options else None, groups)
+        played = pos.options[0].san if pos.options else None
+        pos.facts = _guarded(notes, "Opening facts for a position", partial(gather, fetcher, norm, pos.moves, played,
+                                                                             groups))
+        if pos.facts is None:
+            continue
         if pos.facts.peers and how:
             text = (f"Players above you: Lichess blitz and rapid games in rating groups "
-                    f"{', '.join(str(g) for g in groups)} ({how}).")
+                    f"{', '.join(str(g) for g in groups)}; {how}.")
             if text not in peer_notes:
                 peer_notes.append(text)
         if pos.explanation is not None:
@@ -615,8 +672,3 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
             diagram = _diagram(pos)
             if diagram is not None:
                 openings_mod.diagrams.append(diagram)
-
-    table, chart = theory_exit(ctx.games, ctx.evals)
-    coaching.theory_exit = table
-    if chart is not None and openings_mod is not None:
-        openings_mod.charts.append(chart)

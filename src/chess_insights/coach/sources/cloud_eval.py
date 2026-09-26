@@ -44,13 +44,13 @@ def _line(fen: str, pv: dict[str, Any], depth: Optional[int]) -> Optional[Line]:
     ucis, sans = [], []
     for uci in str(pv.get("moves") or "").split():
         try:
-            move = chess.Move.from_uci(uci)
+            # Lichess writes castling as the king taking its rook ("e1h1"); parse_uci turns that into the standard
+            # "e1g1", so the lines compare with every other move in the report
+            move = board.parse_uci(uci)
         except ValueError:
             break
-        if move not in board.legal_moves:
-            break
         sans.append(board.san(move))
-        ucis.append(uci)
+        ucis.append(move.uci())
         board.push(move)
     if not ucis:
         return None

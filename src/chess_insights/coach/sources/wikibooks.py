@@ -24,7 +24,9 @@ ROOT = "Chess_Opening_Theory"
 LICENSE = "CC BY-SA 4.0"
 CREDIT = "Wikibooks, CC BY-SA 4.0"
 MAX_SENTENCES = 2
-MAX_PLIES = 40  # deeper pages are rare; the MediaWiki API takes up to 50 titles per request
+# Deeper pages are rare. Every prefix goes into one existence query, so its URL grows with the square of the
+# depth: about 5 KB at 30 plies, 9 KB at 40 (past the 8 KB many servers accept). The API takes 50 titles.
+MAX_PLIES = 30
 EXTRACT_SENTENCES = 4  # asked for (headings count), then cut to MAX_SENTENCES
 
 

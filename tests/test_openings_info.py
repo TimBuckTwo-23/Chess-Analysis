@@ -130,7 +130,7 @@ def test_facts_for_choice_points_and_repeated_mistakes(tmp_path, session):
     # the table under the openings tables
     table = next(t for t in mod.tables if t.title == "What stronger players play here")
     assert table.columns == ["Position", "You play", "Engine (pawns for you)", "Opening",
-                             "Theory (Wikibooks, CC BY-SA 4.0)", "Wikibooks page"]
+                             "Theory (Wikibooks, CC BY-SA 4.0)", "Wikibooks page", "Your games"]
     choice, habit_row = table.rows
     assert choice[0] == "1.e4 c5 2.d4" and choice[1].startswith("2...cxd4 (13 games, you score")
     assert "2...Nc6 (11 games" in choice[1]
@@ -138,7 +138,8 @@ def test_facts_for_choice_points_and_repeated_mistakes(tmp_path, session):
     assert choice[3] == "Sicilian Defense: Smith-Morra Gambit (B21)"
     assert choice[4].startswith("After 1.e4 c5: 1...c5 is the Sicilian defence")
     assert habit_row[0] == "1.e4 c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4" and habit_row[1] == "5...e5 (10 games)"
-    assert table.formats[-1] == "url" and table.key_columns == [0, 1, 2]
+    assert choice[-1] == "11 bullet · 8 blitz · 5 rapid" and habit_row[-1] == "1 blitz"  # formats behind each row
+    assert table.formats[-2:] == ["url", "text"] and table.key_columns == [0, 1, 2]
     assert "Lichess opening explorer needs a token" in table.note
 
     # a board for each: what the engine prefers green, your move red (your other choices grey)
@@ -148,6 +149,11 @@ def test_facts_for_choice_points_and_repeated_mistakes(tmp_path, session):
     assert [(a.start, a.end, a.kind) for a in habit_board.arrows] == [("a7", "a6", "best"), ("e6", "e5", "played")]
     assert "Your games: 11 bullet, 8 blitz, 5 rapid." in choice_board.caption
     assert habit_board.time_class == "blitz"
+    # the cloud's best line as a strip of small boards (recorded: c5d4 g1f3 e7e5 c2c3 ...)
+    (strip,) = choice_board.strips
+    assert strip.title == "The engine's line (Lichess cloud: −0.1 for you)"
+    assert [f.move for f in strip.frames] == ["2...cxd4", "3.Nf3", "3...e5", "4.c3"]
+    assert strip.frames[0].last_move == "c5d4"
 
     # the explorer was never asked (no token), and said so once
     assert coaching.notes.count(TOKEN_NOTE) == 1
@@ -293,15 +299,73 @@ def test_cached_explorer_answers_fill_the_masters_and_peers_columns(tmp_path, se
     table = next(t for t in mod.tables if t.title == "What stronger players play here")
     assert table.columns[:5] == ["Position", "You play", "Masters play", "Players above you play",
                                  "Engine (pawns for you)"]
-    assert table.columns[-1] == "Master game"
+    assert table.columns[-2:] == ["Master game", "Your games"]
     (row,) = table.rows
     assert row[2].startswith("cxd4 90% (scores 34%) · e6 6.0%")  # Black to move: (17 + 28 / 2) / 90
     assert row[3].startswith("cxd4 63% (scores 50%) · Nc6 27%")
     assert "2...cxd4 (13 games, you score" in row[1] and "masters' #1" in row[1]
     assert "not in the masters' top 3" in row[1]
-    assert row[-1] == "https://lichess.org/Mast3rGm"
-    assert "rating groups 1200, 1400, 1600 (your chess.com blitz 949 is about 1390 on Lichess" in table.note
+    # a masters game opens through Lichess's import route (masters ids are not Lichess game ids), Black at the bottom
+    assert row[-2] == "https://lichess.org/import/master/Mast3rGm/black"
+    assert "rating groups 1200, 1400, 1600; your chess.com blitz 949 is about 1390 on Lichess" in table.note
     board = next(d for d in mod.diagrams if d.fen == fen)
     assert board.title == "After 1.e4 c5 2.d4: cxd4 is what masters choose"
-    assert "Lichess 1200–1799: cxd4 63%" in board.caption and board.link == "https://lichess.org/Mast3rGm"
+    assert "Lichess 1200–1799: cxd4 63%" in board.caption
+    assert board.link == "https://lichess.org/import/master/Mast3rGm/black"
     assert not any("explorer.lichess.org" in url for url, _ in session.calls)
+
+
+def test_peer_groups_prefer_a_checked_conversion():
+    """Blitz 949 was checked against ChessGoals, rapid 1132 is only an estimate: rapid positions use blitz too."""
+    games = [make_game(time_class="blitz", my_rating=949), make_game(time_class="rapid", my_rating=1132)]
+    groups, how = openings_info.peer_groups(games, "rapid", CoachConfig())
+    assert groups == [1200, 1400, 1600] and how.startswith("your chess.com blitz 949")
+    # a rapid-only player gets the estimate, and the note says it is one
+    groups, how = openings_info.peer_groups(games[1:], "rapid", CoachConfig())
+    assert groups and "rough estimate" in how
+
+
+def test_choice_table_with_odd_cells_and_wiki_titles_with_escapes():
+    from chess_insights.models import ModuleResult, OpeningFacts, Table
+
+    table = Table(title="Your choices at key moves", columns=["Position", "Your move", "Games", "Score"],
+                  rows=[["1.e4 c5 2.d4", "2...cxd4", "n/a", 0.5], ["1.e4 c5 2.d4", "2...Nc6", 11, None]])
+    (p,) = openings_info._choice_positions_from_table([ModuleResult(key="openings", title="", summary="",
+                                                                    tables=[table])])
+    assert [(o.san, o.games) for o in p.options] == [("cxd4", 0), ("Nc6", 11)]
+    facts = OpeningFacts(wiki_text="Text.", wiki_url=wikibooks.page_url(wikibooks.page_title(["e4", "d5", "e5"])))
+    assert openings_info._wiki_text(facts) == "After 1.e4 d5 2.e5: Text."
+    promo = OpeningFacts(wiki_text="T.", wiki_url="https://en.wikibooks.org/wiki/Chess_Opening_Theory/1._e8%3DQ")
+    assert openings_info._wiki_text(promo) == "After 1.e8=Q: T."
+
+
+def test_an_unexpected_failure_leaves_the_theory_exit(tmp_path, monkeypatch):
+    """A source that breaks in an unexpected way costs its facts (one note), not the theory-exit table."""
+
+    class Broken:
+        def get(self, url, headers=None, timeout=None):
+            raise ValueError("Invalid URL")  # e.g. what the HTTP stack raises for a malformed URL
+
+    monkeypatch.setattr(http, "session_factory", lambda: Broken())
+    games, habit = sicilian_games()
+    e = habit_explanation(habit)
+    coaching, mod = run(tmp_path, games, [e])
+    assert e.opening is not None and e.opening.name and not e.opening.cloud_lines
+    assert any("could not be reached (ValueError)" in n for n in coaching.notes)
+    assert coaching.theory_exit is not None
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(openings_info, "gather", boom)
+    coaching, mod = run(tmp_path / "again", games, [habit_explanation(habit)])
+    assert coaching.notes.count("Opening facts for a position skipped (RuntimeError: bug).") == 1
+    assert coaching.theory_exit is not None
+
+
+def test_an_explanation_without_its_epd_still_finds_its_moves(tmp_path, session):
+    games, habit = sicilian_games()
+    e = habit_explanation(habit)
+    e.epd = ""  # only the FEN is set
+    run(tmp_path, games, [e])
+    assert e.opening.wiki_url.endswith("/2._Nf3/2...Nc6")  # the Wikibooks walk needs the moves

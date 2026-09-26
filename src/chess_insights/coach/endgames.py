@@ -79,6 +79,7 @@ class Ending:
     had_draw: bool = False
     slips: list[Slip] = field(default_factory=list)
     complete: bool = True  # every one of your moves in the ending was checked
+    answered: bool = False  # the tablebase answered at least once (False: unavailable, offline or request limit)
 
 
 def _label(board: chess.Board, move: chess.Move) -> str:
@@ -98,6 +99,7 @@ def _check_move(fetcher: Fetcher, board: chess.Board, move: chess.Move, ply: int
     result = tablebase.probe(fetcher, board.fen())
     if result is None:
         return False
+    ending.answered = True
     before = result.outcome
     if ending.entry is None:
         ending.entry = before
@@ -106,7 +108,7 @@ def _check_move(fetcher: Fetcher, board: chess.Board, move: chess.Move, ply: int
     ending.had_win |= before == "win"
     ending.had_draw |= before == "draw"
     worse = (before == "win" and after in ("draw", "loss")) or (before == "draw" and after == "loss")
-    best = result.best
+    best = result.keeping()  # the tablebase's move that keeps the result (its first move, as it sorts them)
     if worse and best is not None:
         try:
             best_move: Optional[chess.Move] = chess.Move.from_uci(best.uci)
@@ -123,8 +125,24 @@ def _check_move(fetcher: Fetcher, board: chess.Board, move: chess.Move, ply: int
     return True
 
 
+def reaches_tablebase(game: Game) -> bool:
+    """Whether a move of ``game`` is played with 7 pieces or fewer on the board (no request)."""
+    board = _start_board(game)
+    if board is None or game.rules != "chess":
+        return False
+    for san in game.moves_san:
+        if chess.popcount(board.occupied) <= tablebase.MAX_PIECES:
+            return True
+        try:
+            board.push_san(san)
+        except ValueError:
+            return False
+    return False
+
+
 def check_game(fetcher: Fetcher, game: Game) -> Optional[Ending]:
-    """The tablebase view of one game's ending, or None when it never reaches 7 pieces (or the source is out)."""
+    """The tablebase view of one game's ending; None when it never reaches 7 pieces. When the tablebase gave no
+    answer (unavailable, offline without a cached answer, request limit) the Ending has ``answered`` False."""
     board = _start_board(game)
     if board is None or game.rules != "chess":
         return None
@@ -142,7 +160,9 @@ def check_game(fetcher: Fetcher, game: Game) -> Optional[Ending]:
                 if board.turn != me:  # the first such position, with your opponent to move
                     first = tablebase.probe(fetcher, board.fen())
                     if first is None:
-                        return None
+                        ending.complete = False
+                        return ending
+                    ending.answered = True
                     ending.entry = tablebase.FLIP[first.outcome] if first.outcome else None
             if board.turn == me:
                 if checked >= MAX_PER_GAME or not _check_move(fetcher, board, move, ply, ending):
@@ -158,10 +178,16 @@ def _slip_text(s: Slip) -> str:
     return f"{s.move} ({before} to {after}; tablebase: {s.best})"
 
 
-def endings_table(endings: Sequence[Ending], n_games: int, requests_capped: bool) -> Optional[Table]:
-    """One row per ending type: endings checked, tablebase wins and draws you had, slips, the latest example."""
+def endings_table(
+    endings: Sequence[Ending], n_games: int, requests_capped: bool, reached: Optional[int] = None
+) -> Optional[Table]:
+    """One row per ending type: endings checked, tablebase wins and draws you had, slips, the latest example.
+
+    ``endings`` are the checked ones; ``reached`` counts every analysed game that reached 7 pieces or fewer
+    (checked or not), so the note never presents a partial run as the whole picture."""
     if not endings:
         return None
+    reached = max(reached if reached is not None else len(endings), len(endings))
     rows = []
     for kind in TYPES:
         es = [e for e in endings if e.ending == kind]
@@ -184,16 +210,28 @@ def endings_table(endings: Sequence[Ending], n_games: int, requests_capped: bool
     formats_mix: dict[str, int] = {}
     for e in endings:
         formats_mix[e.game.time_class] = formats_mix.get(e.game.time_class, 0) + 1
-    note = (
-        f"{len(endings)} of your {n_games} engine-analysed games reached 7 pieces or fewer "
-        f"({format_text(formats_mix)}), checked with the Lichess tablebase, which knows the exact result of "
-        "every such position. Had a win / had a draw: games in which the tablebase gave you that result with you "
-        "to move. Wins let slip: one of your moves turned a win into a draw or a loss; draws lost: a draw into a "
-        "loss (50-move rule included). The example is the most recent slip, with the tablebase's move. "
-        "Observations, not tested claims."
+    if reached == len(endings):
+        note = (
+            f"{len(endings)} of your {n_games} engine-analysed games reached 7 pieces or fewer "
+            f"({format_text(formats_mix)}), checked with the Lichess tablebase, which knows the exact result of "
+            "every such position."
+        )
+    else:
+        note = (
+            f"{reached} of your {n_games} engine-analysed games reached 7 pieces or fewer; {len(endings)} of them "
+            f"({format_text(formats_mix)}) were checked with the Lichess tablebase, which knows the exact result "
+            "of every such position."
+        )
+    note += (
+        " Had a win / had a draw: games in which the tablebase gave you that result with you to move. Wins let "
+        "slip: one of your moves turned a win into a draw or a loss; draws lost: a draw into a loss (50-move rule "
+        "included). The example is the most recent slip, with the tablebase's move. Observations, not tested claims."
     )
-    if requests_capped:
-        note += " Not every ending could be checked in this run (request limit); later runs continue from the cache."
+    if requests_capped or reached > len(endings) or not all(e.complete for e in endings):
+        note += (
+            " Not every move of every ending could be checked in this run (request limit or the tablebase was "
+            "unavailable); later runs continue from the cache."
+        )
     return Table(
         title="Endings checked with the tablebase",
         columns=["Ending", "Games", "Had a win", "Wins let slip", "Had a draw", "Draws lost", "Latest slip", "Game",
@@ -207,6 +245,8 @@ def endings_table(endings: Sequence[Ending], n_games: int, requests_capped: bool
 
 def slip_diagram(s: Slip) -> Diagram:
     """The position before the slip: your move red, the tablebase's move green."""
+    mate = tablebase.mate_in_moves(s.dtm)  # the DTM is in plies; the caption counts moves
+    mate_text = f" (mate in {mate} moves with best play)" if mate and mate > 0 and s.before == "win" else ""
     return position_diagram(
         f"{s.ending} ending: {s.move} turned {RESULT_WORDS.get(s.before, s.before)} into "
         f"{RESULT_WORDS.get(s.after, s.after)}",
@@ -214,9 +254,8 @@ def slip_diagram(s: Slip) -> Diagram:
         orientation=s.game.color,
         played=s.played_uci,
         best=s.best_uci,
-        caption=f"Tablebase: {s.best} keeps {RESULT_WORDS.get(s.before, s.before)}"
-        + (f" (mate in {abs(s.dtm)} moves with best play)" if s.dtm and s.before == "win" else "")
-        + f". You played {s.move}. {s.game.time_class.capitalize()} game.",
+        caption=f"Tablebase: {s.best} keeps {RESULT_WORDS.get(s.before, s.before)}{mate_text}. "
+        f"You played {s.move}. {s.game.time_class.capitalize()} game.",
         link=s.game.url,
         time_class=s.game.time_class,
     )
@@ -249,14 +288,19 @@ def annotate(
     by_id = {g.game_id: g for g in ctx.games}
     games = sorted((by_id[gid] for gid in ctx.evals if gid in by_id), key=lambda g: g.end_time, reverse=True)
     endings = []
+    reached = 0
     for g in games:
-        if tablebase.SOURCE in fetcher.disabled:
-            break
+        if tablebase.SOURCE in fetcher.disabled:  # counted, not asked about
+            reached += reaches_tablebase(g)
+            continue
         ending = check_game(fetcher, g)
-        if ending is not None and ending.entry is not None:
+        if ending is None:
+            continue
+        reached += 1
+        if ending.answered:
             endings.append(ending)
     capped = fetcher.requests_made.get(tablebase.SOURCE, 0) >= MAX_REQUESTS
-    coaching.endgames = endings_table(endings, len(games), capped)
+    coaching.endgames = endings_table(endings, len(games), capped, reached)
     slips = sorted((s for e in endings for s in e.slips), key=lambda s: s.game.end_time, reverse=True)
     diagrams = [slip_diagram(s) for s in slips[:MAX_DIAGRAMS]]
     if diagrams:
@@ -267,6 +311,7 @@ def annotate(
             if engine is not None:
                 engine.diagrams.extend(diagrams)
     coaching.settings["tablebase"] = {
+        "reached": reached,
         "endings": len(endings),
         "slips": len(slips),
         "requests": fetcher.requests_made.get(tablebase.SOURCE, 0),

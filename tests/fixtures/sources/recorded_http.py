@@ -24,6 +24,11 @@ def load(name: str) -> dict[str, Any]:
     return json.loads((HERE / f"{name}.json").read_text(encoding="utf-8"))
 
 
+class UnrecordedRequest(BaseException):
+    """A request no recorded answer covers. A BaseException, so the code's "a source failing never sinks the
+    report" handlers (which catch Exception) cannot swallow it: the test fails."""
+
+
 class FakeResponse:
     def __init__(self, status: int, body: Any, content_type: str = "application/json") -> None:
         self.status_code = status
@@ -42,8 +47,8 @@ def response(doc: dict[str, Any]) -> FakeResponse:
 
 
 class RecordedSession:
-    """Answers GETs from recorded files (matched on the exact URL). Unknown URLs fail the test, unless
-    ``fallback(url)`` returns a FakeResponse for them.
+    """Answers GETs from recorded files (matched on the exact URL). Unknown URLs fail the test (UnrecordedRequest),
+    unless ``fallback(url)`` returns a FakeResponse for them.
 
     ``queue`` maps a URL to several answers in order (e.g. a 429 and then a 200).
     """
@@ -68,7 +73,7 @@ class RecordedSession:
             got = self.fallback(url)
             if got is not None:
                 return got
-        raise AssertionError(f"no recorded answer for {url}")
+        raise UnrecordedRequest(f"no recorded answer for {url}")
 
 
 class TimeoutSession:

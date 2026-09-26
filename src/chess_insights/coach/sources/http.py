@@ -282,7 +282,9 @@ class Fetcher:
             except requests.exceptions.Timeout:
                 self._fail(source, f"{name} did not answer in time; skipped for the rest of this report.", True)
                 return cached[0] if cached else None
-            except requests.RequestException as exc:
+            except (requests.RequestException, OSError, ValueError) as exc:
+                # ValueError / OSError: what the HTTP stack raises outside requests' own errors (an invalid URL,
+                # a socket error); either way the source is out for this run and the report goes on
                 text = f"{name} could not be reached ({type(exc).__name__}); skipped for the rest of this report."
                 self._fail(source, text, True)
                 return cached[0] if cached else None

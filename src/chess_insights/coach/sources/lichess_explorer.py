@@ -12,6 +12,7 @@ Answers are cached for 30 days.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -26,6 +27,10 @@ LICHESS_URL = "https://explorer.lichess.org/lichess"
 SPEEDS = ("blitz", "rapid")
 TOP_GAMES = 2
 GAME_URL = "https://lichess.org/{id}"
+# Masters games are not Lichess games: the analysis board opens them through this import route (as the explorer's
+# own game list does), with the board turned to ``color``.
+MASTER_GAME_URL = "https://lichess.org/import/master/{id}/{color}"
+_GAME_ID = re.compile(r"[A-Za-z0-9]{8,12}")  # Lichess ids are 8 letters and digits; anything else is not linked
 
 
 @dataclass
@@ -71,15 +76,26 @@ def _int(x: Any) -> int:
         return 0
 
 
+def _standard_uci(board: Optional[chess.Board], uci: str) -> str:
+    """Lichess writes castling as the king taking its rook ("e1h1"); the report uses standard UCI ("e1g1")."""
+    if board is None or not uci:
+        return uci
+    try:
+        return board.parse_uci(uci).uci()
+    except ValueError:
+        return uci
+
+
 def parse(body: Any, fen: str, database: str) -> ExplorerResult:
     """An explorer answer -> ExplorerResult. Scores are for the side to move at ``fen``."""
     result = ExplorerResult(fen=fen, database=database)
     if not isinstance(body, dict):
         return result
     try:
-        white_to_move = chess.Board(fen).turn == chess.WHITE
+        board: Optional[chess.Board] = chess.Board(fen)
     except ValueError:
-        white_to_move = True
+        board = None
+    white_to_move = board is None or board.turn == chess.WHITE
     moves = []
     for m in body.get("moves") or []:
         if not isinstance(m, dict):
@@ -90,7 +106,7 @@ def parse(body: Any, fen: str, database: str) -> ExplorerResult:
         moves.append(
             MoveStat(
                 san=str(m.get("san") or ""),
-                uci=str(m.get("uci") or ""),
+                uci=_standard_uci(board, str(m.get("uci") or "")),
                 games=n,
                 score=(mine + 0.5 * d) / n if n else None,
                 avg_rating=_int(m.get("averageRating")) or None,
@@ -102,9 +118,16 @@ def parse(body: Any, fen: str, database: str) -> ExplorerResult:
     moves.sort(key=lambda m: -m.games)  # the explorer already sorts this way; keep it stable if it ever doesn't
     result.moves = moves
     result.total = total
-    games = [g for g in (body.get("topGames") or []) if isinstance(g, dict) and g.get("id")]
+    games = [
+        g for g in (body.get("topGames") or [])
+        if isinstance(g, dict) and _GAME_ID.fullmatch(str(g.get("id") or ""))
+    ]
     if games:
-        result.top_game = GAME_URL.format(id=games[0]["id"])
+        gid = str(games[0]["id"])
+        color = "white" if white_to_move else "black"
+        result.top_game = (
+            MASTER_GAME_URL.format(id=gid, color=color) if database == "masters" else GAME_URL.format(id=gid)
+        )
     opening = body.get("opening")
     if isinstance(opening, dict):
         result.eco = str(opening.get("eco") or "")

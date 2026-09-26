@@ -68,7 +68,8 @@ def _resolve(term: str) -> Optional[str]:
     if exact:
         return exact
     for word, concept in _KEYWORDS:
-        if word in k:
+        # at the start of a word: "castl" finds "castling", "king" does not find "attacking", "hole" not "whole"
+        if re.search(r"\b" + re.escape(word), k):
             return concept
     return None
 

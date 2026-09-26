@@ -92,12 +92,40 @@ def groups_for(
     return peer_groups(lichess, above) if lichess is not None else []
 
 
+def is_checked(chesscom_rating: float, time_class: str = "blitz", overrides: Optional[dict[str, Any]] = None) -> bool:
+    """Whether the conversion of ``chesscom_rating`` rests only on rows compared with the source (``CHECKED``):
+    the rating is a checked row, or lies between two checked neighbouring rows. False with ``overrides`` for the
+    format (those rows are the user's own)."""
+    if time_class in (overrides or {}):
+        return False
+    checked = CHECKED.get(time_class, frozenset())
+    rows = _rows(time_class)
+    if rows is None or not checked:
+        return False
+    if chesscom_rating in checked:
+        return True
+    xs = [a for a, _ in rows]
+    i = bisect_right(xs, chesscom_rating) - 1
+    return 0 <= i < len(rows) - 1 and xs[i] in checked and xs[i + 1] in checked
+
+
 def describe(chesscom_rating: float, time_class: str = "blitz", overrides: Optional[dict[str, Any]] = None) -> str:
-    """'your chess.com blitz 949 is about 1390 on Lichess (ChessGoals rating comparison, July 2026)'."""
+    """'your chess.com blitz 949 is about 1390 on Lichess (ChessGoals rating comparison, July 2026)'.
+
+    Only conversions that rest on checked rows name ChessGoals; the others say they are rough estimates, and rows
+    from ``overrides`` say they come from the settings."""
     lichess = to_lichess(chesscom_rating, time_class, overrides)
     if lichess is None:
         return ""
-    return f"your chess.com {time_class} {int(round(chesscom_rating))} is about {lichess} on Lichess ({SOURCE_NAME})"
+    head = f"your chess.com {time_class} {int(round(chesscom_rating))}"
+    if time_class in (overrides or {}):
+        return f"{head} is about {lichess} on Lichess (from the rating table in your settings)"
+    if is_checked(chesscom_rating, time_class):
+        return f"{head} is about {lichess} on Lichess ({SOURCE_NAME})"
+    return (
+        f"{head} is roughly {lichess} on Lichess (a rough estimate: this part of the rating table has not been "
+        "checked against the ChessGoals rating comparison)"
+    )
 
 
 def group_label(groups: Sequence[int]) -> str:

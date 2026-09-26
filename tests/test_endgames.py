@@ -141,8 +141,9 @@ def test_annotate_builds_the_table_boards_and_explanation_facts(tmp_path, sessio
     rook, queen = engine.diagrams
     assert rook.title == "Rook ending: 1.Rd1 turned a draw into a loss" and rook.link == games[3].url
     assert [(a.start, a.end, a.kind) for a in rook.arrows] == [("d5", "d1", "played"), ("f4", "f5", "best")]
-    assert queen.time_class == "bullet" and "Tablebase: 1.Qh5+ keeps a win (mate in 13 moves" in queen.caption
-    assert coaching.settings["tablebase"] == {"endings": 4, "slips": 2, "requests": 4}
+    # the tablebase counts DTM in plies: 13 plies is mate in 7 moves
+    assert queen.time_class == "bullet" and "Tablebase: 1.Qh5+ keeps a win (mate in 7 moves" in queen.caption
+    assert coaching.settings["tablebase"] == {"reached": 4, "endings": 4, "slips": 2, "requests": 4}
     assert not any("Ra5" in url for url, _ in session.calls)
 
 
@@ -154,6 +155,11 @@ def test_request_cap_and_unavailable_tablebase(tmp_path, monkeypatch, session):
     endgames.annotate(ctx, coaching, CoachConfig(sources_cache=tmp_path / "sources"))
     assert [r[0] for r in coaching.endgames.rows] == ["Rook endings"] and coaching.endgames.rows[0][1] == 1
     assert "request limit" in coaching.endgames.note
+    # the note says both games reached the tablebase but only one was checked, not "1 of your 2 reached"
+    assert "2 of your 2 engine-analysed games reached 7 pieces or fewer; 1 of them (blitz only)" in (
+        coaching.endgames.note
+    )
+    assert coaching.settings["tablebase"]["reached"] == 2 and coaching.settings["tablebase"]["endings"] == 1
     assert any("request limit" in n for n in coaching.notes)
 
     # a timeout: no table, one note, and the run goes on
@@ -176,3 +182,29 @@ def test_offline_uses_only_cached_answers(tmp_path, session):
     coaching = Coaching()
     endgames.annotate(ctx, coaching, CoachConfig(sources_cache=tmp_path / "empty", offline=True))
     assert coaching.endgames is None and any("offline" in n for n in coaching.notes)
+
+
+def test_a_slip_names_a_move_that_keeps_the_result(tmp_path, monkeypatch):
+    """An answer whose moves are not sorted best first: the slip's move is one that keeps the draw."""
+    doc = recorded.load("tablebase_rook_ending")
+    shuffled = dict(doc, body=dict(doc["body"], moves=list(reversed(doc["body"]["moves"]))))
+    s = recorded.RecordedSession().add(shuffled)
+    monkeypatch.setattr(http, "session_factory", lambda: s)
+    ending = endgames.check_game(Fetcher(tmp_path / "sources", sleep=lambda s: None),
+                                 ending_game(ROOK_DRAW, "white", ["Rd1"]))
+    (slip,) = ending.slips
+    kept = tablebase.parse(doc["body"], ROOK_DRAW).move(slip.best_uci)
+    assert slip.best != "1.Rd1" and kept.outcome_for_mover == "draw"
+
+
+def test_games_counted_when_the_tablebase_is_out(tmp_path, monkeypatch):
+    """After a timeout the other endings are counted as reached but never asked about."""
+    games = [ending_game(ROOK_DRAW, "white", ["Rd1"]), ending_game(KRK_WON, "white", ["Ra5+"]), make_game()]
+    ctx = AnalysisContext("tester", games, evals=evals_for(games))
+    timeout = recorded.TimeoutSession()
+    monkeypatch.setattr(http, "session_factory", lambda: timeout)
+    coaching = Coaching()
+    endgames.annotate(ctx, coaching, CoachConfig(sources_cache=tmp_path / "sources"))
+    assert len(timeout.calls) == 1 and coaching.endgames is None
+    assert coaching.settings["tablebase"]["reached"] == 2 and coaching.settings["tablebase"]["endings"] == 0
+    assert endgames.reaches_tablebase(games[0]) and not endgames.reaches_tablebase(games[2])

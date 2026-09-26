@@ -4,6 +4,9 @@
 loss, and the 50-move-rule cases cursed-win / blessed-loss), the distance to zeroing (DTZ) and to mate (DTM),
 and every legal move with the category it leaves *for the opponent*, best first. Tablebase answers never change,
 so they are cached for good.
+
+DTZ and DTM are counted in plies (half-moves), positive when the side to move wins: DTM 23 is mate in 12 moves,
+DTM -24 is mated in 12. :func:`mate_in_moves` turns them into the moves the report shows.
 """
 
 from __future__ import annotations
@@ -37,6 +40,15 @@ FLIP = {"win": "loss", "draw": "draw", "loss": "win"}
 def outcome(category: Optional[str]) -> Optional[str]:
     """'win' / 'draw' / 'loss' for the side to move, or None when the tablebase is unsure."""
     return OUTCOME.get(str(category or ""))
+
+
+def mate_in_moves(dtm: Optional[int]) -> Optional[int]:
+    """A DTM in plies as moves of the winning side: 23 -> 12 (the side to move mates in 12), -24 -> -12 (it is
+    mated in 12); None without a DTM (7-piece positions have none) or for 0 (a draw)."""
+    if not dtm:
+        return None
+    moves = (abs(int(dtm)) + 1) // 2
+    return moves if dtm > 0 else -moves
 
 
 @dataclass
@@ -83,9 +95,25 @@ class TablebaseResult:
                 return m
         return None
 
+    def keeping(self) -> Optional[TablebaseMove]:
+        """The first (best) move that keeps the position's result for the side to move; None when unsure.
+
+        The answer lists moves best first, so this is normally ``best``; checking the result guards against an
+        answer that isn't sorted."""
+        want = self.outcome
+        if want is None:
+            return None
+        return next((m for m in self.moves if m.outcome_for_mover == want), None)
+
     def as_dict(self, played: Optional[str] = None) -> dict[str, Any]:
-        """The facts for ``Explanation.tablebase``: result, the tablebase's move, what ``played`` left."""
+        """The facts for ``Explanation.tablebase``: result, the tablebase's move, what ``played`` left.
+
+        ``dtz`` and ``dtm`` are in plies, as the tablebase gives them; ``mate_in`` is the DTM in moves (positive:
+        the side to move mates, negative: it is mated), absent when the tablebase has no DTM."""
         out: dict[str, Any] = {"category": self.category, "result": self.outcome, "dtz": self.dtz, "dtm": self.dtm}
+        mate_in = mate_in_moves(self.dtm)
+        if mate_in is not None:
+            out["mate_in"] = mate_in
         if self.best is not None:
             out.update(best=self.best.san, best_uci=self.best.uci, best_result=self.best.outcome_for_mover)
         mine = self.move(played) if played else None
