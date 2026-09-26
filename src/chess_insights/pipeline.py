@@ -1,19 +1,37 @@
-"""Run every analysis module and assemble the Report."""
+"""Run every analysis module and assemble the Report.
+
+    games + evals ─ run_modules ─ coach.build_coaching ─ build_report (fill, rank, plan) ─ coach.finish_coaching
+                                                                     └─ the same per format: Report.format_reports
+
+Every step is isolated: a failing module, coaching step or format view logs a warning and the report still builds.
+"""
 
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import math
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional, get_args
+from typing import TYPE_CHECKING, Any, Iterable, Optional, get_args
 
 from .context import AnalysisContext
+from .fill import fill
 from .insights import build_study_plan, headline, practice_actions, rank_insights, summary_lines
-from .models import Game, GameEval, Insight, InsightKind, ModuleResult, Report
+from .models import Coaching, Game, GameEval, Insight, InsightKind, ModuleResult, Report
+from .visuals import FORMAT_ORDER, format_counts, format_text
+
+if TYPE_CHECKING:
+    from .coach import CoachConfig
 
 log = logging.getLogger(__name__)
+
+# A format gets its own view of the report (Report.format_reports) from this many games, when the games cover two
+# or more formats. Below it a view would have too few games for most tests to say anything (the modules need 8
+# games per opening and colour, 25 per split), and its sections would be mostly "not enough data".
+# (visuals.MIN_FORMAT_GAMES is the much smaller bar for a format's own bar in a chart split by format.)
+MIN_FORMAT_GAMES = 60
 
 # (module path under chess_insights.analysis, section title used if the module crashes)
 MODULES: list[tuple[str, str]] = [
@@ -131,6 +149,17 @@ def game_labels(games: list[Game], modules: list[ModuleResult], extra: Iterable[
     return {g.url: game_label(g, year) for g in games if g.url and g.url in wanted}
 
 
+def _practice(modules: list[ModuleResult], coaching: Optional[Coaching]) -> list[str]:
+    """``insights.practice_actions``, with the coaching when it takes it (its drills become plan actions)."""
+    try:
+        params = inspect.signature(practice_actions).parameters
+    except (TypeError, ValueError):  # a builtin or a mock without a signature
+        params = {}  # type: ignore[assignment]
+    if "coaching" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return practice_actions(modules, coaching=coaching)
+    return practice_actions(modules)
+
+
 def build_report(
     ctx: AnalysisContext,
     modules: list[ModuleResult],
@@ -138,10 +167,20 @@ def build_report(
     filters: str = "",
     engine_note: str = "",
     top_n: Optional[int] = None,
+    coaching: Optional[Coaching] = None,
+    practice_coaching: Optional[Coaching] = None,
+    time_class: str = "",
 ) -> Report:
-    """``top_n``: how many strengths and weaknesses the report lists (None: every one that passed the rule)."""
+    """``top_n``: how many strengths and weaknesses the report lists (None: every one that passed the rule).
+
+    Every finding first gets its formats and a picture where its module gave none (``fill``). ``coaching`` goes
+    on the report; the study plan's practice actions come from ``practice_coaching`` (default: ``coaching``), so a
+    format view can point at drills that live on the main report. ``time_class`` marks a one-format view.
+    """
+    fill(modules, ctx)
     strengths, weaknesses = rank_insights(modules, top_n=top_n)
-    plan = build_study_plan(weaknesses, practice=practice_actions(modules))
+    practice = _practice(modules, practice_coaching if practice_coaching is not None else coaching)
+    plan = build_study_plan(weaknesses, practice=practice)
     games = ctx.games
     return Report(
         username=ctx.username,
@@ -159,7 +198,145 @@ def build_report(
         summary_lines=summary_lines(modules, plan, strengths, weaknesses),
         game_labels=game_labels(games, modules, (u for item in plan for u in item.games)),
         demo=bool(ctx.opt("demo", False)),
+        time_class=time_class,
+        formats=format_counts(games),
+        engine_formats=format_counts(g for g in games if g.game_id in ctx.evals),
+        coaching=coaching,
     )
+
+
+# --------------------------------------------------------------------------- coaching
+def _coaching_failed(exc: Exception, what: str) -> str:
+    log.warning("%s failed: %s", what, exc)
+    log.debug("%s", traceback.format_exc())
+    return f"The coaching could not be computed ({type(exc).__name__}: {exc})."
+
+
+def build_coaching(ctx: AnalysisContext, modules: list[ModuleResult], cfg: "CoachConfig") -> Coaching:
+    """``coach.build_coaching``, isolated like a module: a failure leaves a Coaching with a note, never an error.
+
+    The coaching may add findings to a section (only motif findings that passed the claim rule); they are
+    checked like every module's before ranking.
+    """
+    try:
+        from . import coach
+
+        coaching = coach.build_coaching(ctx, modules, cfg)
+        if not isinstance(coaching, Coaching):
+            raise TypeError(f"build_coaching() returned {type(coaching).__name__}, not Coaching")
+    except Exception as exc:  # noqa: BLE001 — the report must build without its coaching
+        coaching = Coaching(notes=[_coaching_failed(exc, "coaching")])
+    for m in modules:
+        _clean_insights(m, m.key)
+    return coaching
+
+
+def finish_coaching(report: Report, cfg: "CoachConfig") -> None:
+    """``coach.finish_coaching`` (progress, Maia, the LLM coach), isolated: a failure becomes a note."""
+    try:
+        from . import coach
+
+        coach.finish_coaching(report, cfg)
+    except Exception as exc:  # noqa: BLE001
+        note = _coaching_failed(exc, "finishing the coaching")
+        if report.coaching is not None:
+            report.coaching.notes.append(note)
+
+
+def view_coaching(coaching: Optional[Coaching], time_class: str) -> Optional[Coaching]:
+    """A format view's copy of the coaching: that format's explanations only. Drills, the motif profile and the
+    review schedule stay on the main report (they are practice for every format)."""
+    if coaching is None:
+        return None
+    return Coaching(
+        explanations=[e for e in coaching.explanations if e.time_class == time_class],
+        notes=list(coaching.notes),
+        settings=dict(coaching.settings),
+        llm=dict(coaching.llm),
+    )
+
+
+# --------------------------------------------------------------------------- format views
+def view_filters(time_class: str, filters: str) -> str:
+    """"blitz only, rated, standard chess" from the report's filter text (its time-control part replaced)."""
+
+    def is_time_part(part: str) -> bool:
+        return part == "all time controls" or all(p in FORMAT_ORDER for p in part.split("+"))
+
+    parts = [p for p in (filters or "").split(", ") if p and not is_time_part(p)]
+    return ", ".join([format_text({time_class: 1}), *parts])
+
+
+def view_engine_note(time_class: str, view: AnalysisContext, whole: AnalysisContext, engine_note: str) -> str:
+    """The engine note for one format's view: how many of its games Stockfish analysed (or why none)."""
+    if not whole.evals:
+        return engine_note  # not run, or skipped: the same reason holds for every format
+    if not view.evals:
+        sample = engine_note.strip().rstrip(".")
+        note = f"None of your {time_class} games were in the engine sample" + (f" ({sample})." if sample else ".")
+        listed = [tc for tc in whole.opt("engine_time_classes", None) or [] if isinstance(tc, str)]
+        if listed and time_class not in {tc.lower() for tc in listed}:
+            sent = format_text({tc.lower(): 1 for tc in listed}).removesuffix(" only")
+            note += f" Only {sent} games were sent to Stockfish."
+        elif whole.opt("engine_sample", "recent") != "balanced":
+            note += (" A balanced engine sample (--engine-sample balanced, the default on GitHub) takes games from "
+                     "every format.")
+        elif time_class == "daily":
+            note += " A balanced sample takes daily games only when asked to (--engine-time-class)."
+        return note
+    first = next(iter(view.evals.values()))
+    depth = f" at depth {first.depth}" if first.depth else ""
+    k, n = len(view.evals), len(view.games)
+    if k >= n:
+        return f"{first.engine}{depth} on all {n} of your {time_class} games."
+    # both samples take a format's games newest first
+    return f"{first.engine}{depth} on {k} of your {n} {time_class} games (the most recent)."
+
+
+def build_format_views(
+    ctx: AnalysisContext,
+    modules: Optional[list[tuple[str, str]]] = None,
+    *,
+    filters: str = "",
+    engine_note: str = "",
+    coaching: Optional[Coaching] = None,
+    min_games: int = MIN_FORMAT_GAMES,
+) -> dict[str, Report]:
+    """The same analysis on each format's games alone, for every format with at least ``min_games`` games.
+
+    Only when the games cover two or more formats (a one-format report is already its own view). Each view is a
+    full Report: its claims are tested on that format's games only (its own false-claim budget), its engine
+    sections use that format's engine-analysed games, and it has no views of its own. Keys in format order.
+    """
+    counts = format_counts(ctx.games)
+    if len(counts) < 2:
+        return {}
+    views: dict[str, Report] = {}
+    for tc, n in counts.items():
+        if n < min_games:
+            continue
+        games = [g for g in ctx.games if g.time_class == tc]
+        ids = {g.game_id for g in games}
+        sub = AnalysisContext(
+            username=ctx.username,
+            games=games,
+            evals={gid: ev for gid, ev in ctx.evals.items() if gid in ids},
+            options=dict(ctx.options),
+        )
+        try:
+            views[tc] = build_report(
+                sub,
+                run_modules(sub, modules),
+                filters=view_filters(tc, filters),
+                engine_note=view_engine_note(tc, sub, ctx, engine_note),
+                coaching=view_coaching(coaching, tc),
+                practice_coaching=coaching,
+                time_class=tc,
+            )
+        except Exception as exc:  # noqa: BLE001 — a view is extra; the main report stands without it
+            log.warning("the %s view could not be built: %s", tc, exc)
+            log.debug("%s", traceback.format_exc())
+    return views
 
 
 def run_analysis(
@@ -171,12 +348,27 @@ def run_analysis(
     filters: str = "",
     engine_note: str = "",
     modules: Optional[list[tuple[str, str]]] = None,
+    coach: Optional["CoachConfig"] = None,
 ) -> Report:
-    """Games (already filtered) -> Report."""
+    """Games (already filtered) -> Report.
+
+    ``coach``: run the coaching layer (explanations, drills ...) with these settings; None skips it.
+    ``options["format_views"]``: False skips the per-format views (default: built whenever two or more formats
+    are present, each from ``MIN_FORMAT_GAMES`` games).
+    """
     ctx = AnalysisContext(
         username=username,
         games=sorted(games, key=lambda g: (g.end_time, g.game_id)),  # ties: same order whatever the source order
         evals=evals or {},
         options=options or {},
     )
-    return build_report(ctx, run_modules(ctx, modules), filters=filters, engine_note=engine_note)
+    results = run_modules(ctx, modules)
+    coaching = build_coaching(ctx, results, coach) if coach is not None else None
+    report = build_report(ctx, results, filters=filters, engine_note=engine_note, coaching=coaching)
+    if coach is not None:
+        finish_coaching(report, coach)
+    if ctx.opt("format_views", True):
+        report.format_reports = build_format_views(
+            ctx, modules, filters=filters, engine_note=engine_note, coaching=report.coaching
+        )
+    return report

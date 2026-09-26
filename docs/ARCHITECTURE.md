@@ -10,11 +10,20 @@ chess.com PubAPI ──api.py──> raw game JSON (disk cache, one file per mon
                                    ▼
                   ┌──────── AnalysisContext (games, df, evals, options) ────────┐
                   │                                                              │
-      optional engine.py (Stockfish) ── evals: dict[game_id, GameEval] ──────────┤
+      optional engine.py (Stockfish): select_engine_games (recent | balanced)    │
+                  └──── evals: dict[game_id, GameEval] ──────────────────────────┤
+                                                                                 │
+   analysis/results openings time_mgmt endings habits engine_stats mistakes   (each: analyze(ctx) -> ModuleResult;
+                  │                                                            pictures from visuals.py)
+   optional coach.build_coaching (--coach): critical → deep → motifs/concepts → explain, sources, drills
                   │                                                              │
-   analysis/results openings time_mgmt endings habits engine_stats mistakes   (each: analyze(ctx) -> ModuleResult)
+   fill.py: formats + a fallback chart/board for every finding a module left bare  │
                   │                                                              │
                   └───── insights.py: rank + dedupe + grouped study plan + headline ─────┘
+                                   ▼
+                                Report ── coach.finish_coaching (progress, Maia, LLM) ──┐
+                                   │                                                    │
+                                   ├─ format_reports: the same pipeline per format (60+ games each)
                                    ▼
                                 Report ──report/html.py | markdown.py | json_export.py──> files
 ```
@@ -42,12 +51,35 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 * **Insight** — `severity` (effect size, 0..1) × `confidence` (statistical
   confidence, 0..1) = `priority`. Titles are plain language; `detail` carries the
   numbers; `study` holds concrete actions; `example_games` holds chess.com URLs.
+  `formats` is the number of games behind it per time class ("blitz only"); `chart`
+  (the numbers behind it, split by format where the data allows) and `diagram` (the
+  position it is about) are its picture. Modules set them where they know best;
+  `fill.py` fills the gaps (below).
+* **Chart / Diagram** — plain data, drawn by the renderers. A `Diagram` is a FEN plus
+  arrows (the move played red, the better move green, threats orange), marked squares and
+  optional `strips` (a line of play as a row of small boards). `visuals.py` builds both.
 * **Report** — every strength and weakness (ranked), the study plan (one `StudyItem`
   per cause, with the insight ids it covers, a target and a baseline), the headline
   lines, labels for the linked games, and every module's tables and charts. A `Chart`
   can carry its full `table` (shown under "Show the numbers" instead of listing the same
   numbers twice); a `Table` can name its `key_columns` (what a phone shows first).
+  `formats` / `engine_formats` count the games (and engine-analysed games) per time class;
+  `format_reports` holds one full Report per format with enough games (`time_class` set, no
+  views of its own); `coaching` holds the coaching layer's output (or None).
   Renderers only ever see a `Report`.
+* **Coaching** — explanations (`Explanation`: the position, both engine lines, motifs,
+  concept differences, text, board), drills, the review schedule, progress and notes on
+  what was skipped. It never creates or changes an Insight (the one exception, motif claims,
+  goes through `stats.significance` in `coach/profile.py`). Settings: `coach.CoachConfig`.
+
+## Per-format views
+
+`pipeline.run_analysis` runs the modules once on every game, then, when the games cover two or
+more formats, once more for each format with at least `MIN_FORMAT_GAMES` games, on that
+format's games and engine evals only. Each view is a full `Report` (`time_class` set, its own
+claims, study plan and engine note, no nested views). The coaching runs once, on all games;
+each view gets a copy with only its format's explanations. `options["format_views"] = False`
+skips the views.
 
 ## Statistical rules (apply everywhere)
 
@@ -89,6 +121,8 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 11. Word findings as associations ("you score worse after 11 pm"), not causes, and
    in the report's units: "+9 per 100 games vs your rating", pawns rather than
    centipawns.
+12. Say which formats a finding rests on (`Insight.formats`: games per time class), and give
+   it a picture of the numbers behind it. Neither may change what is claimed.
 
 ## Module ownership
 
@@ -107,11 +141,14 @@ All shared types live in `src/chess_insights/models.py`. Read it first.
 | `analysis/time_mgmt.py` | Time trouble, flagging, opening pace, clock balance at moves 20 and 30, think time by move number |
 | `analysis/endings.py` | How games end, game-length performance |
 | `analysis/habits.py` | Sessions, tilt after losses, fatigue, time of day |
-| `engine.py` | Stockfish analysis (parallel workers, disk cache), Lichess-style win%, accuracy, judgements, phases, tags |
+| `engine.py` | Which games Stockfish analyses (`select_engine_games`: most recent, or balanced across formats), Stockfish analysis (parallel workers, disk cache), Lichess-style win%, accuracy, judgements, phases, tags |
 | `analysis/engine_stats.py` | Accuracy, blunder rates, phase weaknesses, conversion, missed tactics, opening outcome |
 | `analysis/mistakes.py` | Repeated mistakes keyed by position (EPD), the costliest-puzzles table, and the `--puzzles` PGN export |
 | `insights.py` | Rank and dedupe insights; group weaknesses by cause into the study plan (easiest first, targets); the headline lines |
-| `pipeline.py` | Run everything, isolate module failures, build the `Report` |
+| `visuals.py` | Shared picture builders: format counts and wording ("blitz only"), comparison charts, split-by-format charts, boards with move arrows, strips of small boards for a line |
+| `fill.py` | Fallbacks run for every report: `fill_formats` (the games behind a finding per format: the format its evidence names, the games that reached its position, the games of its opening and colour when the evidence's own counts confirm them, else every game the module analysed) and `fill_visuals` (a chart from the finding's evidence, or the board for a position; nothing when no pattern fits) |
+| `pipeline.py` | Run everything, isolate module and coaching failures, build the `Report` and its per-format views (`MIN_FORMAT_GAMES` = 60) |
+| `coach/` | The coaching layer (`--coach`): `critical` (positions to explain), `deep` (deeper Stockfish lines, own cache), `motifs` (tactics along the lines, Lichess theme names), `concepts` (Stockfish 16 eval terms at the line ends, board facts), `sources/` (Lichess explorer, cloud eval, tablebase, chess-openings, Wikibooks; cached, optional), `openings_info`, `endgames`, `explain` (templates, boards), `profile` (motif profile; the motif claims), `drills` and `puzzles_db` (puzzle packs, review schedule), `puzzles` (the richer `--puzzles` PGN), `progress`, `maia`, `llm` and `ask` (the optional LLM coach and its verifier) |
 | `report/*` | HTML (one file, mobile-first, dark mode; self-contained apart from web fonts, with offline fallbacks), Markdown and JSON output |
-| `cli.py` | `chess-insights fetch / report / demo` |
+| `cli.py` | `chess-insights fetch / report / demo / puzzles-db / ask` |
 | `__main__.py` | `python -m chess_insights` |

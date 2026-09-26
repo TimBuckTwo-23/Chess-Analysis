@@ -537,6 +537,23 @@ def test_max_games_takes_the_most_recent_analysable_games(fake_engines):
     assert analyze_games([old, new], cfg_fake(), max_games=0) == {}
 
 
+def test_balanced_sample_replaces_a_game_that_does_not_replay(fake_engines, tmp_path):
+    """--engine-sample balanced: the same number of each format; an illegal game gives way to the next of its format."""
+    bullet = [make_game(moves_san=SICILIAN, time_class="bullet", minutes_ago=m) for m in (1, 2, 3, 4, 5, 6)]
+    rapid = [make_game(moves_san=SICILIAN, time_class="rapid", minutes_ago=m) for m in (100, 200, 300)]
+    broken = make_game(moves_san=ILLEGAL, time_class="rapid", minutes_ago=50)  # the newest rapid game
+    games = bullet + rapid + [broken]
+    res = analyze_games(games, cfg_fake(), cache_dir=tmp_path, max_games=4, sample="balanced")
+    by_id = {g.game_id: g for g in games}
+    assert sorted(by_id[i].time_class for i in res) == ["bullet", "bullet", "rapid", "rapid"]
+    assert broken.game_id not in res and {rapid[0].game_id, rapid[1].game_id} <= set(res)
+    assert list(res) == sorted(res, key=lambda i: by_id[i].end_time)  # oldest first, as before
+    recent = analyze_games(games, cfg_fake(), cache_dir=tmp_path, max_games=4)  # the default: bullet only
+    assert {by_id[i].time_class for i in recent} == {"bullet"}
+    only_rapid = analyze_games(games, cfg_fake(), cache_dir=tmp_path, max_games=4, time_classes=["rapid"])
+    assert set(only_rapid) == {g.game_id for g in rapid}
+
+
 def test_cache_is_keyed_by_engine_version(fake_engines, tmp_path):
     log, state = fake_engines
     game = make_game(moves_san=SICILIAN)

@@ -449,7 +449,7 @@ def test_engine_cache_goes_under_the_expanded_cache_dir(chesscom, run, tmp_path,
     monkeypatch.chdir(tmp_path)
     seen = {}
 
-    def fake_analyze(games, cfg, cache_dir=None, max_games=None, progress=None):
+    def fake_analyze(games, cfg, cache_dir=None, max_games=None, progress=None, time_classes=None, sample="recent"):
         seen["cache_dir"] = Path(cache_dir)
         return {}
 
@@ -468,7 +468,9 @@ def test_every_documented_command_and_option_parses():
     import shlex
 
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
-    commands = [m.strip() for m in re.findall(r"chess-insights ((?:fetch|report|demo)\b[^`#\n]*)", readme)]
+    commands = [
+        m.strip() for m in re.findall(r"chess-insights ((?:fetch|report|demo|puzzles-db|ask)\b[^`#\n]*)", readme)
+    ]
     options = re.findall(r"^\| `(--[^`]+|-v)` \|", readme, re.M)
     assert len(commands) >= 4 and len(options) >= 8
     parser = cli.build_parser()
@@ -689,3 +691,288 @@ def test_engine_games_accepts_all():
     args = cli.build_parser().parse_args(["report", "someone", "--engine-games", "all"])
     assert args.engine_games >= 10**9
     assert cli.build_parser().parse_args(["report", "someone", "--engine-games", "40"]).engine_games == 40
+
+
+# --------------------------------------------------------------------------- engine sample and coaching (C0-C4)
+@pytest.fixture
+def fake_engine(monkeypatch):
+    """Stockfish "found", analysis replaced: records what analyze_games was asked for; returns no evals."""
+    from chess_insights import engine
+
+    seen = {}
+
+    def fake_analyze(games, cfg, cache_dir=None, max_games=None, progress=None, time_classes=None, sample="recent"):
+        seen.update(time_classes=time_classes, sample=sample, max_games=max_games, depth=cfg.depth)
+        return {}
+
+    monkeypatch.setattr(engine, "find_stockfish", lambda explicit=None: "/opt/stockfish")
+    monkeypatch.setattr(engine, "analyze_games", fake_analyze)
+    monkeypatch.setattr(engine, "engine_name", lambda path: "Stockfish 16")
+    return seen
+
+
+@pytest.fixture
+def fake_coaching(monkeypatch):
+    """coach.build_coaching replaced: records the CoachConfig it gets."""
+    from chess_insights import coach
+    from chess_insights.models import Coaching
+
+    seen = []
+
+    def build(ctx, modules, cfg):
+        seen.append(cfg)
+        return Coaching(notes=["fake coaching ran"])
+
+    monkeypatch.setattr(coach, "build_coaching", build)
+    monkeypatch.setattr(coach, "finish_coaching", lambda report, cfg: report)
+    return seen
+
+
+def test_engine_sample_options_reach_the_engine(chesscom, run, tmp_path, fake_engine):
+    code, _, stderr = run("report", "testerbob", "--engine", "--engine-sample", "balanced", "--engine-time-class",
+                          "blitz,rapid", "--engine-games", "90", "--out", str(tmp_path / "e"), "--formats", "json")
+    assert code == 0, stderr
+    assert fake_engine == {"time_classes": ["blitz", "rapid"], "sample": "balanced", "max_games": 90, "depth": 12}
+    run("report", "testerbob", "--engine", "--out", str(tmp_path / "e"), "--formats", "json")
+    assert fake_engine["sample"] == "recent" and fake_engine["time_classes"] is None  # the defaults
+
+
+def test_engine_sample_choices_are_checked(run):
+    code, _, stderr = run("report", "someone", "--engine-sample", "random")
+    assert code == 2 and "balanced" in stderr
+    code, _, stderr = run("report", "someone", "--engine-time-class", "hyperbullet")
+    assert code == 2 and "unknown time class" in stderr
+
+
+def test_engine_note_names_the_formats_analysed():
+    from factories import make_game
+
+    games = ([make_game(time_class="bullet") for _ in range(4)] + [make_game(time_class="blitz") for _ in range(3)]
+             + [make_game(time_class="rapid") for _ in range(3)])
+    every = {g.game_id: None for g in games}
+    assert cli.describe_engine_sample("Stockfish 16", 12, games, every, "balanced") == (
+        "Stockfish 16 at depth 12 on 10 games: 4 bullet, 3 blitz, 3 rapid (most recent in each)."
+    )
+    assert cli.describe_engine_sample("Stockfish 16", 12, games, every) == (
+        "Stockfish 16 at depth 12 on the 10 most recent games: 4 bullet, 3 blitz, 3 rapid."
+    )
+    bullet_only = {g.game_id: None for g in games if g.time_class == "bullet"}
+    assert cli.describe_engine_sample("Stockfish 16", 10, games, bullet_only) == (
+        "Stockfish 16 at depth 10 on the 4 most recent games: all bullet."
+    )
+    slow = {g.game_id: None for g in games if g.time_class != "bullet"}
+    assert cli.describe_engine_sample("Stockfish 16", 12, games, slow, time_classes=["rapid", "blitz"]) == (
+        "Stockfish 16 at depth 12 on the 6 most recent blitz and rapid games: 3 blitz, 3 rapid."
+    )
+    assert "none of the selected games" in cli.describe_engine_sample("Stockfish 16", 12, games, {})
+    assert cli.describe_engine_sample("Stockfish 16", 12, games, bullet_only, "balanced") == (
+        "Stockfish 16 at depth 12 on 4 games: all bullet (the most recent; no other format to balance with)."
+    )
+
+
+def test_coach_flags_reach_the_coaching_config(chesscom, run, tmp_path, monkeypatch, fake_engine, fake_coaching):
+    monkeypatch.setenv("LICHESS_TOKEN", "lip_secret_token_123")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    db = tmp_path / "subset.csv"
+    db.write_text("PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n", encoding="utf-8")
+    out = tmp_path / "out" / "me"
+    out.parent.mkdir()
+    out.with_suffix(".json").write_text('{"username": "testerbob", "study_plan": []}', encoding="utf-8")
+    code, stdout, stderr = run(
+        "report", "testerbob", "--engine", "--workers", "3", "--coach", "--coach-depth", "18", "--coach-max", "40",
+        "--no-motif-profile", "--puzzle-db", str(db), "--drill-rating", "1300-1700", "--practice-minutes", "30",
+        "--coach-llm", "--llm-model", "claude-test", "--maia", "--out", str(out), "--formats", "json",
+    )
+    assert code == 0, stderr
+    [cfg] = fake_coaching
+    assert (cfg.depth, cfg.max_positions, cfg.profile, cfg.workers) == (18, 40, False, 3)
+    assert cfg.stockfish == "/opt/stockfish"
+    assert cfg.lichess_token == "lip_secret_token_123"
+    assert "lip_secret_token_123" not in stdout + stderr and "lip_secret_token_123" not in out.with_suffix(".json").read_text()
+    assert cfg.puzzle_db == db and cfg.drill_rating == (1300, 1700) and cfg.practice_minutes == 30
+    assert cfg.llm is False and cfg.anthropic_api_key is None and "ANTHROPIC_API_KEY" in stderr  # no key: a note
+    assert cfg.llm_model == "claude-test" and cfg.maia is True and cfg.offline is False
+    assert cfg.previous == {"username": "testerbob", "study_plan": []}  # read before the report replaced it
+    assert cfg.out_stem == out
+    cache = tmp_path / "cache"
+    assert cfg.cache_dir == cache / "testerbob" / "coach" and cfg.sources_cache == cache / "sources"
+    assert report_json(out)["coaching"]["notes"] == ["fake coaching ran"]
+    assert "Coaching: 0 positions explained." in stdout
+
+
+def test_coach_llm_with_a_key_and_offline(chesscom, run, tmp_path, monkeypatch, fake_engine, fake_coaching):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-456")
+    monkeypatch.delenv("LICHESS_TOKEN", raising=False)
+    out = tmp_path / "me"
+    code, _, _ = run("report", "testerbob", "--engine", "--coach", "--out", str(out), "--formats", "json")
+    assert code == 0
+    code, stdout, stderr = run("report", "testerbob", "--offline", "--engine", "--coach", "--coach-llm",
+                               "--lichess-token", "lip_given", "--out", str(out), "--formats", "json")
+    assert code == 0, stderr
+    first, second = fake_coaching
+    assert first.llm is False and first.anthropic_api_key is None and first.lichess_token is None
+    assert first.previous is None  # nothing at the output path yet
+    assert (first.depth, first.max_positions, first.profile) == (20, 150, True)  # the defaults
+    assert first.drill_rating == (1200, 1600) and first.practice_minutes == 20
+    assert second.llm is True and second.anthropic_api_key == "sk-ant-secret-456" and second.offline is True
+    assert second.lichess_token == "lip_given"
+    assert second.previous is not None and second.previous["username"].lower() == "testerbob"
+    assert "sk-ant-secret-456" not in stdout + stderr and "lip_given" not in stdout + stderr
+
+
+def test_coach_needs_the_engine(chesscom, run, tmp_path, fake_coaching):
+    code, _, stderr = run("report", "testerbob", "--coach", "--out", str(tmp_path / "c"), "--formats", "json")
+    assert code == 0 and "--coach needs --engine" in stderr
+    assert fake_coaching == [] and report_json(tmp_path / "c")["coaching"] is None
+
+
+def test_previous_that_is_missing_or_broken_is_a_warning(chesscom, run, tmp_path, fake_engine, fake_coaching):
+    broken = tmp_path / "old.json"
+    broken.write_text("{not json", encoding="utf-8")
+    for previous, message in ((tmp_path / "missing.json", "no previous report"), (broken, "could not read")):
+        code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--previous", str(previous),
+                              "--out", str(tmp_path / "p"), "--formats", "json")
+        assert code == 0 and message in stderr
+    assert [cfg.previous for cfg in fake_coaching] == [None, None]
+
+
+def test_the_default_puzzle_db_is_the_subset_in_the_cache(chesscom, run, tmp_path, fake_engine, fake_coaching):
+    from chess_insights.coach.puzzles_db import subset_path
+
+    subset = subset_path(tmp_path / "cache")
+    subset.parent.mkdir(parents=True)
+    subset.write_text("PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n", encoding="utf-8")
+    code, _, _ = run("report", "testerbob", "--engine", "--coach", "--out", str(tmp_path / "d"), "--formats", "json")
+    assert code == 0 and fake_coaching[0].puzzle_db == subset
+
+
+@pytest.mark.parametrize("text", ["1600-1200", "12-16", "abc", "1200"])
+def test_bad_drill_rating_is_a_usage_error(run, text):
+    code, _, stderr = run("report", "someone", "--drill-rating", text)
+    assert code == 2 and "--drill-rating" in stderr
+
+
+def test_puzzle_export_uses_the_coachings_lines(tmp_path, monkeypatch):
+    from chess_insights.coach import puzzles
+    from chess_insights.models import Coaching
+
+    calls = []
+    monkeypatch.setattr(puzzles, "puzzles_pgn", lambda events, coaching: calls.append(coaching) or "[Event \"x\"]\n")
+    path = cli.write_puzzles([], {}, tmp_path / "me", Coaching())
+    assert calls and path.name == "me-puzzles.pgn" and path.read_text(encoding="utf-8").startswith("[Event")
+
+    def broken(events, coaching):
+        raise RuntimeError("no lines")
+
+    monkeypatch.setattr(puzzles, "puzzles_pgn", broken)
+    assert cli.write_puzzles([], {}, tmp_path / "me.html", Coaching()).read_text(encoding="utf-8") == ""  # plain file
+    assert cli.write_puzzles([], {}, tmp_path / "plain", None).exists()
+
+
+def test_puzzles_db_command(run, tmp_path, monkeypatch):
+    from chess_insights.coach import puzzles_db
+
+    code, _, stderr = run("puzzles-db", "--cache-dir", str(tmp_path))
+    assert code == 1 and "error:" in stderr and "Traceback" not in stderr  # the stub on this branch
+
+    seen = {}
+
+    def fake_download(cache_dir, progress=None, **kw):
+        seen["cache_dir"] = cache_dir
+        path = puzzles_db.subset_path(cache_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("PuzzleId\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(puzzles_db, "download", fake_download)
+    code, _, stderr = run("puzzles-db", "--cache-dir", str(tmp_path))
+    assert code == 0 and seen["cache_dir"] == tmp_path and "wrote" in stderr
+
+    def offline(cache_dir, progress=None, **kw):
+        raise requests.ConnectionError("Name or service not known")
+
+    monkeypatch.setattr(puzzles_db, "download", offline)
+    code, _, stderr = run("puzzles-db", "--cache-dir", str(tmp_path))
+    assert code == 3 and "could not download" in stderr and "drills" in stderr
+
+
+def test_ask_answers_from_the_last_report(run, tmp_path, monkeypatch):
+    from chess_insights.coach import ask
+
+    monkeypatch.chdir(tmp_path)
+    code, _, stderr = run("ask", "testerbob", "why do I lose?")
+    assert code == 1 and "no report" in stderr and "reports" in stderr
+
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "testerbob.json").write_text('{"username": "TesterBob"}', encoding="utf-8")
+    code, _, stderr = run("ask", "TesterBob", "why do I lose?")
+    assert code == 1 and "not available" in stderr  # the stub on this branch
+
+    seen = {}
+
+    def fake_answer(question, report_json, cfg):
+        seen.update(question=question, report=report_json, cfg=cfg)
+        return "Because of 5...e5."
+
+    monkeypatch.setattr(ask, "answer", fake_answer)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    code, stdout, _ = run("ask", "testerbob", "why do I lose?", "--offline")
+    assert code == 0 and stdout.strip() == "Because of 5...e5."
+    assert seen["question"] == "why do I lose?" and seen["report"] == {"username": "TesterBob"}
+    assert seen["cfg"].llm is True and seen["cfg"].offline is True and "sk-ant-secret" not in stdout
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "me.json").write_text('{"username": "x"}', encoding="utf-8")
+    code, _, _ = run("ask", "testerbob", "and now?", "--out", str(tmp_path / "elsewhere" / "me"))
+    assert code == 0 and seen["report"] == {"username": "x"}
+
+
+def test_format_views_are_listed_in_the_summary(capsys):
+    from chess_insights.models import Report
+
+    report = Report(username="u", generated_at=datetime.now(timezone.utc), filters="", n_games=300, date_from=None,
+                    date_to=None, modules=[], strengths=[], weaknesses=[], study_plan=[],
+                    formats={"bullet": 20, "blitz": 180, "rapid": 100})
+    report.format_reports = {"blitz": report, "rapid": report}
+    cli.print_summary(report)
+    assert "Formats: 20 bullet, 180 blitz, 100 rapid. Separate views in the report: blitz, rapid." in capsys.readouterr().out
+
+
+def test_puzzle_db_may_be_the_folder_puzzles_db_wrote_to(chesscom, run, tmp_path, fake_engine, fake_coaching):
+    """The GitHub workflow keeps the database in its own cached folder and passes that folder."""
+    from chess_insights.coach.puzzles_db import subset_path
+
+    folder = tmp_path / "puzzle-cache"
+    folder.mkdir()
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--puzzle-db", str(folder),
+                          "--out", str(tmp_path / "f"), "--formats", "json")
+    assert code == 0 and "no puzzle file" in stderr and fake_coaching[-1].puzzle_db is None  # a failed download
+    subset = subset_path(folder)
+    subset.parent.mkdir(parents=True)
+    subset.write_text("PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n", encoding="utf-8")
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--puzzle-db", str(folder),
+                          "--out", str(tmp_path / "f"), "--formats", "json")
+    assert code == 0 and "no puzzle file" not in stderr and fake_coaching[-1].puzzle_db == subset
+
+
+def test_engine_time_classes_reach_the_analysis_options(chesscom, run, tmp_path, fake_engine, monkeypatch):
+    seen = {}
+    real = pipeline.run_analysis
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs["options"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "run_analysis", spy)
+    code, _, stderr = run("report", "testerbob", "--engine", "--engine-time-class", "blitz", "--engine-time-class",
+                          "rapid", "--out", str(tmp_path / "t"), "--formats", "json")
+    assert code == 0, stderr
+    assert seen["engine_time_classes"] == ["blitz", "rapid"] and seen["engine_sample"] == "recent"
+
+
+def test_ask_with_an_unreadable_report_says_so_once(run, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "testerbob.json").write_text("{half a report", encoding="utf-8")
+    code, _, stderr = run("ask", "testerbob", "why?")
+    assert code == 1 and "could not read the report" in stderr
+    assert "previous" not in stderr and "progress" not in stderr  # not the --previous wording

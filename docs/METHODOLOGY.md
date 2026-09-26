@@ -280,12 +280,59 @@ These are associations, not causes. "You score worse after 11 pm" might be
 tiredness, or it might be the different player pool at that hour. The tool
 controls for opponent rating, not for everything.
 
+### Per-format views: each carries its own budget
+
+When your games cover two or more formats, every format with at least 60 games
+(`pipeline.MIN_FORMAT_GAMES`) also gets a view of its own: the same analysis run on that
+format's games alone, with its own strengths, weaknesses and study plan. Below 60 games most
+tests could not say anything (they need 8 games per opening and colour, 25 per split), and the
+view would be mostly "not enough data".
+
+A view is a separate report: its claims are tested on that format's games only, with the
+same rule, thresholds and adjustments, and they are never added to the main report's lists.
+So each view carries its own false-claim budget. On the null world, measured on the views
+(24 reports of 1,200 games, 16 of 3,000; seeds 0 upward):
+
+| Null world | Main report | Bullet view | Blitz view | Rapid view | All views together |
+|---|---|---|---|---|---|
+| 1,200 games (views of about 180 / 730 / 300 games) | 0.17 | 0.08 | 0.17 | 0.29 | 0.54 |
+| 3,000 games (views of about 450 / 1,810 / 740 games) | 0.00 | 0.19 | 0.13 | 0.19 | 0.50 |
+
+Each view is about as reliable as a report of its size, but together they are three more
+chances to be wrong: across all three views of a report there is about half a false claim on
+average, where the main report has about 0.2. Read a finding that appears only in one view
+with that in mind. A finding in the main report and in a view is the same fact seen twice,
+not two pieces of evidence.
+
 ## 3. Engine analysis (optional)
 
-With `--engine`, Stockfish evaluates every position of your most recent games at a
+With `--engine`, Stockfish evaluates every position of a sample of your games at a
 fixed depth, and the tool applies **Lichess's published formulas** (ported from the
 open-source lila/scalachess code) so that numbers are comparable to what you see on
-Lichess:
+Lichess.
+
+**Which games** (`engine.select_engine_games`; the rest of the report always uses every game):
+
+* `--engine-games N`: how many (default 150; the GitHub workflow uses 300). Only standard
+  chess and Chess960 games of at least 10 moves count; a game whose moves don't replay is
+  skipped and replaced by the next one.
+* `--engine-sample recent` (the default on the command line): the N most recent games. A
+  player who has mostly played bullet lately gets engine sections about bullet (295 of the
+  300 in the report that prompted this option).
+* `--engine-sample balanced` (the default on GitHub): N split evenly between bullet, blitz
+  and rapid, the most recent of each; a format with too few games leaves its share to the
+  others, and an odd game goes to the slower format. Daily games only when listed with
+  `--engine-time-class`.
+* `--engine-time-class blitz,rapid`: only these formats.
+
+The report's engine note says what was analysed, e.g. "Stockfish 16 at depth 12 on 300
+games: 100 bullet, 100 blitz, 100 rapid (most recent in each)", and each format's view says
+how many of its own games were analysed. The engine findings compare you with your opponents
+in the same games, so a balanced sample changes what they describe (all your formats instead
+of your latest one) but not how they are tested. A balanced sample is less recent in the
+formats you play most, so an engine finding describes a longer stretch of your play there.
+
+The formulas:
 
 * **Win %** from centipawns: `50 + 50 · (2 / (1 + e^(−0.00368208 · cp)) − 1)`,
   with cp clamped to ±1000 and mates counted as ±1000.
@@ -390,3 +437,32 @@ games, 3.Bb5 40% in 40"), Stockfish's average evaluation after move 10 in a weak
 against other times, the phase of your first slip in the winning positions you did not
 win, and the share of endgame errors made short of time. They point the practice at the
 right place; they do not add findings.
+
+## 6. The coaching layer (`--coach`)
+
+The coaching layer (`chess_insights/coach/`, see docs/ARCHITECTURE.md) explains the report's
+findings and routes you to practice. It is study material, not evidence:
+
+* **It never adds, removes or changes a claim.** Every explanation points at a position or a
+  finding that is already in the report. The critical positions it explains are your
+  engine-flagged errors (a move losing 8 or more points of win chance), your repeated
+  mistakes and choice points in your main lines, costliest first, at most `--coach-max`.
+* **Explanations come from the engine's lines.** Each position is re-searched deeper
+  (`--coach-depth`, default 20) for the best line and the line that refutes your move;
+  the tactic (fork, pin, back rank ...) is named from those lines with Lichess's theme names;
+  positional terms are compared at the *ends* of the two lines, because right after a move
+  they can mislead (the move's immediate threat counts as a plus even when it loses).
+* **External facts carry their source** (the Lichess opening explorer, cloud evaluations and
+  tablebase, the chess-openings names, Wikibooks), are cached, and are optional: with
+  `--offline`, no token or a service down, the report says what it skipped.
+* **The one exception, motif claims** ("you miss forks more often than your opponents"), goes
+  through the same claim rule as everything else (`stats.significance` at the strict alpha,
+  Benjamini–Hochberg across motifs, the game as the unit) and must keep the null world's
+  false-claim rate at or below 0.3 per report.
+* **The LLM coach** (`--coach-llm`) only rewrites what the templates already say, from a packet
+  of the report's facts; any move it names must replay legally from the position along the
+  given lines, every number must be in the packet, and every finding it names must be a claim.
+  An explanation that fails keeps its template wording, and the number rejected is noted.
+* **Format views** get the explanations of their own format's positions; drills, the motif
+  profile and the review schedule stay with the main report (they are practice for every
+  format).

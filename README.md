@@ -26,6 +26,14 @@ What you get:
   move drawn on the board.
 * **Personal puzzles** (`--puzzles`): your costliest mistakes exported as a PGN.
   You can import it into a Lichess study.
+* **Bullet, blitz and rapid apart**: every finding says which formats it comes from
+  ("blitz only", "bullet, blitz and rapid"), and the report has a separate view for each
+  format you play often enough (60+ games), with its own findings, sections and study plan.
+* **Coaching** (`--coach`, with Stockfish): for your costliest and repeated mistakes, the
+  engine's refutation and better line drawn as boards, the tactic behind it (fork, pin,
+  back rank ...) and two or three plain sentences on why; puzzle packs for the tactics you
+  miss most, at your level; a review schedule; and, with a previous report, your progress
+  against its targets. It explains and routes to practice; it adds no claims of its own.
 
 Every insight is compared with a benchmark: what your rating predicts, your other
 games, or your opponents in the same games. Findings that could be chance are
@@ -46,6 +54,9 @@ The report is built to be read on a phone:
    first 15 moves (now 50%)"), and labelled example games ("Loss · 5+0 · vs 1512 · 12 Aug").
 4. **One section per topic**: a short summary, key numbers and findings; the charts and
    tables fold away under "Show …", and wide tables show their key columns first.
+5. **A picture for every finding**: a small chart of the numbers behind it (you against
+   the rating's expectation or against your opponents in the same games), and for a
+   position, the board with your move as a red arrow and the better move in green.
 
 ## Run it on GitHub (no install, works from a phone)
 
@@ -64,6 +75,26 @@ listed. You can edit it in the GitHub app too.
 GitHub's machines download your games and run Stockfish, and they remember what they
 already downloaded and analysed. A re-run a week later only fetches and analyses the
 new games.
+
+What a GitHub run includes by default (the options on the Run workflow form):
+
+* **An engine sample balanced across formats** (`engine_sample: balanced`): 300 games split
+  evenly between bullet, blitz and rapid, most recent in each, so the engine sections are not
+  all about your bullet. Choose `recent` for your latest games whatever the format.
+* **A view per format**: bullet, blitz and rapid each get their own findings and study plan
+  when you have enough games in them.
+* **Coaching** (`coach`, on by default; `coach_depth` 20, `coach_max` 150 positions): the
+  explained mistakes, puzzle drills (`<username>-drill-<theme>.pgn` next to the report, from
+  the Lichess puzzle database, downloaded once a month) and the review schedule. The previous
+  report on the `reports` branch is used for your progress and for the puzzles due for review.
+* **Two optional secrets** (Settings → Secrets and variables → Actions → New repository
+  secret). Neither is needed; without them the report says what it skipped:
+  * `LICHESS_TOKEN`: a [Lichess personal access token](https://lichess.org/account/oauth/token)
+    (no permissions needed) for the opening explorer: what masters and players a little
+    stronger than you play in the positions you get wrong.
+  * `ANTHROPIC_API_KEY`: lets Claude rewrite the explanations in plainer words and draft a
+    weekly plan. Every move and number it writes is checked against the engine's lines and the
+    report; anything that doesn't check out keeps the built-in wording.
 
 ## Quick start
 
@@ -111,8 +142,9 @@ when you are online and fall back to the phone's own fonts otherwise.
 strengths and weaknesses for openings and colour: the report only names what the games
 clearly show (docs/METHODOLOGY.md, section 2). Habits (after a loss, late at night) and
 clock problems show up much sooner. The sections, the positions you keep getting wrong
-and your own puzzles (with `--engine`) are useful from the start. To look at one format
-on its own, run a separate report, e.g. `--time-class blitz --out reports/me-blitz`.
+and your own puzzles (with `--engine`) are useful from the start. Each format you play
+60 times or more also gets its own view inside the report; to analyse only some formats,
+use e.g. `--time-class blitz,rapid`.
 
 The username is the name in your profile address, `chess.com/member/NAME`; pasting the
 whole profile URL works too. `--contact` puts your email in the User-Agent, which chess.com
@@ -142,7 +174,25 @@ that opens each position on a Lichess analysis board, and the study plan uses th
 By default this analyses your 150 most recent games at depth 12, running one Stockfish
 per CPU core except one (`--workers N` to change that). Stockfish evaluates every
 position once, about 65 positions for a typical game, so 150 games are roughly 10,000
-positions.
+positions. If your most recent games are nearly all bullet, add `--engine-sample balanced`
+to split the sample evenly between bullet, blitz and rapid.
+
+Add `--coach` to have the report explain your costliest and repeated mistakes and give you
+puzzle drills for the tactics you miss. It re-searches only those positions (at most 150,
+depth 20) and caches them, so it adds a few minutes the first time. The drills come from the
+Lichess puzzle database: download it once with
+
+```bash
+chess-insights puzzles-db
+```
+
+(it keeps a filtered subset in the cache folder; without it the drills link to Lichess's
+puzzle themes instead). With a report in hand you can ask follow-up questions, answered from
+that report and checked against it (needs `ANTHROPIC_API_KEY` and `pip install -e ".[llm]"`):
+
+```bash
+chess-insights ask YOUR_USERNAME "why do I lose with the Alapin?"
+```
 
 How long that takes, measured with Stockfish 16 at depth 12 on 6 real chess.com games
 (715 positions) on a shared 4-core cloud machine:
@@ -168,8 +218,22 @@ thousand games).
 | `--rated-only` | Skip casual games |
 | `--rules all` | Include variants (default: standard chess only; or e.g. `--rules chess,chess960`) |
 | `--tz America/New_York` | Your time zone (recommended): local time-of-day stats, the late-night check and the `--since`/`--until` day boundaries. Without it, times are shown in UTC and the late-night check is off. `--tz UTC` / `GMT` count as not given: use `Etc/UTC` if you really live in UTC, `Europe/London` for the UK |
-| `--engine-games 400` / `all` | How many of your most recent games Stockfish analyses (default 150) |
-| `--offline` | Use the local cache only |
+| `--engine-games 400` / `all` | How many games Stockfish analyses (default 150) |
+| `--engine-sample balanced` | Which games Stockfish analyses: `recent` (default: your latest, whatever the format) or `balanced` (the same number of bullet, blitz and rapid games, most recent in each; daily only with `--engine-time-class`) |
+| `--engine-time-class blitz,rapid` | Send only these formats to Stockfish; the rest of the report still uses every game |
+| `--coach` | With `--engine`: explain your costliest and repeated mistakes, puzzle drills for the tactics you miss, a review schedule |
+| `--coach-depth 20` | Stockfish depth for the positions the coaching explains (default 20) |
+| `--coach-max 150` | Explain at most this many positions, costliest first (default 150) |
+| `--no-motif-profile` | Skip the tactic profile over every error (you vs your opponents; saves a quick engine pass) |
+| `--lichess-token TOKEN` | Lichess personal access token for the opening explorer (default: the `LICHESS_TOKEN` environment variable; never printed) |
+| `--puzzle-db PATH` | The puzzle file for the drills, or the cache folder the `puzzles-db` command wrote it to (default: the subset in the cache folder) |
+| `--drill-rating 1200-1600` | Puzzle rating window for the drills (default 1200-1600) |
+| `--practice-minutes 20` | Minutes of practice a day the plan is sized for (default 20) |
+| `--coach-llm` | Claude rewrites the explanations and drafts a weekly plan, every move and number checked (needs `ANTHROPIC_API_KEY`) |
+| `--llm-model claude-opus-5-5` | The Claude model for `--coach-llm` |
+| `--maia` | How findable the better move was at your level (needs `pip install maia2`) |
+| `--previous reports/old.json` | The previous report, for progress against its targets and the puzzles due for review (default: the JSON report already at the output path, read before it is replaced) |
+| `--offline` | Use the local cache only (and, with `--coach`, no Lichess or Wikibooks requests) |
 | `--pgn games.pgn` | Analyse PGN files, a folder of them or a wildcard (`C:\games\*.pgn`) instead of the API; PGNs from other sites or over-the-board games work too |
 | `--json archive.json` | Analyse saved chess.com API responses (files, a folder or a wildcard) |
 | `--out reports/me --formats html,md` | Output location and formats: writes `reports/me.html` and `reports/me.md`; an existing folder (or a path ending in a slash) gets `<username>.html` … inside it |
@@ -177,7 +241,8 @@ thousand games).
 
 `chess-insights report --help` lists everything. Exit codes: `0` done, `1` no games to
 analyse (or the report or the game cache could not be written), `2` a usage mistake (unknown option value,
-unknown player, missing file or Stockfish), `3` chess.com could not be reached.
+unknown player, missing file or Stockfish), `3` chess.com (or, for `puzzles-db`, the Lichess database)
+could not be reached.
 
 ### Try it without an account
 
