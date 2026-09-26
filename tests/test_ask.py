@@ -84,3 +84,16 @@ def test_empty_question_and_empty_report():
     assert "Ask a question" in ask.answer("   ", {}, CoachConfig())
     client = FakeClient(RuntimeError("down"))
     assert "nothing more to go on" in ask.answer("Why?", {}, CoachConfig(), client=client)
+
+
+def test_a_damaged_report_gets_a_message_not_a_traceback():
+    out = ask.answer("Why?", {"study_plan": [{"title": "x", "baseline": 5}]}, CoachConfig())
+    assert "could not be read" in out
+    assert "could not be read" not in ask.answer("Why?", [], CoachConfig(), client=FakeClient(RuntimeError("down")))
+
+
+def test_an_answer_naming_a_format_nothing_is_about_falls_back(report_json):
+    text = "In bullet you keep playing 5...e5 in the Open Sicilian."
+    client = FakeClient(reply({"answer": text, "claim_ids": ["mistakes.weakness.sicilian-5-e5"], "epds": []}))
+    out = ask.answer("Why do I keep losing in the Open Sicilian?", report_json, CoachConfig(), client=client)
+    assert text not in out and out.startswith("I could not check")

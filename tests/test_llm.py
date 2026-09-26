@@ -38,6 +38,24 @@ def reply(data, stop_reason="end_turn"):
     )
 
 
+class FakeStream:
+    """``messages.stream(...)``: the request is made on entering, like the SDK's stream manager."""
+
+    def __init__(self, out):
+        self.out = out
+
+    def __enter__(self):
+        if isinstance(self.out, BaseException):
+            raise self.out
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self.out
+
+
 class FakeMessages:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -49,6 +67,13 @@ class FakeMessages:
         if isinstance(out, BaseException):
             raise out
         return out
+
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        out = self.responses.pop(0)
+        if isinstance(out, TypeError):  # an unknown keyword fails at the call, before any request
+            raise out
+        return FakeStream(out)
 
 
 class FakeClient:
@@ -136,6 +161,19 @@ def test_client_is_built_with_the_key_timeout_and_retries(monkeypatch):
     assert report.coaching.llm["model"] == "claude-test"
 
 
+def test_a_client_without_streaming_gets_a_plain_request():
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return reply({"explanations": [], "weekly_plan": []})
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    report = coaching_report()
+    llm.annotate(report, CoachConfig(llm=True), client=client)
+    assert len(calls) == 1 and report.coaching.llm["accepted"] == 0
+
+
 def test_older_sdk_without_output_config_gets_it_as_a_body_field():
     ok = reply({"explanations": [], "weekly_plan": []})
     client = FakeClient(TypeError("create() got an unexpected keyword argument 'output_config'"), ok)
@@ -159,10 +197,13 @@ def test_verified_texts_replace_templates_and_the_rest_keep_them():
         assert by_epd[epd(fen)].text_source == "template"
 
     llm_info = report.coaching.llm
-    assert (llm_info["model"], llm_info["accepted"], llm_info["rejected"]) == ("claude-opus-5-5", 1, 3)
+    assert (llm_info["model"], llm_info["sent"], llm_info["accepted"], llm_info["rejected"], llm_info["ignored"]) == (
+        "claude-opus-5-5", 3, 1, 2, 1)  # the text for a position it was not sent is ignored, not checked
     problems = {r["epd"]: " ".join(r["problems"]) for r in llm_info["rejections"]}
     assert "5.Qxh7" in problems[epd(QGA_4E4)] and "3.4" in problems[epd(SICILIAN_2NC6)]
-    assert any("1 of 3 explanations rewritten" in n and "3 failed the fact check" in n for n in report.coaching.notes)
+    (note,) = [n for n in report.coaching.notes if n.startswith("AI coach")]
+    assert "1 of the 3 explanations it was given reworded" in note
+    assert "2 failed the fact check and keep the built-in text" in note
 
     # the weekly plan keeps the study-plan item only
     assert [p.item for p in report.coaching.weekly_plan] == [plan_titles(report)[0]]
@@ -177,7 +218,8 @@ def test_a_second_text_for_the_same_position_is_ignored():
     report = coaching_report()
     data = {"explanations": [{"epd": epd(SICILIAN_5E5), "text": GOOD_SICILIAN, "claim_ids": []}] * 2, "weekly_plan": []}
     llm.annotate(report, CoachConfig(llm=True), client=FakeClient(reply(data)))
-    assert (report.coaching.llm["accepted"], report.coaching.llm["rejected"]) == (1, 1)
+    counts = report.coaching.llm
+    assert (counts["accepted"], counts["rejected"], counts["ignored"]) == (1, 0, 1)
 
 
 # --------------------------------------------------------------------------- failures keep the templates
@@ -218,7 +260,7 @@ FAKE_SDK_ERRORS = dict(
         (FakeRateLimitError("rate limited", 429), "rate-limiting this key after retrying (429)"),
         (FakeAuthenticationError("invalid x-api-key", 401), "API key was rejected (401)"),
         (FakeAPIStatusError("overloaded", 529), "API returned an error (529)"),
-        (FakeAPITimeoutError("timed out"), "timed out"),
+        (FakeAPITimeoutError("timed out"), "did not answer within 300 s"),
         (FakeAPIConnectionError("connection reset"), "could not be reached"),
     ],
 )
@@ -231,7 +273,7 @@ def test_api_errors_leave_the_templates(monkeypatch, error, words):
     llm.annotate(report, CoachConfig(llm=True))
     after = comparable(report)
     note = after["coaching"]["notes"].pop()
-    assert words in note and "keep their template text" in note
+    assert words in note and "keep their built-in text" in note
     assert after == before  # nothing else changed
 
 
@@ -353,3 +395,47 @@ def test_finish_coaching_runs_maia_then_the_llm(monkeypatch):
     finish_coaching(coaching_report(), CoachConfig(maia=True, llm=True))
     assert seen["order"][0] == epd(SICILIAN_2NC6)  # the LLM sees Maia's order
     assert len(calls) == 3
+
+
+# --------------------------------------------------------------------------- review fixes
+def test_the_note_says_how_many_explanations_were_not_sent():
+    import copy
+
+    report = coaching_report()
+    extra = []
+    for i in range(25):  # more positions than the coach is given
+        e = copy.deepcopy(report.coaching.explanations[0])
+        e.epd = f"{e.epd} #{i}"
+        extra.append(e)
+    report.coaching.explanations += extra
+    llm.annotate(report, CoachConfig(llm=True), client=FakeClient(reply({"explanations": [], "weekly_plan": []})))
+    (note,) = [n for n in report.coaching.notes if n.startswith("AI coach")]
+    assert "0 of the 20 explanations it was given reworded" in note
+    assert "the other 8 keep the built-in text (it is given at most 20 positions)" in note
+    assert report.coaching.llm["sent"] == 20
+
+
+def test_unexpected_errors_are_short_and_never_show_the_key():
+    key = "sk-ant-secret-123"
+    error = RuntimeError(f"request failed with header x-api-key: {key} " + "x" * 500)
+    report = coaching_report()
+    llm.annotate(report, CoachConfig(llm=True, anthropic_api_key=key), client=FakeClient(error))
+    note = report.coaching.notes[-1]
+    assert key not in note and "[key]" in note and len(note) < 320
+
+
+def test_rejected_texts_are_kept_short_for_the_record():
+    report = coaching_report()
+    long_text = "After 5...e5 you lose 7 pawns. " * 40
+    data = {"explanations": [{"epd": epd(SICILIAN_5E5), "text": long_text, "claim_ids": []}], "weekly_plan": []}
+    llm.annotate(report, CoachConfig(llm=True), client=FakeClient(reply(data)))
+    (rejection,) = report.coaching.llm["rejections"]
+    assert len(rejection["text"]) <= llm.MAX_REJECTED_CHARS
+
+
+def test_maia_keys_on_the_real_board_are_left_as_they_are():
+    black_to_move = SICILIAN_5E5
+    real = {"a7a6": 0.4, "e6e5": 0.3, "g8f6": 0.2}
+    assert maia.board_view(real, black_to_move) == real
+    flipped = {maia._mirror(k): v for k, v in real.items()}
+    assert maia.board_view(flipped, black_to_move) == real

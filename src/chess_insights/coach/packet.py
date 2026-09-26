@@ -7,8 +7,8 @@ build it from the last report on disk) and holds only what the report already es
   of each per-format view under ``format_claims``;
 * ``study_plan``: each item with its target and baseline;
 * ``positions``: up to ``MAX_POSITIONS`` explained positions (FEN, the move played, the engine's best line and
-  its refutation as numbered moves, evaluations in pawns, motifs, concept differences, opening and tablebase
-  facts with their sources, the format of the game).
+  its refutation as numbered moves, evaluations in pawns or mates from your side, motifs, concept differences,
+  opening and tablebase facts with their sources, the format of the game).
 
 ``verify`` checks the LLM's text against this same packet, so a fact that is not in it cannot reach the report.
 """
@@ -26,6 +26,7 @@ PACKET_VERSION = 1
 MAX_POSITIONS = 20
 MAX_LIST = 12  # longer evidence lists are cut to this many entries
 MAX_DEPTH = 5  # deeper evidence is left out
+MAX_TEXT = 1500  # characters of a quoted text (Wikibooks) kept
 TRAINING_URL = "https://lichess.org/training/{theme}"
 
 
@@ -119,15 +120,23 @@ def _pawns(cp: Any) -> Optional[float]:
 
 
 def _line(line: Optional[dict[str, Any]], fen: str) -> Optional[dict[str, Any]]:
-    """A Line (JSON) as {"moves", "eval_pawns", "mate_in"[, "fen"]}, from the side to move at the line's start."""
+    """A Line (JSON) as {"moves", "eval_pawns" | "mate_in"[, "fen", "depth"]}, from the side to move at the line's
+    start (you, for the lines of an explained position): eval_pawns below zero and mate_in below zero are bad for
+    you."""
     if not isinstance(line, dict):
         return None
     start = str(line.get("fen") or fen)
+    same = " ".join(start.split()[:4]) == " ".join(fen.split()[:4])
+    if same:  # the same position, maybe found from another game (other move counters): number it as this one
+        start = fen
     moves = numbered_moves(start, line.get("moves_uci"), line.get("moves_san"))
     if not moves:
         return None
-    out: dict[str, Any] = {"moves": moves, "eval_pawns": _pawns(line.get("cp_end")), "mate_in": line.get("mate_end")}
-    if " ".join(start.split()[:4]) != " ".join(fen.split()[:4]):
+    mate = line.get("mate_end")
+    # a mate is counted as MATE_CP centipawns in the engine's record: give the mate, not a made-up pawn count
+    out: dict[str, Any] = {"moves": moves, "eval_pawns": None if mate is not None else _pawns(line.get("cp_end")),
+                           "mate_in": mate}
+    if not same:
         out["fen"] = start
     if line.get("depth"):
         out["depth"] = line["depth"]
@@ -158,6 +167,15 @@ def _move_stats(stats: Any, fen: str) -> list[dict[str, Any]]:
     return out
 
 
+def _cut(text: str, limit: int = MAX_TEXT) -> str:
+    """``text`` cut to ``limit`` characters, at the end of a sentence when there is one."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    end = max(head.rfind(". "), head.rfind(".\n"))
+    return head[: end + 1] if end > limit // 2 else head.rsplit(" ", 1)[0] + " ..."
+
+
 def _sources(sources: Any) -> list[dict[str, Any]]:
     return [
         {k: s.get(k) for k in ("name", "url", "retrieved", "license") if s.get(k)}
@@ -179,7 +197,7 @@ def _opening(facts: Any, fen: str) -> Optional[dict[str, Any]]:
         "your_move_rank_peers": facts.get("played_rank_peers"),
         "master_game": facts.get("master_game") or "",
         "cloud_lines": [x for x in (_line(line, fen) for line in facts.get("cloud_lines") or []) if x],
-        "wiki_text": facts.get("wiki_text") or "",
+        "wiki_text": _cut(str(facts.get("wiki_text") or "")),
         "wiki_url": facts.get("wiki_url") or "",
         "sources": _sources(facts.get("sources")),
     }

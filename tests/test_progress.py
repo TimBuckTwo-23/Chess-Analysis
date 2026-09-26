@@ -42,7 +42,9 @@ def test_progress_lines_compare_the_same_metric():
     [
         ("share of the clock used on the first 15 moves (blitz)", 0.38, 0.5, "38% → 50%", False),
         ("score vs rating in the Sicilian Defense (black), per game", -0.16, -0.04,
-         "−16 per 100 games → −4 per 100 games", True),
+         "score vs rating in the Sicilian Defense (black): −16 → −4 per 100 games", True),
+        ("losses on time minus wins on time per game (blitz)", 0.05, 0.02,
+         "losses on time minus wins on time (blitz): +5 → +2 per 100 games", True),
         ("blunders per 100 moves", 3.2, 2.5, "3.2 → 2.5", True),
         ("share of winning positions converted", 0.65, 0.7, "65% → 70%", True),
         ("engine eval after move 10 in the Caro-Kann Defense (centipawns)", -80, -30, "−0.8 → −0.3", True),

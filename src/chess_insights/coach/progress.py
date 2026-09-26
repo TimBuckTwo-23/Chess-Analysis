@@ -61,9 +61,14 @@ def format_value(metric: str, value: float, whole: Optional[bool] = None) -> str
     return f"{value:.2f}".replace("-", MINUS)
 
 
-def _label(metric: str) -> str:
-    """The metric as shown: evaluations in pawns, not centipawns."""
-    return re.sub(r"\s*\(centipawns\)", " (pawns)", str(metric))
+PER_100 = " per 100 games"
+
+
+def _label(metric: str, per_100: bool = False) -> str:
+    """The metric as shown: evaluations in pawns, not centipawns; "per game" left out when the numbers say "per
+    100 games"."""
+    label = re.sub(r"\s*\(centipawns\)", " (pawns)", str(metric))
+    return re.sub(r",?\s+per game\b", "", label) if per_100 else label
 
 
 def _key(metric: Any) -> str:
@@ -81,8 +86,11 @@ def compare(metric: str, before: float, now: float) -> ProgressItem:
     a, b = format_value(metric, before, whole), format_value(metric, now, whole)
     d = direction(metric)
     improved = None if d is None or a == b else (now - before) * d > 0
-    return ProgressItem(title="", metric=metric, before=before, now=now, text=f"{_label(metric)}: {a} → {b}",
-                        improved=improved)
+    if a.endswith(PER_100) and b.endswith(PER_100):  # the unit once: "−16 → −4 per 100 games"
+        text = f"{_label(metric, True)}: {a[: -len(PER_100)]} → {b}"
+    else:
+        text = f"{_label(metric)}: {a} → {b}"
+    return ProgressItem(title="", metric=metric, before=before, now=now, text=text, improved=improved)
 
 
 def annotate(report: Report, cfg: CoachConfig) -> None:

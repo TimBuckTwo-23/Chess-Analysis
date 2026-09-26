@@ -117,10 +117,22 @@ def move_ucis(exp: Explanation) -> tuple[Optional[str], Optional[str]]:
     return best or _uci(board, exp.best), played or _uci(board, exp.played)
 
 
+def board_view(probs: dict[str, float], fen: str) -> dict[str, float]:
+    """``probs`` keyed by moves on the real board. A predictor that answers from the side to move's view (Black's
+    moves flipped, a7a5 given as a2a4) is recognised by its keys: fewer of them are legal as they stand than
+    flipped."""
+    try:
+        board = chess.Board(fen)
+    except ValueError:
+        return dict(probs)
+    legal = {m.uci() for m in board.legal_moves}
+    as_is = sum(1 for k in probs if k in legal)
+    flipped = sum(1 for k in probs if _mirror(k) in legal)
+    return {_mirror(k): v for k, v in probs.items()} if flipped > as_is else dict(probs)
+
+
 def _probability(probs: dict[str, float], uci: str) -> float:
-    if uci in probs:
-        return float(probs[uci])
-    return float(probs.get(_mirror(uci), 0.0))
+    return float(probs.get(uci, 0.0))
 
 
 def maia2_predictor() -> Optional[Predictor]:
@@ -171,7 +183,7 @@ def annotate(report: Report, cfg: CoachConfig, predictor: Optional[Predictor] = 
             continue
         lichess, source = lichess_rating(rating, exp.time_class, cfg)
         try:
-            probs = predictor(exp.fen, lichess, model_type)
+            probs = board_view(predictor(exp.fen, lichess, model_type), exp.fen)
         except Exception as exc:  # noqa: BLE001 — one position failing must not stop the rest
             failures += 1
             last_error = f"{type(exc).__name__}: {exc}"

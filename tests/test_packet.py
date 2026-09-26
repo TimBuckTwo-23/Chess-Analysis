@@ -279,3 +279,20 @@ def test_numbered_moves_replay_and_stop_at_an_illegal_move():
 
 def test_user_ratings_skip_variant_pools():
     assert user_ratings(coaching_report()) == {"bullet": 650, "blitz": 949, "rapid": 1130}
+
+
+def test_long_quoted_texts_are_cut_at_a_sentence():
+    report = coaching_report()
+    qga = report.coaching.explanations[1]
+    qga.opening.wiki_text = "The Queen's Gambit Accepted gives up the centre for a pawn. " * 60
+    wiki = position_index(build_packet(report))[epd(QGA_4E4)]["opening"]["wiki_text"]
+    assert len(wiki) <= packet_mod.MAX_TEXT and wiki.endswith(".")
+
+
+def test_a_line_found_from_another_game_is_numbered_as_this_position():
+    report = coaching_report()
+    exp = report.coaching.explanations[0]
+    other_game = SICILIAN_5E5.replace(" 0 5", " 0 12")  # the same position, other move counters
+    exp.refutation.fen = other_game
+    p = position_index(build_packet(report))[epd(SICILIAN_5E5)]
+    assert p["refutation"]["moves"][:2] == ["5...e5", "6.Ndb5"] and "fen" not in p["refutation"]
