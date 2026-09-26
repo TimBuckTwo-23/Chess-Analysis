@@ -16,6 +16,10 @@ Every comparison is against the Elo expected score of each game, never a raw 50%
 * the rating history, the recent rating trend (an observation: a rating random walk
   is not evidence of a strength) and chess.com Game Review accuracies.
 
+Every finding also carries the formats behind it (``Insight.formats``) and a small chart of its
+numbers, split into bullet / blitz / rapid where there are enough games (``split_chart``), so the
+report can say whether it holds in each format. Pictures never change which findings are made.
+
 Claims follow the project-wide rule ``stats.significance``: colour at ``stats.ALPHA``,
 opponent strength and time controls (exploratory scans) at ``stats.STRICT_ALPHA``.
 
@@ -27,14 +31,16 @@ other analysis modules.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar
 
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Game, Insight, InsightKind, Kpi, ModuleResult, Series, Table
+from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, comparison_chart, format_counts, ordered_formats, split_by_format
 from ..stats import (  # noqa: F401  (ScoreSummary, summarize, difference_test, with_p_value: re-exported)
     ALPHA,
     ATTENUATION_RANGE,
@@ -59,6 +65,8 @@ from ..stats import (  # noqa: F401  (ScoreSummary, summarize, difference_test, 
     with_p_value,
 )
 
+log = logging.getLogger(__name__)
+
 KEY = "results"
 TITLE = "Results & rating"
 
@@ -67,6 +75,8 @@ MAX_EXAMPLES = 5
 TREND_DAYS = 90
 TREND_FLAT = 15.0  # rating points over TREND_DAYS below which the rating counts as stable
 MAX_RATING_KPIS = 3
+MAX_CHART_LABELS = 6  # a finding's chart stays small enough for a phone
+TREND_POINTS = 6  # points on a finding's rating-trend line
 
 # (key, label) of the opponent-strength buckets, by opponent rating minus yours.
 OPPONENT_BUCKETS: tuple[tuple[str, str], ...] = (
@@ -122,6 +132,107 @@ def recent_urls(games: Iterable[Game], outcome: Optional[str] = None, limit: int
         (g for g in games if outcome is None or g.outcome == outcome), key=lambda g: g.end_time, reverse=True
     )
     return [g.url for g in picked if g.url][:limit]
+
+
+# --------------------------------------------------------------------------- pictures for findings (shared)
+T = TypeVar("T")
+Metric = Callable[[list[Game]], Optional[float]]
+
+
+def safe_visual(build: Callable[[], T], what: str) -> Optional[T]:
+    """``build()``, or None (with a warning) if it fails: a picture must never cost the module its findings."""
+    try:
+        return build()
+    except Exception as exc:  # noqa: BLE001 — pictures are optional, the findings are not
+        log.warning("could not draw %s: %s: %s", what, type(exc).__name__, exc)
+        return None
+
+
+def format_note(counts: dict[str, int], unit: str = "games") -> str:
+    """'Bullet 210 · Blitz 88 games': which formats a chart or table covers, and how many games of each."""
+    parts = [f"{FORMAT_NAMES.get(tc, tc.capitalize())} {n}" for tc, n in ordered_formats(counts).items()]
+    return f"{' · '.join(parts)} {unit}" if parts else ""
+
+
+def score_delta(games: Sequence[Game], attenuate: bool | float = False) -> Optional[float]:
+    """Score minus the rating's prediction per game (``ScoreSummary.delta``); None without rated games."""
+    return summarize(games, attenuate=attenuate).delta if games else None
+
+
+def with_ratings(games: Iterable[Game]) -> list[Game]:
+    """The games a score-vs-rating test uses: those with both ratings (``ScoreSummary.n_rated``)."""
+    return [g for g in games if g.expected_score is not None]
+
+
+def split_series(
+    series: Sequence[tuple[str, Sequence[Game], Metric]],
+    *,
+    min_games: int = MIN_FORMAT_GAMES,
+    overall: str = "All formats",
+) -> tuple[list[str], list[tuple[str, list[Optional[float]]]], list[list[int]]]:
+    """Each series' metric over all its games and then per format, on shared labels.
+
+    Labels: ``overall`` first (all the series' games; when they are all one format it is named after it
+    instead), then every format in which at least one series has ``min_games`` games
+    (``visuals.split_by_format``), at most ``MAX_CHART_LABELS`` in all. A series with fewer games in a
+    format gets None there. Returns (labels, [(name, values)], [games behind each value, per series]).
+    """
+    everything = [g for _, gs, _ in series for g in gs]
+    formats = format_counts(everything)
+    names = {FORMAT_NAMES.get(tc, tc): tc for tc in formats}
+    splits = [split_by_format(list(gs), metric, min_games) for _, gs, metric in series]
+    shown = [name for name in names if len(formats) > 1 and any(name in labels for labels, _, _ in splits)]
+    first = next(iter(names)) if len(formats) == 1 else overall
+    labels = [first, *shown][:MAX_CHART_LABELS]
+    values: list[tuple[str, list[Optional[float]]]] = []
+    counts: list[list[int]] = []
+    for (name, gs, metric), (split_labels, split_values, _) in zip(series, splits, strict=True):
+        by_label = dict(zip(split_labels, split_values, strict=True))
+        values.append((name, [metric(list(gs)) if gs else None, *(by_label.get(label) for label in labels[1:])]))
+        counts.append([len(gs), *(sum(1 for g in gs if g.time_class == names[label]) for label in labels[1:])])
+    return labels, values, counts
+
+
+def split_chart(
+    title: str,
+    series: Sequence[tuple[str, Sequence[Game], Metric]],
+    *,
+    value_format: str,
+    value_name: str,
+    note: str = "",
+    reference: Optional[float] = None,
+    min_games: int = MIN_FORMAT_GAMES,
+) -> Chart:
+    """A finding's chart: each series over all its games, then per format (``split_series``).
+
+    The table under it ("Show the numbers") has the games behind every bar, so a thin format is easy to spot:
+    one "Games" column when every series is measured over the same games (abandoned games, draw rate), else a
+    games column per series.
+    """
+    labels, values, counts = split_series(series, min_games=min_games)
+    columns, formats = ["Format"], ["text"]
+    if all(gs is series[0][1] for _, gs, _ in series):  # the same games behind every series
+        columns += ["Games", *(name for name, _ in values)]
+        formats += ["int", *([value_format] * len(values))]
+        rows = [[label, counts[0][i], *(vals[i] for _, vals in values)] for i, label in enumerate(labels)]
+        key_columns = [0, *range(2, len(columns))]
+    else:
+        for name, _ in values:
+            columns += [f"{name}: games", f"{name}: {value_name}"]
+            formats += ["int", value_format]
+        rows = [
+            [label, *(cell for (_, vals), ns in zip(values, counts, strict=True) for cell in (ns[i], vals[i]))]
+            for i, label in enumerate(labels)
+        ]
+        key_columns = [0, *(2 + 2 * i for i in range(len(values)))]
+    table = Table(title=title, columns=columns, rows=rows, formats=formats, key_columns=key_columns)
+    played = format_counts(g for _, gs, _ in series for g in gs)
+    thin = len(labels) - 1 < len(played) or any(n < min_games for ns in counts for n in ns[1:])
+    if len(played) > 1 and thin:
+        note += f" A format with fewer than {min_games} games gets no bar of its own."
+    return comparison_chart(
+        title, labels, values, value_format=value_format, reference=reference, note=note.strip(), table=table
+    )
 
 
 # --------------------------------------------------------------------------- rating pools
@@ -200,6 +311,9 @@ class Trend:
     last: int
     test: MeanTest  # score - expected over the window
     games: list[Game]
+    since: Optional[datetime] = None  # start of the window
+    intercept: Optional[float] = None  # the fitted line's rating at ``since``
+    days: int = TREND_DAYS
 
 
 def rating_trend(
@@ -224,6 +338,41 @@ def rating_trend(
         last=int(window[-1].my_rating),  # type: ignore[arg-type]
         test=summarize(window).test,
         games=window,
+        since=since,
+        intercept=my - slope * mx,
+        days=days,
+    )
+
+
+def trend_chart(trend: Trend, points: int = TREND_POINTS) -> Chart:
+    """The trend window as a small line: your rating at evenly spaced dates, and the straight line fitted through it.
+
+    The first point is your rating before the window's first game and the last your current rating
+    (the two numbers in the finding's title); the fitted line rises or falls by the finding's "straight line" figure.
+    """
+    since = trend.since or trend.games[0].end_time
+    step = trend.days / (points - 1)
+    slope = trend.change / trend.days
+    intercept = trend.intercept if trend.intercept is not None else float(trend.first)
+    labels, actual, fitted = [], [], []
+    for k in range(points):
+        at = since + timedelta(days=k * step)
+        played = [g for g in trend.games if g.end_time <= at]
+        rating = trend.last if k == points - 1 else (played[-1].my_rating if played else trend.first)
+        labels.append(f"{at.day} {at:%b}")
+        actual.append(float(rating))  # type: ignore[arg-type]
+        fitted.append(round(intercept + slope * k * step, 1))
+    name = trend.pool.split(" ")[0].lower()
+    return comparison_chart(
+        f"Your {trend.pool.lower()} rating over the last {trend.days} days",
+        labels,
+        [("Your rating", actual), ("Straight line through your games", fitted)],
+        value_format="rating",
+        kind="line",
+        note=(
+            f"{name.capitalize()} only: {trend.n} rated games. Your rating on each date, and the straight line that "
+            f"fits all those games best ({fmt_signed(trend.change)} over {trend.days} days)."
+        ),
     )
 
 
@@ -293,21 +442,81 @@ def rating_chart(by_pool: dict[str, list[Game]], min_games: int) -> Optional[Cha
     )
 
 
-def delta_chart(summaries: dict[str, ScoreSummary], min_games: int) -> Optional[Chart]:
+def delta_chart(
+    summaries: dict[str, ScoreSummary], min_games: int, overall: Optional[ScoreSummary] = None
+) -> Optional[Chart]:
+    """Score vs rating per time control with ``min_games`` rated games, after all formats together (``overall``)."""
     pools = [p for p, s in summaries.items() if s.n_rated >= min_games]
     if not pools:
         return None
+    labels, values = list(pools), [summaries[p].delta for p in pools]
+    if overall is not None and len(summaries) > 1 and overall.n_rated:
+        labels.insert(0, "All formats")
+        values.insert(0, overall.delta)
+    all_note = "; All formats = every rated game, each against its own time control's rating"
     return Chart(
         kind="bar",
         title="Score vs rating by time control",
-        labels=pools,
-        series=[Series("Score vs rating", [summaries[p].delta for p in pools])],
+        labels=labels,
+        series=[Series("Score vs rating", values)],
         value_format="signed_pct",
         note=(
             "Per game, against each time control's own rating expectation "
-            f"(time controls with {min_games}+ rated games)."
+            f"(time controls with {min_games}+ rated games: "
+            f"{' · '.join(f'{p} {summaries[p].n_rated}' for p in pools)} rated games)"
+            f"{all_note if len(labels) > len(pools) else ''}."
         ),
         reference=0.0,
+    )
+
+
+def opponent_bucket_chart(buckets: dict[str, list[Game]], deltas: Sequence[Optional[float]]) -> Chart:
+    """Score vs the noise-allowing expectation per opponent-strength group: all formats, then one series per format.
+
+    A format gets a series when it has ``MIN_FORMAT_GAMES`` games with ratings; a group with fewer than that many
+    of its games is left empty. The table under the chart has every format's games and numbers per group.
+    """
+    labels = [label for _, label in OPPONENT_BUCKETS]
+    counts = format_counts(g for key in buckets for g in buckets[key])
+    formats = [tc for tc, n in counts.items() if n >= MIN_FORMAT_GAMES] if len(counts) > 1 else []
+    series = [Series("All formats" if formats else "Score vs rating", list(deltas))]
+    columns, value_formats = ["Opponent vs you"], ["text"]
+    cells: list[list[Any]] = [[label] for label in labels]
+    for tc in formats:
+        name = FORMAT_NAMES.get(tc, tc.capitalize())
+        values: list[Optional[float]] = []
+        for i, (key, _) in enumerate(OPPONENT_BUCKETS):
+            games = [g for g in buckets[key] if g.time_class == tc]
+            s = summarize(games, attenuate=True)
+            delta = s.delta if s.n_rated >= MIN_FORMAT_GAMES else None  # a few games say little: left empty
+            values.append(delta)
+            cells[i] += [s.n_rated, delta]
+        series.append(Series(name, values))
+        columns += [f"{name}: games", f"{name}: vs rating"]
+        value_formats += ["int", "signed_pct"]
+    note = "Opponent rating minus yours. Empty bars are buckets without games."
+    if formats:
+        note = (
+            f"Opponent rating minus yours; one colour per format. {format_note(counts)} with ratings. A format's bar "
+            f"(and its number in the table) is left empty below {MIN_FORMAT_GAMES} games in that group."
+        )
+    return Chart(
+        kind="bar",
+        title="Score vs realistic expectation by opponent strength",
+        labels=labels,
+        series=series,
+        value_format="signed_pct",
+        note=note,
+        reference=0.0,
+        table=Table(
+            title="By opponent strength and format",
+            columns=columns,
+            rows=cells,
+            formats=value_formats,
+            key_columns=[0, *range(2, len(columns), 2)],
+        )
+        if formats
+        else None,
     )
 
 
@@ -343,6 +552,25 @@ def _colour_study(colour: str, games: Sequence[Game], flagged: Iterable[str] = (
             "so you keep the first-move edge."
         )
     return study
+
+
+def colour_chart(games: Sequence[Game]) -> Chart:
+    """Score vs rating with White and with Black, over all your games with ratings and per format."""
+    rated = with_ratings(games)
+    white = [g for g in rated if g.color == "white"]
+    black = [g for g in rated if g.color == "black"]
+    return split_chart(
+        "Score vs rating with White and Black",
+        [("White", white, score_delta), ("Black", black, score_delta)],
+        value_format="signed_pct",
+        value_name="vs rating",
+        reference=0.0,
+        note=(
+            "Your score minus what your rating predicts, per game (+5% = 5 points per 100 games above it). The "
+            "prediction ignores colour: White normally scores about 2 points per 100 games above it and Black about "
+            f"2 below. {format_note(format_counts(rated), 'games with ratings')}."
+        ),
+    )
 
 
 def colour_tests(white: ScoreSummary, black: ScoreSummary) -> dict[str, MeanTest]:
@@ -434,30 +662,30 @@ def colour_insight(
             f" Without your games in {'that opening' if len(explained_by) == 1 else 'those openings'}, the gap is "
             "within the normal range (see Openings)."
         )
-    return (
-        Insight(
-            id=f"{KEY}.{kind}.colour-{weaker}",
-            kind=kind,
-            category="color",
-            title=title,
-            detail=detail,
-            severity=severity_from_points(shrink_effect(excess, central.se)),
-            confidence=confidence,
-            evidence={
-                "weaker": weaker,
-                "white": _evidence(white),
-                "black": _evidence(black),
-                "excess_gap": excess,
-                "white_edge": WHITE_EDGE,
-                "white_edge_range": list(WHITE_EDGE_RANGE),
-                "p_value": deciding.p_value,
-                "explained_by": [f"{c}:{fam}" for c, fam in explained_by] if explained else [],
-            },
-            study=_colour_study(weaker, colour_games, {fam for c, fam, k in opening_claims if c == weaker}),
-            example_games=recent_urls(colour_games, "loss"),
-        ),
-        central,
+    insight = Insight(
+        id=f"{KEY}.{kind}.colour-{weaker}",
+        kind=kind,
+        category="color",
+        title=title,
+        detail=detail,
+        severity=severity_from_points(shrink_effect(excess, central.se)),
+        confidence=confidence,
+        evidence={
+            "weaker": weaker,
+            "white": _evidence(white),
+            "black": _evidence(black),
+            "excess_gap": excess,
+            "white_edge": WHITE_EDGE,
+            "white_edge_range": list(WHITE_EDGE_RANGE),
+            "p_value": deciding.p_value,
+            "explained_by": [f"{c}:{fam}" for c, fam in explained_by] if explained else [],
+        },
+        study=_colour_study(weaker, colour_games, {fam for c, fam, k in opening_claims if c == weaker}),
+        example_games=recent_urls(colour_games, "loss"),
+        formats=format_counts(with_ratings(games)),
     )
+    insight.chart = safe_visual(lambda: colour_chart(games), "the colour chart")
+    return insight, central
 
 
 def _evidence(s: ScoreSummary, **extra: Any) -> dict[str, Any]:
@@ -512,6 +740,25 @@ _OPPONENT_TEXT = {
         ],
     ),
 }
+
+
+def opponent_chart(key: str, group: Sequence[Game], rated: Sequence[Game], attenuation: float) -> Chart:
+    """Score vs the noise-allowing expectation against lower- (or higher-) rated opponents and in your other games."""
+    ids = {id(g) for g in group}
+    rest = [g for g in rated if id(g) not in ids]
+    side = "below" if key == "lower" else "above"
+    metric: Metric = lambda gs: score_delta(gs, attenuate=attenuation)  # noqa: E731
+    return split_chart(
+        f"Score vs rating against {key}-rated opponents",
+        [(f"Opponents rated 50+ {side} you", group, metric), ("Your other games", rest, metric)],
+        value_format="signed_pct",
+        value_name="vs rating",
+        reference=0.0,
+        note=(
+            "Your score minus what the rating gap predicts once rating noise is allowed for, per game (+5% = 5 points "
+            f"per 100 games above it). {format_note(format_counts(rated))} with ratings."
+        ),
+    )
 
 
 def opponent_insights(games: Sequence[Game], th: Thresholds) -> tuple[list[Insight], dict[str, Any]]:
@@ -577,36 +824,39 @@ def opponent_insights(games: Sequence[Game], th: Thresholds) -> tuple[list[Insig
             )
             examples = [g.url for g in wins if g.url][:MAX_EXAMPLES]
         se = max(t_att.se, t_raw.se)
-        out.append(
-            Insight(
-                id=f"{KEY}.{kind}.{key}-rated-opponents",
-                kind=kind,
-                category="opponents",
-                title=title,
-                detail=(
-                    f"Against opponents rated more than 50 points {side} you, you score {pct(s.rated_score)} in "
-                    f"{s.n_rated} games where about {pct(s.expected)} would be normal for the rating gap "
-                    f"({per100_games(s.test.mean)}); in your other games {per100_games(r.test.mean)}. "
-                    f"The gap is {per100(t_att.mean)} points per 100 games ({per100(t_raw.mean)} against the plain "
-                    "Elo formula), so it holds whatever allowance is made for rating noise."
-                ),
-                severity=severity_from_points(shrink_effect(effect, se)),
-                confidence=min(conf_att, conf_raw),
-                evidence=_evidence(
-                    s,
-                    rest_delta=r.test.mean,
-                    rest_n=r.n_rated,
-                    gap=t_att.mean,
-                    p_adjusted=adjusted["attenuated"][key],
-                    expected_kind="attenuated",
-                    elo_expected=summaries[key]["plain"].expected,
-                    elo_gap=t_raw.mean,
-                    elo_p_adjusted=adjusted["plain"][key],
-                ),
-                study=[a.format(k=k) for a in study],
-                example_games=examples,
-            )
+        ins = Insight(
+            id=f"{KEY}.{kind}.{key}-rated-opponents",
+            kind=kind,
+            category="opponents",
+            title=title,
+            detail=(
+                f"Against opponents rated more than 50 points {side} you, you score {pct(s.rated_score)} in "
+                f"{s.n_rated} games where about {pct(s.expected)} would be normal for the rating gap "
+                f"({per100_games(s.test.mean)}); in your other games {per100_games(r.test.mean)}. "
+                f"The gap is {per100(t_att.mean)} points per 100 games ({per100(t_raw.mean)} against the plain "
+                "Elo formula), so it holds whatever allowance is made for rating noise."
+            ),
+            severity=severity_from_points(shrink_effect(effect, se)),
+            confidence=min(conf_att, conf_raw),
+            evidence=_evidence(
+                s,
+                rest_delta=r.test.mean,
+                rest_n=r.n_rated,
+                gap=t_att.mean,
+                p_adjusted=adjusted["attenuated"][key],
+                expected_kind="attenuated",
+                elo_expected=summaries[key]["plain"].expected,
+                elo_gap=t_raw.mean,
+                elo_p_adjusted=adjusted["plain"][key],
+            ),
+            study=[a.format(k=k) for a in study],
+            example_games=examples,
+            formats=format_counts(rated),
         )
+        ins.chart = safe_visual(
+            lambda: opponent_chart(key, groups[key], rated, ends["attenuated"]), "an opponent-strength chart"
+        )
+        out.append(ins)
     stats = {
         k: _evidence(
             summaries[k]["attenuated"],
@@ -684,35 +934,33 @@ def time_control_insights(
     }
     severity = severity_from_points(shrink_effect(test.mean, test.se))
     if test.mean > 0:
-        return [
-            Insight(
-                id=f"{KEY}.strength.time-control-{slugify(pool)}",
-                kind="strength",
-                category="results",
-                title=f"You outperform your {name} rating more than your other ratings",
-                detail=detail,
-                severity=severity,
-                confidence=confidence,
-                evidence=evidence,
-                study=[
-                    f"Your {name} results are running ahead of your {name} rating: keep playing {name} and "
-                    "expect the rating to follow.",
-                    f"Compare two {name} wins with two losses from your other time controls: how did you use "
-                    "your clock, and where did the losses turn?",
-                ],
-                example_games=recent_urls(by_pool[pool], "win"),
-            )
-        ], stats
-    fast = by_pool[pool][0].time_class in ("bullet", "blitz")
-    study = [
-        f"Replay your last {min(MAX_EXAMPLES, s.losses) or 'few'} {name} losses and note whether they "
-        "were lost on the clock, to a blunder, or in the opening.",
-        f"Play fewer {name} games for a while, or treat them as practice and review every loss.",
-    ]
-    if fast:
-        study.append("Add increment (for example 3+2 instead of 3+0) so you can finish games without scrambling.")
-    return [
-        Insight(
+        claim = Insight(
+            id=f"{KEY}.strength.time-control-{slugify(pool)}",
+            kind="strength",
+            category="results",
+            title=f"You outperform your {name} rating more than your other ratings",
+            detail=detail,
+            severity=severity,
+            confidence=confidence,
+            evidence=evidence,
+            study=[
+                f"Your {name} results are running ahead of your {name} rating: keep playing {name} and "
+                "expect the rating to follow.",
+                f"Compare two {name} wins with two losses from your other time controls: how did you use "
+                "your clock, and where did the losses turn?",
+            ],
+            example_games=recent_urls(by_pool[pool], "win"),
+        )
+    else:
+        fast = by_pool[pool][0].time_class in ("bullet", "blitz")
+        study = [
+            f"Replay your last {min(MAX_EXAMPLES, s.losses) or 'few'} {name} losses and note whether they "
+            "were lost on the clock, to a blunder, or in the opening.",
+            f"Play fewer {name} games for a while, or treat them as practice and review every loss.",
+        ]
+        if fast:
+            study.append("Add increment (for example 3+2 instead of 3+0) so you can finish games without scrambling.")
+        claim = Insight(
             id=f"{KEY}.weakness.time-control-{slugify(pool)}",
             kind="weakness",
             category="results",
@@ -724,7 +972,38 @@ def time_control_insights(
             study=study,
             example_games=recent_urls(by_pool[pool], "loss"),
         )
-    ], stats
+    claim.formats = format_counts(with_ratings(g for p in pools for g in by_pool[p]))
+    claim.chart = safe_visual(lambda: time_control_chart(pool, pools, summaries, rest), "the time-control chart")
+    return [claim], stats
+
+
+def time_control_chart(
+    pool: str, pools: Sequence[str], summaries: dict[str, ScoreSummary], rest: ScoreSummary
+) -> Chart:
+    """Your score and your rating's prediction in the time control that stands out and in your other time controls."""
+    others = [p for p in pools if p != pool]
+    rows: list[tuple[str, ScoreSummary]] = [(p, summaries[p]) for p in [pool, *others]]
+    if len(others) > 1:
+        rows.append(("Other time controls", rest))
+    rows = rows[:MAX_CHART_LABELS]
+    table = Table(
+        title="Score by time control",
+        columns=["Time control", "Rated games", "Score", "Rating predicts", "vs rating"],
+        rows=[[label, s.n_rated, s.rated_score, s.expected, s.delta] for label, s in rows],
+        formats=["text", "int", "pct", "pct", "signed_pct"],
+        key_columns=[0, 2, 3],
+    )
+    return comparison_chart(
+        f"{pool}: your score against your rating's prediction",
+        [label for label, _ in rows],
+        [("You", [s.rated_score for _, s in rows]), ("Rating predicts", [s.expected for _, s in rows])],
+        value_format="pct",
+        note=(
+            "Rated games only; each time control is measured against its own rating. "
+            f"{' · '.join(f'{p} {summaries[p].n_rated}' for p in pools)} rated games."
+        ),
+        table=table,
+    )
 
 
 def trend_insight(trend: Trend, th: Thresholds) -> Insight:
@@ -768,7 +1047,7 @@ def trend_insight(trend: Trend, th: Thresholds) -> Insight:
             "Spend five minutes on every loss right after the game before starting another.",
         ]
         examples = recent_urls(trend.games, "loss")
-    return Insight(
+    insight = Insight(
         id=f"{KEY}.observation.trend-{slugify(trend.pool)}",
         kind="observation",
         category="results",
@@ -788,7 +1067,10 @@ def trend_insight(trend: Trend, th: Thresholds) -> Insight:
         },
         study=study,
         example_games=examples,
+        formats=format_counts(trend.games),
     )
+    insight.chart = safe_visual(lambda: trend_chart(trend), "the rating-trend chart")
+    return insight
 
 
 def _avg(values: Iterable[Optional[float]]) -> Optional[float]:
@@ -865,8 +1147,55 @@ def accuracy_section(
             "In each reviewed loss, find the first move marked as a mistake or blunder and write down what you missed.",
         ],
         example_games=[g.url for g in worst if g.url][:MAX_EXAMPLES],
+        formats=format_counts(reviewed),
     )
+    insight.chart = safe_visual(lambda: accuracy_chart(by_pool, reviewed), "the accuracy chart")
     return table, insight, stats
+
+
+def accuracy_chart(by_pool: dict[str, list[Game]], reviewed: Sequence[Game]) -> Chart:
+    """chess.com Game Review accuracy over every reviewed game and per time control: all, in wins, in losses.
+
+    A time control gets bars of its own with ``MIN_FORMAT_GAMES`` reviewed games (a handful of reviewed games
+    says little); the table under the chart lists every time control.
+    """
+    pools = [(pool, [g for g in games if g.my_accuracy is not None]) for pool, games in by_pool.items()]
+    pools = [(pool, rev) for pool, rev in pools if rev]
+    groups = ([("All formats", list(reviewed))] if len(pools) > 1 else []) + pools
+    shown = [(label, gs) for label, gs in groups if label == "All formats" or len(gs) >= MIN_FORMAT_GAMES]
+    shown = (shown if len(pools) > 1 else groups)[:MAX_CHART_LABELS]
+
+    def avg(gs: Sequence[Game], outcome: Optional[str] = None, field: str = "my_accuracy") -> Optional[float]:
+        return _avg(getattr(g, field) for g in gs if outcome is None or g.outcome == outcome)
+
+    table = Table(
+        title="chess.com Game Review accuracy",
+        columns=["Time control", "Reviewed games", "Your accuracy", "In wins", "In losses", "Opponents"],
+        rows=[
+            [label, len(gs), avg(gs), avg(gs, "win"), avg(gs, "loss"), avg(gs, field="opp_accuracy")]
+            for label, gs in groups
+        ],
+        formats=["text", "int", "float1", "float1", "float1", "float1"],
+        key_columns=[0, 2, 3, 4],
+    )
+    note = (
+        "Average accuracy (0-100) in the games you ran Game Review on, which may not be typical. "
+        f"{' · '.join(f'{label} {len(gs)}' for label, gs in pools)} reviewed games."
+    )
+    if len(shown) < len(groups):
+        note += f" A time control with fewer than {MIN_FORMAT_GAMES} reviewed games gets no bars of its own."
+    return comparison_chart(
+        "Your chess.com Game Review accuracy",
+        [label for label, _ in shown],
+        [
+            ("All reviewed games", [avg(gs) for _, gs in shown]),
+            ("In wins", [avg(gs, "win") for _, gs in shown]),
+            ("In losses", [avg(gs, "loss") for _, gs in shown]),
+        ],
+        value_format="float1",
+        note=note,
+        table=table,
+    )
 
 
 # --------------------------------------------------------------------------- module entry point
@@ -885,7 +1214,12 @@ def _kpis(
     trends: Optional[dict[str, Trend]] = None,
 ) -> list[Kpi]:
     kpis = [
-        Kpi("Games", overall.n, "int", hint=f"{games[0].end_time:%Y-%m} to {games[-1].end_time:%Y-%m}"),
+        Kpi(
+            "Games",
+            overall.n,
+            "int",
+            hint=f"{games[0].end_time:%Y-%m} to {games[-1].end_time:%Y-%m}; {format_note(format_counts(games))}",
+        ),
         Kpi("Win / draw / loss", f"{overall.wins} / {overall.draws} / {overall.losses}", "text"),
         Kpi("Score", overall.score, "pct", hint="wins + half the draws"),
         Kpi("Rating predicts", overall.expected, "pct", hint="the Elo expected score for your games"),
@@ -966,13 +1300,16 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     insights: list[Insight] = []
     tables: list[Table] = [time_control_table(by_pool, pool_summaries)]
     charts: list[Chart] = [
-        c for c in (rating_chart(by_pool, th.min_chart_games), delta_chart(pool_summaries, th.min_chart_games)) if c
+        c
+        for c in (rating_chart(by_pool, th.min_chart_games), delta_chart(pool_summaries, th.min_chart_games, overall))
+        if c
     ]
 
     # colour
     white_games = [g for g in games if g.color == "white"]
     black_games = [g for g in games if g.color == "black"]
     white, black = summarize(white_games), summarize(black_games)
+    played = format_counts(games)
     tables.append(
         Table(
             title="By colour",
@@ -983,10 +1320,14 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             ],
             formats=["text", "int", "text", *_SCORE_FORMATS],
             note=(
-                "The rating's prediction ignores colour: White typically scores about 2% above it and Black about 2% below."
+                "The rating's prediction ignores colour: White typically scores about 2% above it and Black about 2% "
+                f"below. {format_note(played)}"
+                + (", all formats together; the colour chart splits them by format." if len(played) > 1 else ".")
             ),
         )
     )
+    if overall.n_rated and (chart := safe_visual(lambda: colour_chart(games), "the colour chart")):
+        charts.append(chart)
     colour, colour_test = colour_insight(games, white, black, th, _opening_claims(ctx, games))
     if colour:
         insights.append(colour)
@@ -1004,6 +1345,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         deltas.append(att.delta)
         bucket_stats[key] = _evidence(att, elo_expected=raw.expected)
     no_diff = sum(1 for g in games if g.rating_diff is None)
+    with_diff = format_counts(g for key in buckets for g in buckets[key])
     tables.append(
         Table(
             title="By opponent strength",
@@ -1015,21 +1357,15 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                 "the Elo formula against weaker players and above it against stronger ones; Predicted allows for "
                 "that, and vs rating is measured against it."
                 + (f" {no_diff} game(s) without ratings are not included." if no_diff else "")
+                + (f" {format_note(with_diff)}, all formats together." if len(with_diff) > 1 else "")
             ),
         )
     )
     if any(d is not None for d in deltas):
-        charts.append(
-            Chart(
-                kind="bar",
-                title="Score vs realistic expectation by opponent strength",
-                labels=[label for _, label in OPPONENT_BUCKETS],
-                series=[Series("Score vs rating", deltas)],
-                value_format="signed_pct",
-                note="Opponent rating minus yours. Empty bars are buckets without games.",
-                reference=0.0,
-            )
-        )
+        chart = safe_visual(lambda: opponent_bucket_chart(buckets, deltas), "the opponent-strength chart")
+        charts.append(chart or Chart("bar", "Score vs realistic expectation by opponent strength",
+                                     [label for _, label in OPPONENT_BUCKETS], [Series("Score vs rating", deltas)],
+                                     "signed_pct", reference=0.0))
     opp_insights, opp_stats = opponent_insights(games, th)
     insights.extend(opp_insights)
 

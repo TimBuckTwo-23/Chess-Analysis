@@ -287,7 +287,9 @@ def test_time_control_that_stands_out_is_one_claim():
     assert [i.id for i in worst] == ["results.weakness.time-control-blitz"]
     assert any("increment" in s for s in worst[0].study)
     bar = next(c for c in mr.charts if c.title == "Score vs rating by time control")
-    assert bar.labels == ["Blitz", "Rapid"] and bar.series[0].values == pytest.approx([14 / 40 - 0.5, 0.25])
+    # every rated game first (each against its own pool's rating), then one bar per time control
+    assert bar.labels == ["All formats", "Blitz", "Rapid"]
+    assert bar.series[0].values == pytest.approx([(14 / 40 - 0.5 + 0.25) / 2, 14 / 40 - 0.5, 0.25])
 
 
 def test_single_time_control_or_small_samples_make_no_comparison():

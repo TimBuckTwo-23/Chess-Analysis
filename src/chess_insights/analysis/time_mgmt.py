@@ -19,6 +19,10 @@ matter, so the strict level costs little. Every flag is also time trouble, so wh
 on time is a finding, time trouble is only a second one if it still holds with the games
 you lost on time left out.
 
+Every finding names the time class(es) it is about (``Insight.formats``) and carries a chart
+with one bar per time class, so you can see whether the habit is specific to one format; a
+finding about losing on time also shows the final position of a recent game you lost on time.
+
 ``time_spent`` is the shared definition of the seconds spent on one ply
 (``engine.py`` computes the same thing independently).
 """
@@ -29,7 +33,7 @@ import dataclasses
 import math
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from ..context import AnalysisContext
 from ..models import TIME_CLASSES, Chart, Color, Game, Insight, Kpi, ModuleResult, Series, Table
@@ -47,7 +51,9 @@ from ..stats import (
     significance,
     summarize,
 )
-from .results import MAX_EXAMPLES
+from ..visuals import comparison_chart, ordered_formats
+from .endings import first_diagram
+from .results import MAX_CHART_LABELS, MAX_EXAMPLES, format_note, safe_visual
 
 KEY = "time"
 TITLE = "Clock & time management"
@@ -681,6 +687,7 @@ def pace_table(classes: Sequence[ClassStats]) -> Table:
         columns=columns,
         rows=rows,
         formats=["text", "int", "pct", "pct"] + ["int", "pct"] * len(CHECKPOINTS),
+        key_columns=[0, 2, 3, 5],  # a phone shows the clock shares and "behind at move 20", not the game counts
         note=(
             f"Clock used = share of the starting time spent on the first {OPENING_MOVES} moves (increments "
             "included), in games where both players got that far. Behind = you had less time left than your "
@@ -699,6 +706,13 @@ def think_table(time_class: str, profile: Sequence[tuple[str, Optional[float], O
     )
 
 
+def _games_note(
+    classes: Sequence[ClassStats], count: Optional[Callable[[ClassStats], int]] = None, unit: str = "games with clocks"
+) -> str:
+    """'Bullet 40 · Blitz 120 games with clocks' (``count(cs)`` games per class; default all its games)."""
+    return format_note({cs.time_class: (count(cs) if count else cs.n) for cs in classes}, unit)
+
+
 def trouble_chart(classes: Sequence[ClassStats]) -> Chart:
     return Chart(
         kind="bar",
@@ -709,7 +723,31 @@ def trouble_chart(classes: Sequence[ClassStats]) -> Chart:
             Series("Opponents", [cs.opp_trouble_rate for cs in classes]),
         ],
         value_format="pct",
-        note="Share of games in which each side's clock fell below 10% of the starting time (at least 5 s).",
+        note=(
+            "Share of games in which each side's clock fell below 10% of the starting time (at least 5 s). "
+            f"{_games_note(classes)}."
+        ),
+    )
+
+
+def pace_chart(classes: Sequence[ClassStats]) -> Optional[Chart]:
+    """Share of the starting clock you and your opponents used on the first moves, per time class."""
+    shown = [cs for cs in classes if cs.opening_n]
+    if not shown:
+        return None
+    return Chart(
+        kind="bar",
+        title=f"Clock used on the first {OPENING_MOVES} moves",
+        labels=[cs.time_class.capitalize() for cs in shown],
+        series=[
+            Series("You", [cs.my_opening for cs in shown]),
+            Series("Opponents", [cs.opp_opening for cs in shown]),
+        ],
+        value_format="pct",
+        note=(
+            f"Share of the starting time each side spent on its first {OPENING_MOVES} moves, in games where both got "
+            f"that far ({_games_note(shown, lambda cs: cs.opening_n, 'games')})."
+        ),
     )
 
 
@@ -722,6 +760,155 @@ def think_chart(time_class: str, profile: Sequence[tuple[str, Optional[float], O
         value_format="seconds",
         note="By move number. Later buckets only include games that lasted that long.",
     )
+
+
+# --------------------------------------------------------------------------- pictures for findings
+_HABITS = ("time-trouble", "lost-on-time", "slow-opening", "clock-handling")
+
+
+def finding_classes(ins: Insight) -> list[str]:
+    """Time classes a clock finding is about (several once ``merge_across_classes`` has joined them)."""
+    ev = ins.evidence
+    return list(ev.get("time_classes") or ([ev["time_class"]] if ev.get("time_class") else []))
+
+
+def _habit(ins: Insight) -> str:
+    """'time-trouble' for ``time.weakness.time-trouble-blitz-rapid`` ('' for an unknown finding)."""
+    name = ins.id.split(".", 2)[-1]
+    return next((h for h in _HABITS if name.startswith(f"{h}-")), "")
+
+
+def _format_order(classes: Sequence[ClassStats]) -> list[ClassStats]:
+    rank = {tc: i for i, tc in enumerate(ordered_formats({cs.time_class: cs.n for cs in classes}))}
+    return sorted(classes, key=lambda cs: rank[cs.time_class])[:MAX_CHART_LABELS]
+
+
+def balance_table(classes: Sequence[ClassStats]) -> Table:
+    cps = [(cs, cs.checkpoints[CHECKPOINTS[0]]) for cs in classes]
+    move = CHECKPOINTS[0]
+    return Table(
+        title=f"Clock balance at move {move}",
+        columns=[
+            "Time control",
+            f"Games to move {move}",
+            "Ahead",
+            "Behind",
+            "Average lead",
+            "Won on time",
+            "Lost on time",
+        ],
+        rows=[
+            [
+                cs.time_class.capitalize(),
+                cp.n,
+                cp.ahead_rate,
+                cp.behind_rate,
+                cp.test.mean if cp.n else None,
+                cs.won_on_time,
+                cs.lost_on_time,
+            ]
+            for cs, cp in cps
+        ],
+        formats=["text", "int", "pct", "pct", "signed_pct", "int", "int"],
+        key_columns=[0, 2, 5, 6],
+        note="Average lead = your clock minus your opponent's at that move, as a share of the starting time.",
+    )
+
+
+def finding_chart(ins: Insight, classes: Sequence[ClassStats]) -> Optional[Chart]:
+    """One bar per time class for a clock finding: you against your opponents in the same games (or on-time results).
+
+    Every time class with enough games is shown, so you can see whether the habit is specific to the format(s) the
+    finding is about; the note names them.
+    """
+    habit, about = _habit(ins), finding_classes(ins)
+    shown = _format_order(classes)
+    if habit == "slow-opening":
+        shown = [cs for cs in shown if cs.opening_n]
+    elif habit == "clock-handling":
+        shown = [cs for cs in shown if cs.checkpoints[CHECKPOINTS[0]].n]
+    if not habit or not shown:
+        return None
+    labels = [cs.time_class.capitalize() for cs in shown]
+    names = f"{', '.join(about[:-1])} and {about[-1]}" if len(about) > 1 else "".join(about)
+    lead = f"This finding is about {names}; the other bars are for comparison. " if len(shown) > len(about) else ""
+    if habit == "time-trouble":
+        return comparison_chart(
+            "Games in time trouble: you and your opponents",
+            labels,
+            [("You", [cs.trouble_rate for cs in shown]), ("Opponents", [cs.opp_trouble_rate for cs in shown])],
+            value_format="pct",
+            kind="bar",
+            note=(
+                f"{lead}Share of games in which your clock (or your opponent's, in the same games) fell below 10% of "
+                f"the starting time, at least 5 s, or ran out. {_games_note(shown)}."
+            ),
+            table=trouble_table(shown),
+        )
+    if habit == "lost-on-time":
+        return comparison_chart(
+            "Games lost and won on time",
+            labels,
+            [("Lost on time", [cs.lost_on_time for cs in shown]), ("Won on time", [cs.won_on_time for cs in shown])],
+            value_format="int",
+            kind="bar",
+            note=f"{lead}Games decided by a flag, in each time control. {_games_note(shown)}.",
+            table=flag_table(shown),
+        )
+    if habit == "slow-opening":
+        return comparison_chart(
+            f"Clock used on your first {OPENING_MOVES} moves",
+            labels,
+            [("You", [cs.my_opening for cs in shown]), ("Opponents", [cs.opp_opening for cs in shown])],
+            value_format="pct",
+            kind="bar",
+            note=(
+                f"{lead}Share of the starting time each side spent on its first {OPENING_MOVES} moves, in games "
+                f"where both got that far ({_games_note(shown, lambda cs: cs.opening_n, 'games')})."
+            ),
+            table=pace_table(shown),
+        )
+    move = CHECKPOINTS[0]
+    return comparison_chart(
+        f"Ahead or behind on the clock at move {move}",
+        labels,
+        [
+            ("You ahead", [cs.checkpoints[move].ahead_rate for cs in shown]),
+            ("You behind", [cs.checkpoints[move].behind_rate for cs in shown]),
+        ],
+        value_format="pct",
+        kind="bar",
+        note=(
+            f"{lead}Share of games in which you had more (or less) time left than your opponent after each of you "
+            f"made {move} moves ({_games_note(shown, lambda cs: cs.checkpoints[move].n, 'games')})."
+        ),
+        table=balance_table(shown),
+    )
+
+
+def _finding_games(ins: Insight, cs: ClassStats) -> int:
+    """Games behind a clock finding in one time class (the games its test used, as counted in its text)."""
+    habit = _habit(ins)
+    if habit == "slow-opening":
+        return cs.opening_n  # games that reached move OPENING_MOVES
+    if habit == "clock-handling":
+        return cs.checkpoints[CHECKPOINTS[0]].n  # games in which both players made CHECKPOINTS[0] moves
+    return cs.n
+
+
+def add_visuals(insights: Sequence[Insight], classes: Sequence[ClassStats]) -> None:
+    """Set each clock finding's formats, chart and (for losses on time) a board of a recent game lost on time."""
+    by_class = {cs.time_class: cs for cs in classes}
+    for ins in insights:
+        about = [by_class[tc] for tc in finding_classes(ins) if tc in by_class]
+        ins.formats = ordered_formats({cs.time_class: _finding_games(ins, cs) for cs in about})
+        ins.chart = safe_visual(lambda: finding_chart(ins, classes), f"the chart for {ins.id}")
+        if _habit(ins) == "lost-on-time":
+            flagged = [g for cs in about for g in cs.games if g.outcome == "loss" and g.termination == "timeout"]
+            ins.diagram = safe_visual(
+                lambda: first_diagram(flagged, ins.example_games, "A recent game you lost on time"),
+                f"the board for {ins.id}",
+            )
 
 
 # --------------------------------------------------------------------------- module entry point
@@ -753,7 +940,7 @@ def _kpis(main: ClassStats) -> list[Kpi]:
     cp = main.checkpoints[CHECKPOINTS[0]]
     if cp.n:
         kpis.append(
-            Kpi(f"Behind on the clock at move {cp.move}", cp.behind_rate, "pct", hint=f"{cp.n} {tc} games")
+            Kpi(f"Behind on the clock at move {cp.move} ({tc})", cp.behind_rate, "pct", hint=f"{cp.n} {tc} games")
         )
     return kpis
 
@@ -838,11 +1025,18 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         )
         insights.extend(ins for ins in found if ins)
     insights = merge_across_classes(insights, TIME_CLASSES)
+    add_visuals(insights, classes)
 
     main = classes[0]
     profile = think_profile(main.clocks)
-    tables = [trouble_table(classes), flag_table(classes), pace_table(classes)]
+    tables = [trouble_table(classes), flag_table(classes)]
     charts = [trouble_chart(classes)]
+    pace = safe_visual(lambda: pace_chart(classes), "the opening-pace chart")
+    if pace is not None:
+        pace.table = pace_table(classes)
+        charts.append(pace)
+    else:
+        tables.append(pace_table(classes))
     if any(row[1] is not None for row in profile):
         chart = think_chart(main.time_class, profile)
         chart.table = think_table(main.time_class, profile)
