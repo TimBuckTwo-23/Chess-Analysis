@@ -2,4 +2,4 @@
 #   magnuscarlsen Europe/Oslo
 # Saving a change to this file on main runs the "report" workflow for everyone listed
 # (Actions -> report). Lines starting with # are ignored.
-BigMuffEater
+BigMuffEater America/New_York

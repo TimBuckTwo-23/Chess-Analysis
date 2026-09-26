@@ -1,14 +1,16 @@
-"""Command line entry point: ``chess-insights fetch | report | demo``.
+"""Command line entry point: ``chess-insights fetch | report | demo | puzzles-db | ask``.
 
-Exit codes: 0 success; 1 nothing to analyse (no games, no games in the filter window) or the
-report / game cache could not be written; 2 usage error (bad option, unknown chess.com player,
-missing input file or Stockfish); 3 chess.com could not be reached or refused the request; 130 Ctrl+C.
+Exit codes: 0 success; 1 nothing to analyse (no games, no games in the filter window), the
+report / game cache could not be written, or no earlier report to answer from (``ask``); 2 usage
+error (bad option, unknown chess.com player, missing input file or Stockfish); 3 chess.com (or, for
+``puzzles-db``, database.lichess.org) could not be reached or refused the request; 130 Ctrl+C.
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import json
 import logging
 import multiprocessing
 import os
@@ -25,6 +27,15 @@ from typing import Iterable, Optional, Sequence
 
 from . import __version__
 from .dataset import describe_filters, filter_games
+from .coach.config import (
+    DEFAULT_COACH_DEPTH,
+    DEFAULT_COACH_MAX,
+    DEFAULT_DRILL_RATING,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_PRACTICE_MINUTES,
+    CoachConfig,
+)
+from .engine import ENGINE_SAMPLES
 from .fetch import (
     DEFAULT_CACHE_DIR,
     GameStore,
@@ -36,7 +47,7 @@ from .fetch import (
     safe_file_stem,
     sync,
 )
-from .models import TIME_CLASSES, Game, Report
+from .models import TIME_CLASSES, Coaching, Game, Report
 from .parse import parse_games, parse_games_from_pgns, parse_pgn_headers, split_pgn
 
 EXIT_NO_GAMES = 1
@@ -209,6 +220,20 @@ def _formats(text: str) -> tuple[str, ...]:
     return formats
 
 
+_RATING_RANGE_RE = re.compile(r"^\s*(\d{3,4})\s*[-:]\s*(\d{3,4})\s*$")
+
+
+def _drill_rating(text: str) -> tuple[int, int]:
+    """--drill-rating: a puzzle rating window such as 1200-1600."""
+    m = _RATING_RANGE_RE.match(text)
+    if not m:
+        raise argparse.ArgumentTypeError(f"expected a rating range such as 1200-1600, got {text!r}")
+    low, high = int(m.group(1)), int(m.group(2))
+    if not 400 <= low < high <= 3500:
+        raise argparse.ArgumentTypeError(f"expected two ratings from 400 to 3500, the lower first, got {text!r}")
+    return low, high
+
+
 def _rules(text: str) -> Optional[list[str]]:
     values = [v.lower() for v in (_csv([text]) or [])]
     return None if not values or "all" in values else values
@@ -226,7 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(verbose=False)
     p.add_argument("--version", action="version", version=f"chess-insights {__version__}")
-    sub = p.add_subparsers(dest="command", required=True, metavar="{fetch,report,demo}")
+    sub = p.add_subparsers(dest="command", required=True, metavar="{fetch,report,demo,puzzles-db,ask}")
 
     def add_source_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"game cache (default {DEFAULT_CACHE_DIR})")
@@ -253,6 +278,20 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--cache-dir", default=None, help="where to write the synthetic archive (default: a temporary folder)")
     d.add_argument("--no-engine-synth", action="store_true", help="generate games without Stockfish (faster, less realistic)")
     add_analysis_args(d, default_out="reports/demo")
+
+    pz = sub.add_parser(
+        "puzzles-db", parents=[common],
+        help="download the Lichess puzzle database (CC0) once and keep the subset the drills use (--coach)",
+    )
+    pz.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"cache folder (default {DEFAULT_CACHE_DIR})")
+
+    a = sub.add_parser("ask", parents=[common], help="ask a question about your last report (needs ANTHROPIC_API_KEY)")
+    a.add_argument("username", help="your chess.com username (the report's name)")
+    a.add_argument("question", help='your question in quotes, e.g. "why do I lose with the Alapin?"')
+    a.add_argument("--out", default=None, help="the report's path stem, as given to `report --out` (default reports/<username>)")
+    a.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"cache folder (default {DEFAULT_CACHE_DIR})")
+    a.add_argument("--offline", action="store_true", help="no Lichess or Wikibooks requests")
+    a.add_argument("--llm-model", default=None, help="Claude model (default: the coaching layer's)")
     return p
 
 
@@ -274,8 +313,47 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
         "--engine-games", type=_engine_games, default=150,
         help="analyse the N most recent games (default 150), or 'all'",
     )
+    sp.add_argument(
+        "--engine-time-class", action="append", type=_time_classes, metavar="TIME_CLASS",
+        help="send only these formats to Stockfish (bullet, blitz, rapid, daily); the report still uses every game",
+    )
+    sp.add_argument(
+        "--engine-sample", choices=ENGINE_SAMPLES, default="recent",
+        help="which games Stockfish analyses: the most recent (default), or 'balanced': the same number of each "
+        "format (bullet, blitz, rapid; daily only with --engine-time-class), most recent in each",
+    )
     sp.add_argument("--workers", type=_non_negative_int, default=0, help="parallel engine processes (default: CPUs - 1)")
     sp.add_argument("--puzzles", action="store_true", help="with --engine: export your mistakes as a PGN puzzle file")
+
+    c = sp.add_argument_group("coaching (with --engine)")
+    c.add_argument("--coach", action="store_true",
+                   help="explain your costliest and repeated mistakes, and add puzzle drills and a review schedule")
+    c.add_argument("--coach-depth", type=_positive_int, metavar="N", default=DEFAULT_COACH_DEPTH,
+                   help=f"Stockfish depth for the positions the coaching explains (default {DEFAULT_COACH_DEPTH})")
+    c.add_argument("--coach-max", type=_positive_int, metavar="N", default=DEFAULT_COACH_MAX,
+                   help=f"explain at most N positions, costliest first (default {DEFAULT_COACH_MAX})")
+    c.add_argument("--no-motif-profile", action="store_true",
+                   help="skip the tactical-motif profile over every error (saves a quick engine pass)")
+    c.add_argument("--lichess-token", default=None, metavar="TOKEN",
+                   help="Lichess personal access token for the opening explorer (default: the LICHESS_TOKEN "
+                   "environment variable)")
+    c.add_argument("--puzzle-db", default=None, metavar="PATH",
+                   help="the filtered Lichess puzzle file for drills (default: the one `chess-insights puzzles-db` "
+                   "keeps in the cache folder)")
+    c.add_argument("--drill-rating", type=_drill_rating, metavar="LO-HI", default=DEFAULT_DRILL_RATING,
+                   help=f"puzzle rating window for drills, e.g. 1300-1700 (default {DEFAULT_DRILL_RATING[0]}-"
+                   f"{DEFAULT_DRILL_RATING[1]})")
+    c.add_argument("--practice-minutes", type=_positive_int, metavar="MIN", default=DEFAULT_PRACTICE_MINUTES,
+                   help=f"minutes of practice a day the plan is sized for (default {DEFAULT_PRACTICE_MINUTES})")
+    c.add_argument("--coach-llm", action="store_true",
+                   help="let Claude rewrite the explanations and draft a weekly plan, every move and number checked "
+                   "(needs ANTHROPIC_API_KEY)")
+    c.add_argument("--llm-model", default=DEFAULT_LLM_MODEL, metavar="MODEL", help=f"Claude model for --coach-llm (default {DEFAULT_LLM_MODEL})")
+    c.add_argument("--maia", action="store_true",
+                   help="how findable the better move was at your level (needs pip install maia2)")
+    c.add_argument("--previous", default=None, metavar="PATH",
+                   help="the previous report's JSON, for progress and puzzles due for review (default: the JSON "
+                   "report already at the output path)")
     sp.add_argument(
         "--out", default=default_out,
         help="output path stem, e.g. reports/me writes reports/me.html ...; an existing folder (or a path "
@@ -412,6 +490,14 @@ def _prepare_engine(args: argparse.Namespace) -> None:
     args.stockfish_path = None
     if getattr(args, "puzzles", False) and not args.engine:
         _say("note: --puzzles needs --engine (puzzles are built from Stockfish's verdicts); no puzzle file will be written.")
+    if getattr(args, "coach", False) and not args.engine:
+        _say("note: --coach needs --engine (the coaching explains Stockfish's verdicts); the report has no coaching.")
+    elif getattr(args, "coach_llm", False) and not getattr(args, "coach", False):
+        _say("note: --coach-llm works with --coach; no LLM coaching.")
+    if getattr(args, "coach", False) and args.engine and getattr(args, "coach_llm", False):
+        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            _say("note: --coach-llm needs ANTHROPIC_API_KEY in the environment; the explanations use the built-in "
+                 "wording.")
     if not args.engine:
         return
     args.stockfish_path = resolve_stockfish_arg(args.stockfish)
@@ -570,22 +656,109 @@ def analyse_and_write(games: list[Game], username: str, args: argparse.Namespace
         evals, engine_note = run_engine(selected, username, args, cache_dir)
 
     out = _out_stem(args, username)
-    options = {"tz": args.tz}
+    options = {"tz": args.tz, "engine_sample": getattr(args, "engine_sample", "recent")}
     if getattr(args, "puzzles", False) and evals:
         options["puzzle_file"] = _puzzle_path(out).name  # written next to the report, after it
     if getattr(args, "demo", False):
         options["demo"] = True
-    report = run_analysis(selected, username, evals=evals, options=options, filters=filters, engine_note=engine_note)
+    coach = coach_config(args, username, cache_dir, out)
+    report = run_analysis(
+        selected, username, evals=evals, options=options, filters=filters, engine_note=engine_note, coach=coach
+    )
     try:
         paths = write_report(report, out, formats=args.formats)
         if getattr(args, "puzzles", False) and evals:
-            paths.append(write_puzzles(selected, evals, out))
+            paths.append(write_puzzles(selected, evals, out, report.coaching))
     except OSError as exc:
         raise UserError(f"could not write the report to {out}: {exc}", EXIT_NO_GAMES) from None
     print_summary(report)
-    for p in paths:
+    for p in paths + _drill_files(report.coaching):
         _say(f"wrote {_absolute(p)}")
     return report
+
+
+def _drill_files(coaching: Optional[Coaching]) -> list[Path]:
+    """The puzzle packs the coaching wrote next to the report."""
+    files = [Path(d.file) for d in (coaching.drills if coaching else []) if d.file]
+    return [f for f in files if f.exists()]
+
+
+def _stem(out: Path) -> Path:
+    """The report path without a report-type suffix: reports/me.html -> reports/me."""
+    out = Path(out)
+    return out.with_suffix("") if out.suffix.lower() in (".html", ".htm", ".md", ".markdown", ".json") else out
+
+
+def _read_report_json(path: Path) -> Optional[dict]:
+    """A report's JSON as a dict, or None (with a warning) when it can't be read."""
+    try:
+        data = json.loads(read_text(path))
+    except (OSError, ValueError) as exc:
+        _say(f"warning: could not read the previous report {path} ({exc}); no progress comparison this time.")
+        return None
+    if not isinstance(data, dict):
+        _say(f"warning: {path} is not a chess-insights JSON report; no progress comparison this time.")
+        return None
+    return data
+
+
+def _puzzle_db(args: argparse.Namespace, cache_dir: Optional[Path]) -> Optional[Path]:
+    """--puzzle-db, else the subset `chess-insights puzzles-db` keeps in the cache folder (when it exists)."""
+    if getattr(args, "puzzle_db", None):
+        path = expand_path(args.puzzle_db)
+        if not path.is_file():
+            _say(f"warning: no puzzle file at {path}; the drills fall back to Lichess's theme pages.")
+            return None
+        return path
+    from .coach.puzzles_db import subset_path
+
+    for folder in dict.fromkeys(f for f in (cache_dir, expand_path(str(DEFAULT_CACHE_DIR))) if f is not None):
+        candidate = subset_path(folder)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def coach_config(
+    args: argparse.Namespace, username: str, cache_dir: Optional[Path], out: Path
+) -> Optional[CoachConfig]:
+    """The coaching settings from the command line (None without --coach and --engine).
+
+    Keys come from the environment (LICHESS_TOKEN, ANTHROPIC_API_KEY) unless given; they are never printed.
+    The previous report (--previous, default the JSON already at the output path) is read here, before the new
+    report overwrites it.
+    """
+    if not (getattr(args, "coach", False) and getattr(args, "engine", False)):
+        return None
+    user = safe_file_stem(username.lower())
+    stem = _stem(out)
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+    previous_path = expand_path(args.previous) if getattr(args, "previous", None) else stem.parent / f"{stem.name}.json"
+    previous = None
+    if previous_path.is_file():
+        previous = _read_report_json(previous_path)
+    elif getattr(args, "previous", None):
+        _say(f"warning: no previous report at {previous_path}; no progress comparison this time.")
+    return CoachConfig(
+        stockfish=getattr(args, "stockfish_path", None),
+        depth=args.coach_depth,
+        max_positions=args.coach_max,
+        workers=args.workers,
+        cache_dir=cache_dir / user / "coach" if cache_dir else None,
+        sources_cache=cache_dir / "sources" if cache_dir else None,
+        profile=not args.no_motif_profile,
+        offline=bool(getattr(args, "offline", False)),
+        lichess_token=(args.lichess_token or os.environ.get("LICHESS_TOKEN", "").strip() or None),
+        puzzle_db=_puzzle_db(args, cache_dir),
+        drill_rating=tuple(args.drill_rating),  # type: ignore[arg-type]
+        out_stem=stem,
+        practice_minutes=args.practice_minutes,
+        llm=bool(args.coach_llm and key),
+        llm_model=args.llm_model,
+        anthropic_api_key=key if args.coach_llm else None,
+        maia=args.maia,
+        previous=previous,
+    )
 
 
 def _absolute(path: Path) -> Path:
@@ -596,19 +769,26 @@ def _absolute(path: Path) -> Path:
 
 
 def _puzzle_path(out: Path) -> Path:
-    out = Path(out)
-    if out.suffix.lower() in (".html", ".htm", ".md", ".markdown", ".json"):
-        out = out.with_suffix("")
+    out = _stem(out)
     return out.parent / f"{out.name}-puzzles.pgn"
 
 
-def write_puzzles(games: list[Game], evals: dict, out: Path) -> Path:
+def write_puzzles(games: list[Game], evals: dict, out: Path, coaching: Optional[Coaching] = None) -> Path:
+    """The --puzzles PGN; with the coaching, each puzzle gets the engine's line, its motifs and the explanation."""
     from .analysis.mistakes import LICHESS_STUDY_CHAPTERS, build_puzzles, puzzles_to_pgn
 
     path = _puzzle_path(out)
     path.parent.mkdir(parents=True, exist_ok=True)
     puzzles = build_puzzles(games, evals)
-    path.write_text(puzzles_to_pgn(puzzles), encoding="utf-8")
+    text = None
+    if coaching is not None:
+        try:
+            from .coach.puzzles import puzzles_pgn
+
+            text = puzzles_pgn(puzzles, coaching)
+        except Exception as exc:  # noqa: BLE001 — the plain puzzle file is still worth writing
+            logging.getLogger(__name__).warning("puzzle file without the coaching's lines: %s", exc)
+    path.write_text(text if text is not None else puzzles_to_pgn(puzzles), encoding="utf-8")
     note = "import into a Lichess study or any chess GUI"
     if len(puzzles) > LICHESS_STUDY_CHAPTERS:
         note += (
@@ -619,6 +799,31 @@ def write_puzzles(games: list[Game], evals: dict, out: Path) -> Path:
     return path
 
 
+def _joined(words: Sequence[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + f" and {words[-1]}"
+
+
+def describe_engine_sample(
+    engine: str, depth: int, games: Sequence[Game], evals: dict, sample: str = "recent",
+    time_classes: Optional[Sequence[str]] = None,
+) -> str:
+    """"Stockfish 16 at depth 12 on 300 games: 100 bullet, 100 blitz, 100 rapid (most recent in each)."."""
+    from .visuals import format_counts
+
+    counts = format_counts(g for g in games if g.game_id in evals)
+    n = sum(counts.values())
+    if not n:
+        return (f"{engine} at depth {depth}: none of the selected games could be analysed (the engine needs "
+                "games of standard chess or Chess960 with at least 10 moves).")
+    mix = f"all {next(iter(counts))}" if len(counts) == 1 else ", ".join(f"{k} {tc}" for tc, k in counts.items())
+    if sample == "balanced":
+        return f"{engine} at depth {depth} on {n} games: {mix} (most recent in each)."
+    scope = ""
+    if time_classes:
+        scope = " " + _joined([tc for tc in ("bullet", "blitz", "rapid", "daily") if tc in set(time_classes)])
+    return f"{engine} at depth {depth} on the {n} most recent{scope} games: {mix}."
+
+
 def run_engine(games: list[Game], username: str, args: argparse.Namespace, cache_dir: Optional[Path]):
     from .engine import EngineConfig, analyze_games, engine_name
 
@@ -627,15 +832,19 @@ def run_engine(games: list[Game], username: str, args: argparse.Namespace, cache
         return {}, "Engine analysis skipped: Stockfish not found (install it or pass --stockfish PATH)."
     cfg = EngineConfig(path=path, depth=args.depth, workers=args.workers)
     eval_dir = expand_path(cache_dir) / safe_file_stem(username.lower()) / "evals" if cache_dir else None
+    time_classes = _csv(getattr(args, "engine_time_class", None))
+    sample = getattr(args, "engine_sample", "recent")
     t0 = time.time()
 
     def progress(done: int, total: int) -> None:
         if done == total or done % 10 == 0:
             _say(f"  engine: {done}/{total} games ({time.time() - t0:.0f}s)")
 
-    evals = analyze_games(games, cfg, cache_dir=eval_dir, max_games=args.engine_games, progress=progress)
-    note = f"{engine_name(path)} at depth {args.depth} on the {len(evals)} most recent games."
-    return evals, note
+    evals = analyze_games(
+        games, cfg, cache_dir=eval_dir, max_games=args.engine_games, progress=progress,
+        time_classes=time_classes, sample=sample,
+    )
+    return evals, describe_engine_sample(engine_name(path), args.depth, games, evals, sample, time_classes)
 
 
 def print_summary(report: Report) -> None:
@@ -657,6 +866,20 @@ def print_summary(report: Report) -> None:
             print(f"  {i}. {item.title}", file=out)
             for action in item.actions[:3]:
                 print(f"       * {action}", file=out)
+    if len(report.formats) > 1:
+        mix = ", ".join(f"{n} {tc}" for tc, n in report.formats.items())
+        views = ", ".join(report.format_reports) or "none (each format needs more games)"
+        print(f"\nFormats: {mix}. Separate views in the report: {views}.", file=out)
+    if report.coaching is not None:
+        c = report.coaching
+        parts = [f"{len(c.explanations)} positions explained"]
+        if c.drills:
+            parts.append(f"{len(c.drills)} puzzle packs")
+        if c.review_due:
+            parts.append(f"{len(c.review_due)} puzzles due for review")
+        print(f"\nCoaching: {', '.join(parts)}.", file=out)
+        for note in c.notes[:5]:
+            print(f"  ({note})", file=out)
     print("", file=out, flush=True)
 
 
@@ -770,6 +993,81 @@ def trait_matches(trait: dict, ins: object) -> bool:
     )
 
 
+def cmd_puzzles_db(args: argparse.Namespace) -> int:
+    """Download the Lichess puzzle database once and keep the filtered subset the drills read."""
+    from .coach import puzzles_db
+
+    cache_dir = expand_path(args.cache_dir)
+    _say(f"downloading the Lichess puzzle database (CC0) and keeping the drill subset in {cache_dir} ...")
+    last = [time.time()]
+
+    def progress(n: int) -> None:
+        if time.time() - last[0] >= 10:
+            last[0] = time.time()
+            _say(f"  {n:,} ...")
+
+    try:
+        path = puzzles_db.download(cache_dir, progress=progress)
+    except KeyboardInterrupt:
+        raise
+    except NotImplementedError:
+        raise UserError("the puzzle database download is not available in this version yet.", EXIT_NO_GAMES) from None
+    except Exception as exc:  # noqa: BLE001 — one friendly line; the report works without the database
+        import requests
+
+        network = isinstance(exc, (requests.RequestException, ConnectionError, TimeoutError))
+        where = "could not download the Lichess puzzle database" if network else "could not build the puzzle subset"
+        raise UserError(
+            f"{where} ({type(exc).__name__}: {exc}). Reports still work: the drills link to Lichess's puzzle "
+            "themes instead.", EXIT_NETWORK if network else EXIT_NO_GAMES,
+        ) from None
+    _say(f"wrote {_absolute(Path(path))}")
+    return 0
+
+
+def _report_json_path(args: argparse.Namespace, username: str) -> Path:
+    """Where `report` wrote this player's JSON: --out's stem (a folder gets <username>.json), else reports/."""
+    stem = _stem(_out_stem(args, username))
+    return stem.parent / f"{stem.name}.json"
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Answer a question from the last report's JSON (through the coaching layer's verifier)."""
+    from .api import normalize_username
+    from .coach import ask
+
+    try:
+        name = normalize_username(args.username)
+    except ValueError:
+        name = args.username.strip()
+    path = _report_json_path(args, name)
+    if not path.is_file():
+        raise UserError(
+            f"no report for {name!r} at {path}: run `chess-insights report {name} --engine --coach` first "
+            "(with --formats including json), or point --out at the report.", EXIT_NO_GAMES,
+        )
+    report_json = _read_report_json(path)
+    if report_json is None:
+        raise UserError(f"could not read the report {path}.", EXIT_NO_GAMES)
+    cache_dir = expand_path(args.cache_dir) if args.cache_dir else None
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+    cfg = CoachConfig(
+        cache_dir=cache_dir / safe_file_stem(name.lower()) / "coach" if cache_dir else None,
+        sources_cache=cache_dir / "sources" if cache_dir else None,
+        offline=args.offline,
+        lichess_token=os.environ.get("LICHESS_TOKEN", "").strip() or None,
+        llm=key is not None,
+        llm_model=args.llm_model or DEFAULT_LLM_MODEL,
+        anthropic_api_key=key,
+    )
+    try:
+        answer = ask.answer(args.question, report_json, cfg)
+    except NotImplementedError:
+        raise UserError("`ask` is not available in this version yet.", EXIT_NO_GAMES) from None
+    print(answer, flush=True)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     _safe_console()
     try:
@@ -778,7 +1076,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return exc.code if isinstance(exc.code, int) else 1
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
     try:
-        return {"fetch": cmd_fetch, "report": cmd_report, "demo": cmd_demo}[args.command](args)
+        commands = {"fetch": cmd_fetch, "report": cmd_report, "demo": cmd_demo, "puzzles-db": cmd_puzzles_db, "ask": cmd_ask}
+        return commands[args.command](args)
     except KeyboardInterrupt:
         _say("interrupted")
         return 130

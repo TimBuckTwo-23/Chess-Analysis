@@ -1,7 +1,8 @@
 # Run the analysis on GitHub's machines: no install needed, works from a phone.
 #   * Actions -> report -> Run workflow: one player, with options; or
-#   * edit players.txt on main: a report for every player listed there.
-# The report is attached to the run (Artifacts) and saved on the `reports` branch.
+#   * edit players.txt on main: a report for every player listed there (engine sample balanced, coaching on).
+# The report (with its drill PGNs) is attached to the run (Artifacts) and saved on the `reports` branch.
+# Optional repository secrets: LICHESS_TOKEN (opening explorer facts), ANTHROPIC_API_KEY (the LLM coach).
 name: report
 
 on:
@@ -19,11 +20,26 @@ on:
         type: boolean
         default: true
       engine_games:
-        description: How many of your most recent games Stockfish analyses (or "all")
+        description: How many of your games Stockfish analyses (or "all")
         default: "300"
+      engine_sample:
+        description: "Which games Stockfish analyses: balanced (the same number of bullet, blitz and rapid) or recent"
+        type: choice
+        options: [balanced, recent]
+        default: balanced
       depth:
         description: Stockfish depth per position
         default: "12"
+      coach:
+        description: Coaching (with the engine) - why each costly move was wrong, puzzle drills, review schedule
+        type: boolean
+        default: true
+      coach_depth:
+        description: Stockfish depth for the positions the coaching explains
+        default: "20"
+      coach_max:
+        description: Most positions the coaching explains (costliest first)
+        default: "150"
   push:
     branches: [main]
     paths: [players.txt]
@@ -75,7 +91,11 @@ jobs:
       TZ_NAME: ${{ matrix.timezone }}
       ENGINE: ${{ github.event_name != 'workflow_dispatch' || inputs.engine }}
       ENGINE_GAMES: ${{ inputs.engine_games || '300' }}
+      ENGINE_SAMPLE: ${{ inputs.engine_sample || 'balanced' }}
       DEPTH: ${{ inputs.depth || '12' }}
+      COACH: ${{ github.event_name != 'workflow_dispatch' || inputs.coach }}
+      COACH_DEPTH: ${{ inputs.coach_depth || '20' }}
+      COACH_MAX: ${{ inputs.coach_max || '150' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,26 +113,81 @@ jobs:
           python -m pip install -U pip
           pip install -e .
 
-      # Downloaded months and Stockfish results are kept between runs, so a re-run only
-      # fetches the current month and analyses new games.
+      # Downloaded months, Stockfish results and the coaching's lines are kept between runs, so a
+      # re-run only fetches the current month and analyses new games and positions. (The puzzle
+      # database has its own monthly cache below.)
       - name: Restore game and engine cache
         uses: actions/cache@v4
         with:
-          path: .chess-insights-cache
+          path: |
+            .chess-insights-cache
+            !.chess-insights-cache/puzzles
           key: chess-insights-${{ matrix.username }}-${{ github.run_id }}
           restore-keys: chess-insights-${{ matrix.username }}-
 
-      - name: Analyse games
+      # The Lichess puzzle database (CC0) for the drills: downloaded at most once a month and kept
+      # in its own cache. A failed download never blocks the report (the drills then link to
+      # Lichess's theme pages instead).
+      - name: Month stamp
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the puzzle database
+        id: puzzles
+        if: env.ENGINE == 'true' && env.COACH == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .chess-insights-cache/puzzles
+          key: lichess-puzzles-${{ steps.month.outputs.month }}
+          restore-keys: lichess-puzzles-
+
+      - name: Download the puzzle database (once a month)
+        id: puzzles_download
+        if: env.ENGINE == 'true' && env.COACH == 'true' && steps.puzzles.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 30
+        run: chess-insights puzzles-db --cache-dir .chess-insights-cache
+
+      - name: Save the puzzle database
+        if: steps.puzzles_download.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .chess-insights-cache/puzzles
+          key: lichess-puzzles-${{ steps.month.outputs.month }}
+
+      # The previous report (for progress against its targets and the puzzles due for review).
+      - name: Fetch the previous report
         run: |
           name=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
           echo "REPORT_NAME=$name" >> "$GITHUB_ENV"
-          args=(report "$USERNAME" --cache-dir .chess-insights-cache --out "reports/$name"
+          previous="$RUNNER_TEMP/previous-$name.json"
+          if git fetch --quiet --depth 1 origin reports 2>/dev/null \
+             && git show "FETCH_HEAD:$name/latest/$name.json" > "$previous" 2>/dev/null; then
+            echo "PREVIOUS_REPORT=$previous" >> "$GITHUB_ENV"
+            echo "previous report: $name/latest/$name.json"
+          else
+            rm -f "$previous"
+            echo "no previous report on the reports branch"
+          fi
+
+      - name: Analyse games
+        env:
+          # read by chess-insights from the environment, never passed on the command line
+          LICHESS_TOKEN: ${{ secrets.LICHESS_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          args=(report "$USERNAME" --cache-dir .chess-insights-cache --out "reports/$REPORT_NAME"
                 --contact "https://github.com/$GITHUB_REPOSITORY")
           if [ -n "$TZ_NAME" ]; then args+=(--tz "$TZ_NAME"); fi
           if [ "$ENGINE" = "true" ]; then
             args+=(--engine --stockfish /usr/games/stockfish --engine-games "$ENGINE_GAMES" --depth "$DEPTH"
-                   --workers "$(nproc)" --puzzles)
+                   --engine-sample "$ENGINE_SAMPLE" --workers "$(nproc)" --puzzles)
+            if [ "$COACH" = "true" ]; then
+              args+=(--coach --coach-depth "$COACH_DEPTH" --coach-max "$COACH_MAX")
+              if [ -n "$ANTHROPIC_API_KEY" ]; then args+=(--coach-llm); fi
+            fi
           fi
+          if [ -n "${PREVIOUS_REPORT:-}" ]; then args+=(--previous "$PREVIOUS_REPORT"); fi
           chess-insights "${args[@]}"
 
       - name: Attach the report to this run
@@ -138,8 +213,10 @@ jobs:
             git -C "$dest" remote add origin "$remote"
           fi
           mkdir -p "$dest/$REPORT_NAME/$stamp" "$dest/$REPORT_NAME/latest"
-          cp reports/* "$dest/$REPORT_NAME/$stamp/"
-          rm -f "$dest/$REPORT_NAME/latest/"* && cp reports/* "$dest/$REPORT_NAME/latest/"
+          # everything the run wrote: the report files, the puzzle PGN and the drill PGNs
+          cp -R reports/. "$dest/$REPORT_NAME/$stamp/"
+          rm -rf "$dest/$REPORT_NAME/latest" && mkdir -p "$dest/$REPORT_NAME/latest"
+          cp -R reports/. "$dest/$REPORT_NAME/latest/"
           git -C "$dest" add -A
           git -C "$dest" commit --quiet -m "Report for $REPORT_NAME ($stamp)" || exit 0
           git -C "$dest" push --quiet origin reports

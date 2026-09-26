@@ -26,6 +26,27 @@ checked against a benchmark, and nothing said that the data cannot support.
 
 About 790 automated tests, including 76 end-to-end CLI tests.
 
+## Phase 1b — Pictures, formats and the coaching layer (September 2026, in progress)
+
+What the user asked for after the first real report (26 Sep: 295 of the 300 engine games were
+bullet; the findings were text and chess notation only), and the coaching-layer plan (C0–C4):
+
+| Area | What this work delivers | Tested how |
+|---|---|---|
+| Engine sample (C0) | `--engine-sample balanced` (the same number of bullet, blitz and rapid games, most recent in each; the GitHub default) and `--engine-time-class`; the engine note says how many games of each format were analysed | Unit tests of the selection (quotas, top-up, filters, ties, replacement of games that don't replay); the full engine suite |
+| Formats on every finding | `Insight.formats` on every finding ("blitz only"), `Report.formats` / `engine_formats`, and a view per format with 60+ games (its own claims, sections, study plan and engine note) | Synthetic multi-format sets; null-world runs of the views (docs/METHODOLOGY.md §2: about 0.1–0.3 false claims per view) |
+| A picture for every finding | Module charts and boards (arrows for the move played and the better move, strips for lines), with `fill.py` giving any finding left bare a chart from its evidence or its board | Every finding of the synthetic demo report has formats and a picture |
+| Coaching layer (C1–C4) | `--coach`: critical positions re-searched deeper, both lines, motifs, concept differences, template explanations with boards; drills from the Lichess puzzle database (`chess-insights puzzles-db`), a review schedule, progress against the previous report; optional opening explorer (`LICHESS_TOKEN`), Maia and an LLM rewrite with a verifier (`--coach-llm`, `ANTHROPIC_API_KEY`); `chess-insights ask` | Offline: recorded Lichess responses, a puzzle sample, Stockfish 16 locally; the LLM through a mocked client |
+| GitHub run | Balanced engine sample and coaching by default, the previous report from the `reports` branch, the puzzle database cached monthly, the two optional secrets passed through the environment only | A text-level check of the workflow file |
+
+Not yet run for real: the workflow's new steps on GitHub's machines (puzzle download and
+monthly cache, fetching the previous report, the secrets), the Lichess and Wikibooks
+services live (the development sandbox cannot reach them; every source falls back to a note
+when it fails), the Claude API with a real key, and a full `--coach` run on a real
+3,000-game history (how long the deeper searches take on GitHub's 4 cores). The coaching
+explains and routes to practice; the only new claims it can make (motifs you miss more
+often than your opponents) go through the claim rule and the null-world calibration.
+
 ## Phase 1 — Validate on your real games (next)
 
 * **First live run.** The downloader has only seen recorded chess.com responses so far
@@ -46,7 +67,9 @@ About 790 automated tests, including 76 end-to-end CLI tests.
 ## Phase 2 — Deeper insights
 
 Roughly in order of value for effort (the research catalogue's top-15 list, plus what
-the first reviews of the demo report asked for):
+the first reviews of the demo report asked for). The coaching layer (Phase 1b) takes on
+items 1, 2, 8 and 9 (C1–C2) and 4, 5, 6 and 12 (C3); they stay listed until they have been
+checked on real reports:
 
 1. **Spaced repetition for your puzzles.** Schedule the exported positions, track
    solved/failed, and re-test missed ones.
@@ -85,16 +108,12 @@ the first reviews of the demo report asked for):
 
 ## Phase 3 — Coaching layer
 
-* **LLM coach.** The Claude API reads the JSON report and writes a weekly plan in
-  plain language. You can ask it follow-up questions grounded in your own games
-  ("why do I lose with the Caro-Kann?").
-* **Progress tracking.** Each study-plan item already stores its metric and today's
-  value in the JSON (`study_plan[].baseline`). Next: read the previous report's JSON and
-  print "clock used by move 15: 50% → 38%" next to each target.
-* **A weekly schedule.** Minutes per item per week and when to re-check, as the research
-  catalogue's study-plan design describes (§5); the plan has the targets but no timetable.
-* **Per-format reports in one go.** Openings, habits and engine findings are pooled over
-  all time controls; `--time-class blitz --out reports/me-blitz` gives one format today.
+* **LLM coach, progress tracking, a weekly schedule.** Being built in Phase 1b (C4:
+  `--coach-llm`, `chess-insights ask`, progress against the previous report's targets, the
+  weekly plan). Still to do once it has run on real reports: tune the plan's minutes to
+  what you actually practise, and track solved/failed puzzles between reports.
+* **Per-format reports in one go.** Done in Phase 1b: every format with 60+ games gets its
+  own view inside the report.
 
 ## Phase 4 — App
 

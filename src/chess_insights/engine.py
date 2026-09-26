@@ -1123,47 +1123,127 @@ def _is_candidate(game: Game) -> bool:
     return game.rules in ANALYSABLE_RULES and game.plies >= MIN_PLIES
 
 
+ENGINE_SAMPLES = ("recent", "balanced")
+# Formats a balanced sample spreads over when none are listed: daily games only when asked for by name
+# (their clocks measure days, and a correspondence move is a different skill from a blitz move).
+BALANCED_TIME_CLASSES = ("bullet", "blitz", "rapid")
+_SLOWEST_FIRST = ("daily", "rapid", "blitz", "bullet")
+
+
+def _newest_first(games: Sequence[Game]) -> list[Game]:
+    """Analysable games, newest first; a repeated id keeps its last copy, equal end times go by game id."""
+    by_id = {g.game_id: g for g in games if _is_candidate(g)}
+    return sorted(by_id.values(), key=lambda g: (g.end_time, g.game_id), reverse=True)
+
+
+def select_engine_games(
+    games: Sequence[Game],
+    max_games: Optional[int],
+    time_classes: Optional[Sequence[str]] = None,
+    sample: str = "recent",
+    usable: Optional[Callable[[Game], bool]] = None,
+) -> list[Game]:
+    """The games to send to Stockfish, newest first. Changes nothing about which games the report uses.
+
+    Only standard / Chess960 games with at least ``MIN_PLIES`` plies count (a repeated game id keeps its last
+    copy), and only those of ``time_classes`` when given.
+
+    * ``"recent"``: the ``max_games`` most recent games.
+    * ``"balanced"``: ``max_games`` split evenly across the time classes (``time_classes``, or else the bullet,
+      blitz and rapid games present: daily only when listed), the most recent of each. A format with too few
+      games leaves its share to the others; an odd game goes to the slower format.
+
+    ``usable(game)``, when given, is asked about a game before it is taken (newest first within each format); a
+    game it turns down is skipped and the next one of the same format takes its place. ``analyze_games`` uses it
+    for the cache lookup and the replay check. ``max_games`` None takes every game; 0 or less takes none.
+    """
+    if sample not in ENGINE_SAMPLES:
+        raise ValueError(f"unknown engine sample {sample!r}; choose from {', '.join(ENGINE_SAMPLES)}")
+    if max_games is not None and max_games <= 0:
+        return []
+    wanted = {tc.lower() for tc in time_classes} if time_classes else None
+    pool = [g for g in _newest_first(games) if wanted is None or g.time_class in wanted]
+    ok = usable or (lambda g: True)
+
+    if sample == "recent":
+        chosen: list[Game] = []
+        for game in pool:
+            if max_games is not None and len(chosen) >= max_games:
+                break
+            if ok(game):
+                chosen.append(game)
+        return chosen
+
+    by_class: dict[str, list[Game]] = {tc: [] for tc in (wanted if wanted is not None else BALANCED_TIME_CLASSES)}
+    for game in pool:
+        if game.time_class in by_class:
+            by_class[game.time_class].append(game)
+
+    def slowness(tc: str) -> tuple[int, str]:
+        return (_SLOWEST_FIRST.index(tc) if tc in _SLOWEST_FIRST else len(_SLOWEST_FIRST), tc)
+
+    # Round robin, slowest format first: every format gets one game per round until the total is reached, so
+    # the split is even and a format that runs out leaves its share to the others.
+    order = sorted((tc for tc, pool_tc in by_class.items() if pool_tc), key=slowness)
+    queues = {tc: iter(by_class[tc]) for tc in order}
+    taken: set[str] = set()
+    active = list(order)
+    while active and (max_games is None or len(taken) < max_games):
+        for tc in list(active):
+            if max_games is not None and len(taken) >= max_games:
+                break
+            game = next((g for g in queues[tc] if ok(g)), None)
+            if game is None:
+                active.remove(tc)
+            else:
+                taken.add(game.game_id)
+    return [g for g in pool if g.game_id in taken]
+
+
 def analyze_games(
     games: list[Game],
     cfg: EngineConfig,
     cache_dir: Path | str | None = None,
     max_games: Optional[int] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    time_classes: Optional[Sequence[str]] = None,
+    sample: str = "recent",
 ) -> dict[str, GameEval]:
-    """Engine analysis of the ``max_games`` most recent standard / Chess960 games with at least 10 plies.
+    """Engine analysis of up to ``max_games`` standard / Chess960 games with at least 10 plies.
 
-    Games whose moves don't replay legally are skipped (and don't count towards ``max_games``).
-    Cached analyses by the same engine version and settings are loaded instead of recomputed; new
-    ones are cached as they finish. ``progress(done, total)`` is called as games complete (cached
+    Which games: ``select_engine_games`` (the most recent ones by default; ``sample="balanced"`` spreads them
+    evenly over the formats, and ``time_classes`` limits them to some formats). Games whose moves don't replay
+    legally are skipped and replaced by the next game of the same kind (they don't count towards
+    ``max_games``). Cached analyses by the same engine version and settings are loaded instead of recomputed;
+    new ones are cached as they finish. ``progress(done, total)`` is called as games complete (cached
     games count as done up front). Games whose analysis fails are left out of the result, which
     is ordered oldest first. Raises FileNotFoundError when games need analysing and no Stockfish
     binary can be found.
     """
     if max_games is not None and max_games <= 0:
         return {}
-    by_id = {g.game_id: g for g in games if _is_candidate(g)}  # a repeated id keeps its last copy
-    newest_first = sorted(by_id.values(), key=lambda g: g.end_time, reverse=True)
     cache = Path(cache_dir) if cache_dir is not None else None
     path = cfg.path or find_stockfish()
     label = engine_name(path) if path else None
     dirs = _cache_dirs(cache, cfg, label) if cache is not None else []
 
-    selected: list[Game] = []
     results: dict[str, GameEval] = {}
     todo: list[Game] = []
-    for game in newest_first:
-        if max_games is not None and len(selected) >= max_games:
-            break
+
+    def usable(game: Game) -> bool:
+        """A cached analysis, or moves that replay (checked here so a corrupt record never costs an engine start)."""
         name = cache_file_name(game.game_id)
         cached = next((ev for d in dirs if (ev := _load_cached(d / name, game)) is not None), None)
         if cached is not None:
             results[game.game_id] = cached
-        elif _replay(game, stack=False) is None:  # checked here so a corrupt record never costs an engine start
+        elif _replay(game, stack=False) is None:
             log.warning("skipping %s: its moves don't replay legally", game.game_id)
-            continue
+            return False
         else:
             todo.append(game)
-        selected.append(game)
+        return True
+
+    selected = select_engine_games(games, max_games, time_classes, sample, usable=usable)
     total, done = len(selected), len(results)
     if progress and done:
         progress(done, total)
@@ -1197,4 +1277,8 @@ def analyze_games(
 
         _analyze_uncached(todo, run_cfg, on_result)
 
-    return {g.game_id: results[g.game_id] for g in sorted(selected, key=lambda g: g.end_time) if g.game_id in results}
+    return {
+        g.game_id: results[g.game_id]
+        for g in sorted(selected, key=lambda g: (g.end_time, g.game_id))
+        if g.game_id in results
+    }
