@@ -11,7 +11,9 @@ the three habit positions of the coaching plan read true at this distance (5...e
 pawn structure all worse than after 5...a6).
 
 Board facts (python-chess, any Stockfish or none) describe the same two positions in words: the bishop pair,
-castling, a king left in the centre, isolated, doubled and backward pawns, and holes.
+castling, a king left in the centre, isolated, doubled and backward pawns, and holes. A fact is named only when it
+is worse for you at the refutation's end than at the best line's end and was not already true before your move
+(the castling right has to exist before it can be lost; a hole already there does not "become" one).
 """
 
 from __future__ import annotations
@@ -44,7 +46,9 @@ QUIET_EXTRA = 4  # ... or up to this many plies later, at the first quiet positi
 PHASE_WEIGHTS = {chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4}
 MAX_PHASE = 24  # all the pieces of the start position
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
-CENTRE_AFTER_MOVE = 12  # a king still on the d- or e-file after this move is "in the centre"
+CENTRE_AFTER_MOVE = 12  # a king still on the d- or e-file after this move is "in the centre" ...
+CENTRE_MIN_PHASE = 10  # ... while this much material is left (``material_phase``): in an endgame the king belongs there
+MIN_HOLE_PAWNS = 5  # holes are named only while you have this many pawns (with fewer, most squares are "holes")
 EVAL_TIMEOUT = 10.0  # seconds for one ``eval`` answer before the helper gives up
 NEED_SF16 = "concepts need Stockfish 16"
 
@@ -281,13 +285,16 @@ class BoardFacts:
     opp_bishop_pair: bool
     can_castle: bool  # still has a castling right
     castled: bool  # the king stands where castling puts it
-    king_in_centre: bool  # after move CENTRE_AFTER_MOVE, on the d- or e-file, with the opponent's queen on
+    king_in_centre: bool  # after move CENTRE_AFTER_MOVE, on the d- or e-file, the opponent's queen on, no endgame
     material: int  # yours minus your opponent's (pawn 1, knight and bishop 3, rook 5, queen 9)
     isolated: list[str] = field(default_factory=list)
     doubled_files: list[str] = field(default_factory=list)
     backward: list[str] = field(default_factory=list)
     holes: list[str] = field(default_factory=list)
     opp_minor: bool = True  # your opponent has a knight or bishop left (a hole only matters if one can sit there)
+    king_central: bool = False  # the king is on the d- or e-file (at any move)
+    opp_queen: bool = True  # your opponent's queen is on the board
+    pawns: int = 8  # your pawns
 
 
 def _rel_rank(square: int, color: chess.Color) -> int:
@@ -337,6 +344,7 @@ def board_facts(board: chess.Board, color: Color) -> BoardFacts:
         and board.fullmove_number > CENTRE_AFTER_MOVE
         and chess.square_file(king) in (3, 4)
         and bool(board.pieces(chess.QUEEN, not me))
+        and material_phase(board) >= CENTRE_MIN_PHASE
     )
     return BoardFacts(
         bishop_pair=len(board.pieces(chess.BISHOP, me)) >= 2,
@@ -350,6 +358,9 @@ def board_facts(board: chess.Board, color: Color) -> BoardFacts:
         backward=sorted(backward),
         holes=sorted(holes),
         opp_minor=bool(board.pieces(chess.KNIGHT, not me) or board.pieces(chess.BISHOP, not me)),
+        king_central=king is not None and chess.square_file(king) in (3, 4),
+        opp_queen=bool(board.pieces(chess.QUEEN, not me)),
+        pawns=len(pawns),
     )
 
 
@@ -358,11 +369,21 @@ def _squares(names: Sequence[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
 
 
-def fact_differences(best: BoardFacts, refutation: BoardFacts, limit: int = 3) -> list[str]:
+def _new(refutation: Sequence[str], *others: Optional[Sequence[str]]) -> list[str]:
+    """What ``refutation`` has that none of ``others`` has (squares or files); None in ``others`` is skipped."""
+    return [x for x in refutation if all(o is None or x not in o for o in others)]
+
+
+def fact_differences(best: BoardFacts, refutation: BoardFacts, limit: int = 3,
+                     start: Optional[BoardFacts] = None) -> list[str]:
     """What is worse for you at the end of the refutation than at the end of the best line, in words.
 
     Only differences, and only those that go against you: "you lose the bishop pair", "your king stays in the
-    centre", "d5 becomes a hole in your camp". At most ``limit``, the most important first.
+    centre", "d5 becomes a hole in your camp". At most ``limit``, the most important first. ``start``: the facts
+    before your move. A fact that was already true there is not blamed on your move ("you lose the right to castle"
+    needs a right to lose, "becomes a hole" and "you get an isolated pawn" something that was not there), and the
+    king "stays" in the centre only if it was there. Without ``start`` the castling fact needs the right at the best
+    line's end. Holes need a pawn structure (``MIN_HOLE_PAWNS``) and an enemy knight or bishop to use them.
     """
     out = []
     # The bishop pair counts against the opponent's: when both sides give it up (5.d3 Bc5 6.Be3 Bb6 7.Bxb6) nothing
@@ -372,23 +393,36 @@ def fact_differences(best: BoardFacts, refutation: BoardFacts, limit: int = 3) -
             out.append("you lose the bishop pair")
         else:
             out.append("your opponent keeps the bishop pair")
-    if (best.can_castle or best.castled) and not (refutation.can_castle or refutation.castled):
+    # A right you had before your move, kept (or used to castle) in the best line and gone in the refutation. A king
+    # that merely steps off a castled square (20...Kg7 with no rights left) loses nothing.
+    had_right = start.can_castle if start is not None else best.can_castle
+    if had_right and (best.can_castle or best.castled) and not (refutation.can_castle or refutation.castled):
         out.append("you lose the right to castle")
-    if refutation.king_in_centre and not best.king_in_centre:
-        out.append("your king stays in the centre")
-    new_holes = [h for h in refutation.holes if h not in best.holes]
-    if len(refutation.holes) > len(best.holes) and new_holes and refutation.opp_minor:
+    # Compared with the best line's king on any move (the two ends may lie a move apart around CENTRE_AFTER_MOVE).
+    if refutation.king_in_centre and not (best.king_central and best.opp_queen):
+        out.append("your king stays in the centre" if start is None or start.king_central
+                   else "your king ends up in the centre")
+    start_holes = start.holes if start is not None else None
+    new_holes = _new(refutation.holes, best.holes, start_holes)
+    if len(refutation.holes) > len(best.holes) and new_holes and refutation.opp_minor \
+            and refutation.pawns >= MIN_HOLE_PAWNS:
         out.append(f"{_squares(new_holes)} {'becomes a hole' if len(new_holes) == 1 else 'become holes'} in your "
                    f"camp (no pawn of yours can cover {'it' if len(new_holes) == 1 else 'them'})")
-    if len(refutation.isolated) > len(best.isolated):
-        new = [s for s in refutation.isolated if s not in best.isolated] or refutation.isolated
-        out.append(f"you get {'an isolated pawn' if len(new) == 1 else 'isolated pawns'} on {_squares(new)}")
-    if len(refutation.doubled_files) > len(best.doubled_files):
-        new = [f for f in refutation.doubled_files if f not in best.doubled_files] or refutation.doubled_files
-        out.append(f"you get doubled pawns on the {_squares(new)}-file" if len(new) == 1
-                   else f"you get doubled pawns on the {_squares(new)} files")
-    if len(refutation.backward) > len(best.backward):
-        new = [s for s in refutation.backward if s not in best.backward] or refutation.backward
-        out.append(f"your pawn on {new[0]} is left backward" if len(new) == 1
-                   else f"your pawns on {_squares(new)} are left backward")
+    # Pawn weaknesses: more than at the best line's end, and for "you get" than before your move (an isolated pawn
+    # you had anyway, which the best line trades off, is not one your move gives you). A backward pawn the best line
+    # would have freed is "left backward" either way.
+    for attr in ("isolated", "doubled_files", "backward"):
+        mine, theirs = getattr(refutation, attr), getattr(best, attr)
+        before = getattr(start, attr) if start is not None and attr != "backward" else None
+        if len(mine) <= max(len(theirs), len(before) if before is not None else 0):
+            continue
+        new = _new(mine, theirs, before) or _new(mine, theirs) or list(mine)
+        if attr == "isolated":
+            out.append(f"you get {'an isolated pawn' if len(new) == 1 else 'isolated pawns'} on {_squares(new)}")
+        elif attr == "doubled_files":
+            out.append(f"you get doubled pawns on the {_squares(new)}-file" if len(new) == 1
+                       else f"you get doubled pawns on the {_squares(new)} files")
+        else:
+            out.append(f"your pawn on {new[0]} is left backward" if len(new) == 1
+                       else f"your pawns on {_squares(new)} are left backward")
     return out[:limit]

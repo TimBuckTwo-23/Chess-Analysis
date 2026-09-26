@@ -170,6 +170,79 @@ def test_the_bishop_pair_counts_against_the_opponents_and_holes_need_an_enemy_mi
         "d3 and d4 become holes in your camp (no pawn of yours can cover them)"]
 
 
+def _facts_along(fen: str, best: list[str], refutation: list[str], color: str) -> list[str]:
+    """fact_differences at the comparison points of two SAN lines from ``fen``, with the facts before the move."""
+    ends = []
+    for sans in (best, refutation):
+        board = chess.Board(fen)
+        ucis = []
+        for san in sans:
+            move = board.parse_san(san)
+            ucis.append(move.uci())
+            board.push(move)
+        end = comparison_point(fen, ucis)
+        assert end is not None
+        ends.append(board_facts(end, color))
+    return fact_differences(*ends, limit=10, start=board_facts(chess.Board(fen), color))
+
+
+def test_no_castling_right_is_lost_when_there_was_none_to_lose():
+    # 20...Kg7 steps off g8 with no castling rights left: the lines leave the king on g8 and on g7
+    fen = "r4rk1/ppp4p/3p4/3P2pK/5qN1/3b3P/PPP3P1/R2Q3R b - - 1 20"
+    best = ["Qf7+", "Kxg5", "Qe7+", "Nf6+", "Qxf6+", "Kg4", "Qf4+", "Kh5"]
+    refutation = ["Kg7", "Qxd3", "Qf7+", "Kxg5", "Qe7+", "Kh5", "Qe8+", "Kh4"]
+    assert "you lose the right to castle" not in _facts_along(fen, best, refutation, "black")
+    # without the start the rule falls back on the best line's end, which has no right either
+    b_end = board_facts(chess.Board("r4rk1/ppp4p/3p1q2/3P4/6K1/3b3P/PPP3P1/R2Q3R b - - 1 23"), "black")
+    r_end = board_facts(chess.Board("r4r2/ppp1q1kp/3p4/3P3K/6N1/3Q3P/PPP3P1/R6R b - - 2 23"), "black")
+    assert fact_differences(b_end, r_end) == []
+    # a right you had, used to castle in the best line and lost by a king move in the refutation, is lost
+    start = "r3k2r/pppq1ppp/2npbn2/2b1p3/2B1P3/2NPBN2/PPPQ1PPP/R3K2R b KQkq - 0 8"
+    assert "you lose the right to castle" in _facts_along(start, ["O-O", "O-O"], ["Kf8", "O-O"], "black")
+    assert "you lose the right to castle" not in _facts_along(start, ["Kf8", "O-O"], ["Ke7", "O-O"], "black")
+
+
+def test_facts_already_true_before_your_move_are_not_blamed_on_it():
+    # 7...Bd6 in a real game: Black's c-pawns were doubled before the move, and the best line (7...Nxe5 8.Nxe5 Bd6
+    # 9.Qa4+ c6 10.Nxc4) wins one of them back: "you get doubled pawns" would be wrong
+    fen = "r2qkb1r/ppp2ppp/2n1bn2/4B3/2pP4/P1N2N2/1P2PPPP/R2QKB1R b KQkq - 2 7"
+    facts = _facts_along(fen, ["Nxe5", "Nxe5", "Bd6", "Qa4+", "c6", "Nxc4", "Bc7"],
+                         ["Bd6", "Bxf6", "Qxf6", "d5", "Ne5", "dxe6", "O-O-O"], "black")
+    assert facts == ["you lose the bishop pair"]
+    # an isolated h5 pawn the best line gives up (40...Rf7 41.Rah1 Rg8 42.Rxh5) is not one 40...Rg7 gives you
+    fen = "1k5r/1p5r/2q5/p1p1pBPp/PnPpPp2/3P1K2/2P2Q1R/R7 b - - 1 40"
+    facts = _facts_along(fen, ["Rf7", "Rah1", "Rg8", "Rxh5", "Rxf5", "Rh6", "Rfxg5"],
+                         ["Rg7", "Qh4", "Rhg8", "Rg1", "Qxa4", "g6", "Qa3"], "black")
+    assert not any("isolated" in f for f in facts)
+    # a new isolated pawn is still named (6...h6 7.Bxf6 gxf6: h6 and the doubled f-pawns)
+    fen = "rnb1kb1r/pp1pqppp/5n2/2ppP1B1/8/5N2/PPP2PPP/RN1QKB1R b KQkq - 2 6"
+    facts = _facts_along(fen, ["Nc6", "Be2", "Nxe5", "O-O", "h6", "Bxf6", "Qxf6"],
+                         ["h6", "Bxf6", "gxf6", "Nc3", "fxe5", "Nxd5", "Qd6"], "black")
+    assert "you get an isolated pawn on h6" in facts
+
+
+def test_the_king_in_the_centre_and_holes_only_where_they_mean_something():
+    late = "r1bq1rk1/pp3ppp/8/8/8/8/PP3PPP/R1BQK2R w - - 0 15"
+    board = chess.Board(late)
+    assert board_facts(board, "white").king_in_centre and board_facts(board, "white").king_central
+    # an endgame (a queen against two bishops): the king belongs in the centre
+    endgame = chess.Board("8/8/6bb/3Q4/P3p2p/3pk3/1P5P/K7 w - - 0 50")
+    assert board_facts(endgame, "black").king_central and not board_facts(endgame, "black").king_in_centre
+    # "stays" only for a king that was in the centre before your move; a king walked there "ends up" there
+    stays = board_facts(board, "white")
+    castled = board_facts(chess.Board("r1bq1rk1/pp3ppp/8/8/8/8/PP3PPP/R1BQ1RK1 w - - 0 15"), "white")
+    assert "your king stays in the centre" in fact_differences(castled, stays, start=stays)
+    assert "your king ends up in the centre" in fact_differences(castled, stays, start=castled)
+    # the two ends may lie a move apart around move 12: a king central in both is no difference
+    early = board_facts(chess.Board("r1bq1rk1/pp3ppp/8/8/8/8/PP3PPP/R1BQK2R w - - 0 12"), "white")
+    assert not early.king_in_centre and fact_differences(early, stays) == []
+    # holes in a bare endgame (one pawn left) say nothing
+    few = chess.Board("8/8/4K3/p4Pb1/1B2n2k/3B4/8/8 b - - 0 50")
+    one_pawn = chess.Board("8/p7/4K3/5Pb1/1B2n2k/3B4/8/8 b - - 0 50")
+    assert board_facts(few, "black").holes and board_facts(few, "black").pawns == 1
+    assert fact_differences(board_facts(one_pawn, "black"), board_facts(few, "black")) == []
+
+
 def test_concept_labels_are_plain_words():
     assert all(concepts.LABELS[t] for t in concepts.TERMS)
     assert concepts.LABELS["Bishops"] == "bishop placement" and concepts.LABELS["Mobility"] == "piece activity"
