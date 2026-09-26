@@ -3,6 +3,9 @@
 The output is strict JSON: datetimes become ISO-8601 strings, durations become
 seconds, dataclasses become dicts (``Insight`` gains its computed ``priority``),
 NaN/inf/NaT become null, and numpy / pandas values are converted to plain Python.
+Everything is included: the format views (``format_reports``, each a full report) and
+the coaching layer. Boards stay data (FEN, arrows, marks, strips): a ``Diagram``'s
+legacy pre-rendered ``svg`` is left out, so the JSON carries no SVG markup.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from enum import Enum
 from pathlib import PurePath
 from typing import Any
 
-from ..models import Insight, Report
+from ..models import Diagram, Insight, Report
 
 try:  # numpy comes with pandas; it is only needed to recognise its time scalars
     import numpy as _np
@@ -90,6 +93,8 @@ def jsonable(obj: Any, _depth: int = 0) -> Any:
         out = {f.name: jsonable(getattr(obj, f.name), _depth + 1) for f in dataclasses.fields(obj)}
         if isinstance(obj, Insight):
             out["priority"] = jsonable(obj.priority, _depth + 1)
+        if isinstance(obj, Diagram):  # boards are data (FEN + annotations); a pre-rendered picture is not
+            out.pop("svg", None)
         return out
     if isinstance(obj, Mapping):
         return {_key(k): jsonable(v, _depth + 1) for k, v in obj.items()}

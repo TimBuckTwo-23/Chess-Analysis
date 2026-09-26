@@ -1,8 +1,14 @@
 """Self-contained HTML report.
 
-One file with inline CSS, hand-written SVG charts and a tiny optional tooltip
-script: it opens offline, works at phone width, follows the viewer's light/dark
-theme, and can be published as an Artifact fragment (``standalone=False``).
+One file with inline CSS, hand-written SVG charts, boards drawn from FEN (see
+``boards.py``: one piece sprite per page) and a tiny optional script (tooltips,
+remembered checkboxes): it opens offline, works at phone width, follows the viewer's
+light/dark theme, and can be published as an Artifact fragment (``standalone=False``).
+
+A report with per-format reports gets a switcher (radio inputs + CSS, no script):
+"All formats" is the main report, and each format's view is its full rendering with
+its own id prefix. Every finding shows its chart, board and formats; the coaching
+layer adds "Why these moves go wrong" and "Practice" after the positions section.
 
 Everything that comes from data is escaped, and only http(s) URLs ever become
 links. The value-formatting helpers at the top are shared with the Markdown
@@ -19,7 +25,7 @@ import numbers
 import re
 import unicodedata
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -27,7 +33,29 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 from ..insights import STUDY_LIBRARY
-from ..models import VALUE_FORMATS, Chart, Diagram, Insight, Kpi, ModuleResult, Report, StudyItem, Table
+from ..models import (
+    VALUE_FORMATS,
+    Arrow,
+    Chart,
+    Coaching,
+    Diagram,
+    Drill,
+    Explanation,
+    Insight,
+    Kpi,
+    Line,
+    ModuleResult,
+    Motif,
+    OpeningFacts,
+    Report,
+    ReviewItem,
+    Source,
+    Strip,
+    StudyItem,
+    Table,
+)
+from ..visuals import FORMAT_NAMES, FORMAT_ORDER, format_text, line_strip, move_arrow, ordered_formats, position_diagram
+from . import boards
 
 try:  # numpy comes with pandas; it is only needed to recognise its time scalars
     import numpy as _np
@@ -448,6 +476,133 @@ def game_link_text(url: str, labels: Optional[dict[str, str]], i: int) -> str:
 MAX_GAME_LINKS = 3  # example games shown per finding or plan item
 
 
+# ---- formats (bullet / blitz / rapid / daily) -------------------------------------------------------------
+def clean_formats(formats: Any) -> dict[str, int]:
+    """Games per time class as positive ints, in the report's format order; anything unreadable is dropped."""
+    if not isinstance(formats, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for tc, n in formats.items():
+        x = to_number(n)
+        key = text_or_empty(tc).lower()
+        if key and x is not None and x >= 1:
+            counts[key] = int(x)
+    return ordered_formats(counts)
+
+
+def format_name(tc: Any) -> str:
+    key = text_or_empty(tc).lower()
+    return FORMAT_NAMES.get(key) or (key[:1].upper() + key[1:])
+
+
+def format_chip_text(formats: Any) -> str:
+    """"Bullet 210 · Blitz 88" (format order), or "Blitz only" for a single format; "" when unknown."""
+    counts = clean_formats(formats)
+    if len(counts) == 1:
+        return f"{format_name(next(iter(counts)))} only"
+    return " · ".join(f"{format_name(tc)} {n:,}" for tc, n in counts.items())
+
+
+def formats_games_text(formats: Any) -> str:
+    """"210 bullet and 88 blitz games" (for tooltips and screen readers)."""
+    counts = clean_formats(formats)
+    parts = [f"{n:,} {format_name(tc).lower()}" for tc, n in counts.items()]
+    if not parts:
+        return ""
+    body = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + f" and {parts[-1]}"
+    return body + (" game" if sum(counts.values()) == 1 else " games")
+
+
+def view_scope_text(report: Report) -> str:
+    """What a report (or one format's view) covers: "Blitz only: 312 games" / "All formats: 2,731 games"."""
+    tc = text_or_empty(getattr(report, "time_class", ""))
+    if tc:
+        return f"{format_name(tc)} only: {games_text(report.n_games)}"
+    return f"All formats: {games_text(report.n_games)}"
+
+
+# ---- motifs (Lichess puzzle-theme names) -------------------------------------------------------------------
+MOTIF_WORDS = {
+    "fork": "fork",
+    "pin": "pin",
+    "skewer": "skewer",
+    "hangingPiece": "hanging piece",
+    "discoveredAttack": "discovered attack",
+    "discoveredCheck": "discovered check",
+    "doubleCheck": "double check",
+    "trappedPiece": "trapped piece",
+    "backRankMate": "back-rank mate",
+    "smotheredMate": "smothered mate",
+    "anastasiaMate": "Anastasia's mate",
+    "arabianMate": "Arabian mate",
+    "bodenMate": "Boden's mate",
+    "hookMate": "hook mate",
+    "mate": "checkmate",
+    "deflection": "deflection",
+    "attraction": "attraction",
+    "overloading": "overloading",
+    "advancedPawn": "advanced pawn",
+    "clearance": "clearance",
+    "interference": "interference",
+    "intermezzo": "in-between move",
+    "xRayAttack": "x-ray attack",
+    "zugzwang": "zugzwang",
+    "quietMove": "quiet move",
+    "sacrifice": "sacrifice",
+    "promotion": "promotion",
+    "exposedKing": "exposed king",
+    "kingsideAttack": "kingside attack",
+    "queensideAttack": "queenside attack",
+    "capturingDefender": "capturing the defender",
+    "defensiveMove": "defensive move",
+    "openings": "your openings",
+}
+_THEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,40}$")
+
+
+def motif_words(theme: Any) -> str:
+    """A Lichess theme name in words: "backRankMate" -> "back-rank mate", "mateIn2" -> "mate in 2"."""
+    key = text_or_empty(theme)
+    if key in MOTIF_WORDS:
+        return MOTIF_WORDS[key]
+    m = re.fullmatch(r"mateIn(\d+)", key)
+    if m:
+        return f"mate in {m.group(1)}"
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", key).lower() or "tactic"
+
+
+def training_url(theme: Any) -> Optional[str]:
+    """https://lichess.org/training/<theme> for a well-formed theme name, else None."""
+    key = text_or_empty(theme)
+    return f"https://lichess.org/training/{key}" if _THEME_RE.match(key) else None
+
+
+EXPLANATION_KINDS = {"error": "Your mistake", "repeated": "Repeated mistake", "choice": "Choice point"}
+
+
+def pawns_text(cp: Any, mate: Any = None) -> str:
+    """An engine verdict from your side: "−1.52 for you", "mate in 3 for you" / "mate in 2 against you"."""
+    m = to_number(mate)
+    if m is not None and m != 0:
+        n = int(abs(m))
+        return f"mate in {n} for you" if m > 0 else f"mate in {n} against you"
+    x = to_number(cp)
+    if x is None:
+        return ""
+    return f"{format_value(x / 100.0, 'signed_float2')} for you"
+
+
+def line_text(line: Any, limit: int = 16) -> str:
+    """A coaching Line in numbered SAN with its verdict: "5...e5 6.Ndb5 a6 7.Nd6+ (−1.52 for you)"."""
+    if not isinstance(line, Line):
+        return ""
+    moves = boards.numbered_moves(line.fen, line.moves_uci or [], line.moves_san or [], limit=limit)
+    verdict = pawns_text(line.cp_end, line.mate_end)
+    if not moves:
+        return ""
+    return f"{moves} ({verdict})" if verdict else moves
+
+
 def valid_urls(urls: Iterable[Any], limit: int = 5) -> list[str]:
     out = []
     for url in urls or []:
@@ -639,6 +794,17 @@ def chart_table(chart: Chart) -> Table:
 # =========================================================================== SVG charts
 VB_W = 400.0  # viewBox width; charts scale to their container
 PLOT_H = 170.0
+CARD_VB_W, CARD_PLOT_H = 300.0, 120.0  # a chart inside a finding card: narrower, so its text stays readable
+# (viewBox width, plot height) for the chart being drawn
+_CHART_SIZE: ContextVar[tuple[float, float]] = ContextVar("_CHART_SIZE", default=(VB_W, PLOT_H))
+
+
+def _vb_w() -> float:
+    return _CHART_SIZE.get()[0]
+
+
+def _plot_h() -> float:
+    return _CHART_SIZE.get()[1]
 LABEL_PX = 13.0
 TICK_PX = 12.0
 # Glyph advances in em for fitting labels: the wider of DejaVu Sans (what system-ui resolves to
@@ -892,7 +1058,7 @@ def _tip(label: str, items: Sequence[tuple[str, Optional[float]]], fmt: Optional
 
 def _svg_open(height: float, title: str) -> str:
     return (
-        f'<svg viewBox="0 0 {_n(VB_W)} {_n(height)}" role="img" aria-label="{_esc(title or "Chart")}" '
+        f'<svg viewBox="0 0 {_n(_vb_w())} {_n(height)}" role="img" aria-label="{_esc(title or "Chart")}" '
         f'focusable="false" preserveAspectRatio="xMidYMid meet">'
     )
 
@@ -946,7 +1112,7 @@ def _svg_columns(
 
     left = max(_tw(t, TICK_PX) for t in tick_txt) + 10
     right = 6.0
-    band = (VB_W - left - right) / n
+    band = (_vb_w() - left - right) / n
     widest = max(_tw(label) for label in labels)
     shown = labels
     thin = 1
@@ -966,7 +1132,7 @@ def _svg_columns(
         max_w = max(_tw(t) for t in shown)
         # the first label runs down-left from its band centre; its glyph height adds LABEL_PX * sin
         left = max(left, max_w * math.cos(_ROT) + LABEL_PX * math.sin(_ROT) - band / 2 + 2)
-        band = (VB_W - left - right) / n
+        band = (_vb_w() - left - right) / n
         thin = max(1, math.ceil(LABEL_PX * 1.3 / band))
         x_band = 14 + max_w * math.sin(_ROT) + LABEL_PX * math.cos(_ROT)
     elif multiline:
@@ -982,9 +1148,9 @@ def _svg_columns(
             cap_txt = []
     neg_room = 16.0 if cap_txt and has_neg else 0.0
     top = 20.0
-    height = top + PLOT_H + neg_room + x_band
-    y = _linear(ticks[0], ticks[-1], top + PLOT_H, top)
-    x_right = VB_W - right
+    height = top + _plot_h() + neg_room + x_band
+    y = _linear(ticks[0], ticks[-1], top + _plot_h(), top)
+    x_right = _vb_w() - right
 
     out = [_svg_open(height, title)]
     for t, txt in zip(ticks, tick_txt):
@@ -997,7 +1163,7 @@ def _svg_columns(
         x0 = left + i * band
         items = [(name, vals[i]) for name, vals in series]
         out.append(f'<g class="mk"><title>{_esc(_tip(labels[i], items, fmt))}</title>')
-        out.append(f'<rect class="hit" x="{_n(x0)}" y="{_n(top)}" width="{_n(band)}" height="{_n(PLOT_H)}"/>')
+        out.append(f'<rect class="hit" x="{_n(x0)}" y="{_n(top)}" width="{_n(band)}" height="{_n(_plot_h())}"/>')
         if stacked:
             bw = min(BAR_MAX, band * 0.6)
             bx = x0 + (band - bw) / 2
@@ -1040,7 +1206,7 @@ def _svg_columns(
     if ref is not None:
         out.append(_hline("ref", left, x_right, y(ref)))
 
-    label_y = top + PLOT_H + neg_room + (12 if rotate else 18)
+    label_y = top + _plot_h() + neg_room + (12 if rotate else 18)
     for i, text in enumerate(shown):
         if i % thin:
             continue
@@ -1077,7 +1243,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     has_neg = any(v < 0 for v in values)
     single = len(series) == 1
 
-    label_max = VB_W * 0.42
+    label_max = _vb_w() * 0.42
     wrapped = [_wrap(label, label_max) for label in labels]
     label_w = min(label_max, max((_tw(line) for lines in wrapped for line in lines), default=0.0))
     plot_l = label_w + 12
@@ -1095,14 +1261,14 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         if lo == hi:
             hi = lo + 1.0
         x_from = plot_l + (neg_w if has_neg else 0.0)
-        x_to = max(VB_W - pos_w, x_from + 60)
+        x_to = max(_vb_w() - pos_w, x_from + 60)
     else:
         # x-axis tick labels sit side by side: fewer ticks when wide labels ("100,000") would collide
         for target in (5, 4, 3):
             ticks, tick_txt = _axis_ticks(values, fmt, include_zero=True, extra=ref, target=target)
             lo, hi = ticks[0], ticks[-1]
             x_from = max(plot_l + 4, _tw(tick_txt[0], TICK_PX) / 2 + 2)
-            x_to = VB_W - max(_tw(tick_txt[-1], TICK_PX) / 2, 4.0)
+            x_to = _vb_w() - max(_tw(tick_txt[-1], TICK_PX) / 2, 4.0)
             if _tick_labels_fit(ticks, tick_txt, _linear(lo, hi, x_from, x_to)):
                 break
     x = _linear(lo, hi, x_from, x_to)
@@ -1131,7 +1297,7 @@ def _svg_hbar(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         cy = row_y + pitch / 2
         items = [(name, vals[i]) for name, vals in series]
         out.append(f'<g class="mk"><title>{_esc(_tip(label, items, fmt))}</title>')
-        out.append(f'<rect class="hit" x="0" y="{_n(row_y)}" width="{_n(VB_W)}" height="{_n(pitch)}"/>')
+        out.append(f'<rect class="hit" x="0" y="{_n(row_y)}" width="{_n(_vb_w())}" height="{_n(pitch)}"/>')
         lines = wrapped[i]
         first_y = cy - (len(lines) - 1) * line_h / 2
         spans = "".join(
@@ -1198,7 +1364,7 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     last_idx = [max((i for i, v in enumerate(vals) if v is not None), default=-1) for _, vals in series]
     end_txt = format_value(series[0][1][last_idx[0]], fmt) if single and last_idx[0] >= 0 else ""
     right = _tw(end_txt, TICK_PX) + 16 if end_txt else 10.0
-    x_from, x_to = left + 8, VB_W - right
+    x_from, x_to = left + 8, _vb_w() - right
     width = x_to - x_from
     months = month_positions(labels)
     if n == 1:
@@ -1210,8 +1376,8 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     shown_txt = [_shorten(label, max(width / 2, 40.0)) for label in labels]
 
     top = 14.0
-    height = top + PLOT_H + 28
-    y = _linear(ticks[0], ticks[-1], top + PLOT_H, top)
+    height = top + _plot_h() + 28
+    y = _linear(ticks[0], ticks[-1], top + _plot_h(), top)
 
     out = [_svg_open(height, title)]
     zero_drawn = False
@@ -1219,12 +1385,12 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
         if t == 0:
             zero_drawn = True
         else:
-            out.append(_hline("grid", left, VB_W - 4, y(t)))
+            out.append(_hline("grid", left, _vb_w() - 4, y(t)))
         out.append(f'<text class="t-tick" x="{_n(left - 8)}" y="{_n(y(t))}" dy=".32em" text-anchor="end">{_esc(txt)}</text>')
     if zero_drawn:
-        out.append(_hline(_zero_class(data, values), left, VB_W - 4, y(0.0)))
+        out.append(_hline(_zero_class(data, values), left, _vb_w() - 4, y(0.0)))
     if ref is not None:
-        out.append(_hline("ref", left, VB_W - 4, y(ref)))
+        out.append(_hline("ref", left, _vb_w() - 4, y(ref)))
 
     for j, (_, vals) in enumerate(series):
         slot = slots[j]
@@ -1254,11 +1420,11 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
 
     for i in range(n):
         lo_x = left if i == 0 else (xs[i - 1] + xs[i]) / 2
-        hi_x = VB_W if i == n - 1 else (xs[i] + xs[i + 1]) / 2
+        hi_x = _vb_w() if i == n - 1 else (xs[i] + xs[i + 1]) / 2
         items = [(name, vals[i]) for name, vals in series]
         out.append(f'<g class="mk band"><title>{_esc(_tip(labels[i], items, fmt))}</title>')
-        out.append(f'<rect class="hit" x="{_n(lo_x)}" y="{_n(top)}" width="{_n(hi_x - lo_x)}" height="{_n(PLOT_H)}"/>')
-        out.append(_vline("xh", xs[i], top, top + PLOT_H))
+        out.append(f'<rect class="hit" x="{_n(lo_x)}" y="{_n(top)}" width="{_n(hi_x - lo_x)}" height="{_n(_plot_h())}"/>')
+        out.append(_vline("xh", xs[i], top, top + _plot_h()))
         for j, (_, vals) in enumerate(series):
             v = vals[i]
             if v is not None:
@@ -1274,11 +1440,11 @@ def _svg_line(data: ChartData, series: list[tuple[str, list[Optional[float]]]], 
     placed: list[tuple[int, float, float, float]] = []  # (index, centre, left, right)
     for i in [n - 1, 0] + list(range(n - 2, 0, -1)):  # the most recent and the first point, then any with room
         half = _tw(shown_txt[i]) / 2
-        cx = min(max(xs[i], half + 2), VB_W - half - 2)  # edge labels are pulled inside the chart
+        cx = min(max(xs[i], half + 2), _vb_w() - half - 2)  # edge labels are pulled inside the chart
         if i not in {p[0] for p in placed} and all(cx + half + 6 <= lo or cx - half - 6 >= hi for _, _, lo, hi in placed):
             placed.append((i, cx, cx - half, cx + half))
     for i, cx, _, _ in sorted(placed):
-        out.append(f'<text class="t-x" x="{_n(cx)}" y="{_n(top + PLOT_H + 20)}" text-anchor="middle">{_esc(shown_txt[i])}</text>')
+        out.append(f'<text class="t-x" x="{_n(cx)}" y="{_n(top + _plot_h() + 20)}" text-anchor="middle">{_esc(shown_txt[i])}</text>')
     out.append("</svg>")
     return "".join(out)
 
@@ -1309,12 +1475,19 @@ _ECO_RE = re.compile(r"^[A-E]\d\d$")
 _MOVES_RE = re.compile(r"^\d+\.(\.\.)?\s*(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8]|O-O)")
 
 
+# While a view renders: position (EPD) -> the id of its explanation in the coaching section, so a table row
+# that opens a position on the Lichess board (the costliest puzzles) can also link to "why".
+WHY_BY_EPD: ContextVar[dict[str, str]] = ContextVar("WHY_BY_EPD", default={})
+
+
 def _cell_html(value: Any, fmt: Optional[str]) -> tuple[str, str]:
     """(inner html, extra css class) for one table cell."""
     if not is_missing(value) and (fmt == "url" or (fmt not in VALUE_FORMATS and infer_format(value) == "url")):
         url = safe_url(value)
         if url:
-            return _link(url, url_link_text(url)), ""
+            why = WHY_BY_EPD.get().get(boards.epd(boards.fen_from_analysis_url(url))) if WHY_BY_EPD.get() else None
+            extra = f' <a class="why-link" href="#{_esc(why)}">why</a>' if why else ""
+            return _link(url, url_link_text(url)) + extra, "nowrap" if why else ""
         return _esc(value), ""
     text = format_value(value, fmt)
     if isinstance(value, str) and (_ECO_RE.match(text) or _MOVES_RE.match(text)):
@@ -1400,11 +1573,19 @@ def _legend(
     return f'<ul class="legend" aria-label="Legend">{"".join(items)}</ul>'
 
 
-def _chart_html(chart: Chart) -> str:
+def _chart_html(chart: Chart, *, compact: bool = False) -> str:
+    """One chart with its legend, notes and its numbers as a table; ``compact`` for a chart inside a card."""
     title = text_or_empty(chart.title)
     kind = chart.kind if chart.kind in ("bar", "hbar", "line", "stacked_bar") else "table"
     data = chart_data(chart)
-    parts = [f'<figure class="ci-chart" data-kind="{_esc(kind)}">']
+    if compact:
+        token = _CHART_SIZE.set((CARD_VB_W, CARD_PLOT_H))
+        try:
+            return _chart_html(chart)
+        finally:
+            _CHART_SIZE.reset(token)
+    cls = "ci-chart ci-chart--card" if _vb_w() != VB_W else "ci-chart"
+    parts = [f'<figure class="{cls}" data-kind="{_esc(kind)}">']
     if title:
         parts.append(f'<figcaption class="block-title">{_esc(title)}</figcaption>')
     if not data.has_values:
@@ -1499,7 +1680,7 @@ def _confidence_html(confidence: Any) -> str:
 
 @dataclass
 class PageIndex:
-    """Cross-references for one rendered page: where each finding sits and which plan item covers it."""
+    """Cross-references for one rendered view: where each finding sits and which plan item covers it."""
 
     labels: dict[str, str] = field(default_factory=dict)  # game URL -> link text
     anchors: dict[int, str] = field(default_factory=dict)  # id(insight object) -> its card's id
@@ -1507,6 +1688,16 @@ class PageIndex:
     section_by_id: dict[str, str] = field(default_factory=dict)  # insight id -> section title
     plan_by_id: dict[str, int] = field(default_factory=dict)  # insight id -> plan item number
     seen_games: set[str] = field(default_factory=set)  # games already linked higher up the page
+    prefix: str = ""  # id prefix of the view ("" for the main report, "v-blitz-" for the blitz view)
+    view_tc: str = ""  # the view's time class ("" = every format)
+    report_formats: dict[str, int] = field(default_factory=dict)  # games per format in the view
+    why_by_insight: dict[str, str] = field(default_factory=dict)  # insight id -> its first explanation's id
+    why_by_epd: dict[str, str] = field(default_factory=dict)  # position (EPD) -> its first explanation's id
+    username: str = ""
+
+    def id(self, name: str) -> str:
+        """A page id inside this view."""
+        return self.prefix + name
 
     def games_for(self, urls: Iterable[Any]) -> list[str]:
         """Up to MAX_GAME_LINKS games, preferring ones not linked earlier on the page."""
@@ -1517,13 +1708,25 @@ class PageIndex:
         return picked
 
 
-def page_index(report: Report, anchors: Sequence[str]) -> PageIndex:
-    idx = PageIndex(labels=dict(getattr(report, "game_labels", None) or {}), plan_by_id=plan_numbers(report))
-    taken = set(_RESERVED_IDS) | {a.lower() for a in anchors} | {f"{a}-h".lower() for a in anchors}
+def _explanations(coaching: Any) -> list[Explanation]:
+    return [e for e in (getattr(coaching, "explanations", None) or []) if isinstance(e, Explanation)]
+
+
+def page_index(report: Report, anchors: Sequence[str], prefix: str = "", coaching: Any = None) -> PageIndex:
+    """Anchors and cross-references for one view. ``anchors`` are the view's (already prefixed) section ids."""
+    idx = PageIndex(
+        labels=dict(getattr(report, "game_labels", None) or {}),
+        plan_by_id=plan_numbers(report),
+        prefix=prefix,
+        view_tc=text_or_empty(getattr(report, "time_class", "")).lower(),
+        report_formats=clean_formats(getattr(report, "formats", None)),
+        username=text_or_empty(report.username),
+    )
+    taken = {prefix + r for r in _RESERVED_IDS} | {a.lower() for a in anchors} | {f"{a}-h".lower() for a in anchors}
     for module in report.modules or []:
         title = text_or_empty(module.title) or text_or_empty(module.key) or "Section"
         for ins in module.insights or []:
-            base = "f-" + (re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(ins.id)).strip("-") or "finding")
+            base = prefix + "f-" + (re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(ins.id)).strip("-") or "finding")
             anchor, k = base, 2
             while anchor.lower() in taken:
                 anchor, k = f"{base}-{k}", k + 1
@@ -1531,7 +1734,41 @@ def page_index(report: Report, anchors: Sequence[str]) -> PageIndex:
             idx.anchors[id(ins)] = anchor
             idx.anchor_by_id.setdefault(text_or_empty(ins.id), anchor)
             idx.section_by_id.setdefault(text_or_empty(ins.id), title)
+    for k, exp in enumerate(_explanations(coaching), 1):
+        anchor = f"{prefix}why-{k}"
+        if text_or_empty(exp.insight_id):
+            idx.why_by_insight.setdefault(text_or_empty(exp.insight_id), anchor)
+        key = boards.epd(exp.epd or exp.fen)
+        if key:
+            idx.why_by_epd.setdefault(key, anchor)
     return idx
+
+
+def _format_chip_html(formats: Any, page: Optional[PageIndex] = None, *, counts: bool = False) -> str:
+    """The formats behind a finding ("Bullet 210 · Blitz 88" / "Blitz only"); nothing when a one-format view
+    already says it. ``counts``: always the numbers ("Blitz 949"), for the games in a report."""
+    games = clean_formats(formats)
+    if not games or (page is not None and page.view_tc and list(games) == [page.view_tc]):
+        return ""
+    sep = '<span class="fmt-sep" aria-hidden="true">·</span>'
+    text = " · ".join(f"{format_name(tc)} {n:,}" for tc, n in games.items()) if counts else format_chip_text(games)
+    segs = text.split(" · ")
+    segments = "".join(  # the separator ends a segment, so a wrapped line starts with a format
+        f'<span class="fmt-seg">{_esc(seg)}{sep if i < len(segs) - 1 else ""}</span>' for i, seg in enumerate(segs)
+    )
+    title = f"Based on {formats_games_text(games)}"
+    return f'<span class="fmt-chip" title="{_esc(title)}"><span class="sr-only">{_esc(title)}: </span>{segments}</span>'
+
+
+def _insight_visuals(ins: Insight, page: PageIndex, anchor: Optional[str]) -> str:
+    """The finding's chart and board (compact), when it has them."""
+    parts = []
+    if isinstance(getattr(ins, "chart", None), Chart):
+        parts.append(_chart_html(ins.chart, compact=True))
+    if isinstance(getattr(ins, "diagram", None), Diagram):
+        parts.append(_position_html(ins.diagram, f"{anchor or 'ins'}-d-", page, variant="card"))
+    parts = [p for p in parts if p]
+    return f'<div class="insight-vis">{"".join(parts)}</div>' if parts else ""
 
 
 def _insight_html(
@@ -1545,18 +1782,29 @@ def _insight_html(
     kicker = f"{KIND_LABELS[kind]} · {category_label(ins.category)}"
     anchor = page.anchors.get(id(ins))
     id_attr = f' id="{_esc(anchor)}"' if anchor else ""
+    chip = _format_chip_html(getattr(ins, "formats", None), page)
     parts = [f'<article class="card insight insight--{kind}{" insight--compact" if compact else ""}"{id_attr}>']
     parts.append(
         f'<div class="insight-head"><span class="glyph glyph--{kind}" role="img" aria-label="{_esc(meaning)}" '
         f'title="{_esc(meaning)}">{_esc(glyph)}</span><div class="insight-heading">'
-        f'<p class="kicker">{_esc(kicker)}</p><{h} class="insight-title">{_esc(ins.title)}</{h}></div></div>'
+        f'<p class="kicker">{_esc(kicker)}</p><{h} class="insight-title">{_esc(ins.title)}</{h}>'
+        + (f'<p class="fmt-line">{chip}</p>' if chip else "")
+        + "</div></div>"
     )
     if text_or_empty(ins.detail):
         parts.append(f'<p class="insight-detail">{_esc(ins.detail)}</p>')
+    parts.append(_insight_visuals(ins, page, anchor))
+    why = page.why_by_insight.get(text_or_empty(ins.id))
+    if not why and isinstance(getattr(ins, "diagram", None), Diagram):
+        why = page.why_by_epd.get(boards.epd(ins.diagram.fen))
+    if why:
+        parts.append(f'<p class="why-line"><a class="why-link" href="#{_esc(why)}">Why this goes wrong</a></p>')
     plan_no = page.plan_by_id.get(text_or_empty(ins.id))
     steps = [text_or_empty(s) for s in (ins.study or []) if text_or_empty(s)]
     if plan_no:
-        parts.append(f'<p class="in-plan">What to do: <a href="#plan-{plan_no}">study plan, item {plan_no}</a></p>')
+        parts.append(
+            f'<p class="in-plan">What to do: <a href="#{_esc(page.id(f"plan-{plan_no}"))}">study plan, item {plan_no}</a></p>'
+        )
     elif show_study and steps:
         items = "".join(f"<li>{_esc(s)}</li>" for s in steps)
         if compact:
@@ -1579,7 +1827,7 @@ def action_key(username: str, text: str) -> str:
 def _study_html(items: Sequence[StudyItem], page: Optional[PageIndex] = None, username: str = "") -> str:
     page = page or PageIndex()
     head = (
-        '<div class="section-head"><h2 id="study-h">Study plan</h2>'
+        f'<div class="section-head"><h2 id="{_esc(page.id("study-h"))}">Study plan</h2>'
         '<p class="section-sub">Easiest changes first. Related findings share one item, with at most three '
         "actions; tick them off as you go (this browser remembers).</p></div>"
     )
@@ -1618,12 +1866,15 @@ def _study_html(items: Sequence[StudyItem], page: Optional[PageIndex] = None, us
             )
             games = _games_html(page.games_for(item.games), "Review", page.labels)
             lis.append(
-                f'<li class="plan-item" id="plan-{i}"><span class="plan-num" aria-hidden="true">{i}.</span>'
+                f'<li class="plan-item" id="{_esc(page.id(f"plan-{i}"))}"><span class="plan-num" aria-hidden="true">{i}.</span>'
                 f'<div class="plan-body">{kicker}<h3 class="plan-title">{_esc(item.title)}</h3>{why}{also}'
                 f"{checklist}{target_html}{games}</div></li>"
             )
         body = '<ol class="plan">' + "".join(lis) + "</ol>"
-    return f'<section class="section" id="study" aria-labelledby="study-h">{head}{body}</section>'
+    return (
+        f'<section class="section" id="{_esc(page.id("study"))}" aria-labelledby="{_esc(page.id("study-h"))}">'
+        f"{head}{body}</section>"
+    )
 
 
 def _glance_html(report: Report, page: Optional[PageIndex] = None) -> str:
@@ -1643,6 +1894,9 @@ def _glance_html(report: Report, page: Optional[PageIndex] = None) -> str:
                 plan_no = page.plan_by_id.get(iid)
                 if plan_no:
                     where.append(f"plan item {plan_no}")
+                formats = clean_formats(getattr(ins, "formats", None))
+                if formats and set(formats) != set(page.report_formats or formats) and list(formats) != [page.view_tc]:
+                    where.append(format_text(formats))  # only when the finding is about some formats, not all
                 where_text = " · ".join(w for w in where if w)
                 lis.append(
                     f'<li><span class="glyph glyph--{kind} glyph--xs" role="img" aria-label="{_esc(GLYPH_MEANINGS[glyph])}" '
@@ -1655,8 +1909,8 @@ def _glance_html(report: Report, page: Optional[PageIndex] = None) -> str:
             body = f'<p class="empty">{_esc(empty)}</p>'
         count = f' <span class="count">{len(insights)}</span>' if insights else ""
         return (
-            f'<section class="sw-col" id="{key}" aria-labelledby="{key}-h">'
-            f'<h2 id="{key}-h" class="glance-head">{title}{count}</h2>{body}</section>'
+            f'<section class="sw-col" id="{_esc(page.id(key))}" aria-labelledby="{_esc(page.id(key + "-h"))}">'
+            f'<h2 id="{_esc(page.id(key + "-h"))}" class="glance-head">{title}{count}</h2>{body}</section>'
         )
 
     key = (
@@ -1830,20 +2084,72 @@ def sanitize_board_svg(svg: Any, prefix: str = "") -> str:
     return "".join(out)
 
 
-def _board_from_fen(fen: Any) -> str:
-    """A plain python-chess board for a FEN (used when the supplied SVG is rejected)."""
-    try:
-        import chess
-        import chess.svg
+def _has_annotations(d: Diagram) -> bool:
+    return bool(getattr(d, "arrows", None) or getattr(d, "marks", None) or getattr(d, "last_move", "")
+                or getattr(d, "strips", None))
 
-        board = chess.Board(str(fen).strip())
-        return chess.svg.board(board, size=280)
-    except Exception:  # noqa: BLE001 — invalid FEN (or python-chess missing): no board
+
+def _diagram_board(d: Diagram, id_prefix: str, *, label: str = "") -> str:
+    """The board of a diagram: drawn from its FEN and annotations. A legacy pre-rendered ``svg`` without
+    annotations is kept (through the allowlist) until every module sends annotations instead."""
+    legacy = d.svg if isinstance(d.svg, str) else ""
+    if legacy.strip() and not _has_annotations(d):
+        svg = sanitize_board_svg(legacy, id_prefix)
+        if svg:
+            return f'<div class="board-svg" role="img" aria-label="{_esc(label or d.title)}">{svg}</div>'
+    svg = boards.board_svg(d.fen, orientation=d.orientation, arrows=d.arrows or [], marks=d.marks or [],
+                           last_move=d.last_move, label=label or text_or_empty(d.title))
+    return f'<div class="board-svg">{svg}</div>' if svg else ""
+
+
+def _arrow_key_html(d: Diagram) -> str:
+    """The arrows in words, each with its colour: "your move e5", "better a6" (the board's key)."""
+    board = boards.parse_board(d.fen)
+    if board is None:
         return ""
+    items = []
+    for a in d.arrows or []:
+        phrase = boards.arrow_phrase(board, a) if isinstance(a, Arrow) else ""
+        if phrase:
+            kind = a.kind if a.kind in boards.ARROW_COLOUR_WORDS else "neutral"
+            items.append(f'<span class="ak"><i class="ak-sw ak-{kind}" aria-hidden="true"></i>{_esc(phrase)}</span>')
+    return f'<span class="board-key" aria-hidden="true">{"".join(items)}</span>' if items else ""
 
 
-def _diagram_html(d: Diagram, id_prefix: str = "b-") -> str:
-    svg = sanitize_board_svg(d.svg, id_prefix) or sanitize_board_svg(_board_from_fen(d.fen), id_prefix)
+def _strips_html(strips: Iterable[Any], orientation: str) -> str:
+    """Lines of play as rows of small boards, each with its move and caption underneath."""
+    out = []
+    for s in strips or []:
+        if not isinstance(s, Strip):
+            continue
+        frames = []
+        for f in s.frames or []:
+            svg = boards.board_svg(f.fen, orientation=orientation, arrows=f.arrows or [], marks=f.marks or [],
+                                   last_move=f.last_move, mini=True,
+                                   label=f"After {text_or_empty(f.move)}" if text_or_empty(f.move) else "")
+            if not svg:
+                continue
+            cap = f'<span class="frame-cap">{_esc(f.caption)}</span>' if text_or_empty(f.caption) else ""
+            move = f'<span class="frame-move">{_esc(f.move)}</span>' if text_or_empty(f.move) else ""
+            frames.append(f'<li class="frame">{svg}{move}{cap}</li>')
+        if frames:
+            title = f'<p class="strip-title">{_esc(s.title)}</p>' if text_or_empty(s.title) else ""
+            out.append(f'<div class="strip">{title}<ol class="frames">{"".join(frames)}</ol></div>')
+    return "".join(out)
+
+
+_FIG_CLASSES = {"module": "board-fig", "card": "board-fig board-fig--card", "why": "board-fig board-fig--why"}
+
+
+def _position_html(
+    d: Diagram, id_prefix: str = "b-", page: Optional[PageIndex] = None, variant: str = "module", *,
+    show_title: bool = True,
+) -> str:
+    """A position: the board (your move red, the better move green ...), its caption and links, and its lines
+    of play as strips. ``variant``: "module" (a section's boards), "card" (inside a finding) or "why" (an
+    explanation, which never links to itself)."""
+    page = page or PageIndex()
+    board = _diagram_board(d, id_prefix)
     links = []
     game = safe_url(d.link)
     if game:
@@ -1851,15 +2157,32 @@ def _diagram_html(d: Diagram, id_prefix: str = "b-") -> str:
     analysis = lichess_analysis_url(d.fen)
     if analysis:
         links.append(_link(analysis, "Analyse on Lichess"))
-    board = f'<div class="board-svg" role="img" aria-label="{_esc(d.title)}">{svg}</div>' if svg else ""
-    return (
-        '<figure class="board-fig">'
-        f"{board}"
-        f'<figcaption><span class="block-title">{_esc(d.title)}</span>'
+    why = page.why_by_epd.get(boards.epd(d.fen)) if variant == "module" else None
+    if why:
+        links.append(f'<a class="why-link" href="#{_esc(why)}">Why it goes wrong</a>')
+    tc = text_or_empty(getattr(d, "time_class", ""))
+    show_tc = tc and tc != page.view_tc and variant == "module"  # a card and an explanation name the format already
+    chip = f'<span class="fmt-chip">{_esc(format_name(tc))} game</span>' if show_tc else ""
+    title = f'<span class="block-title">{_esc(d.title)}</span>' if show_title and text_or_empty(d.title) else ""
+    caption = (
+        '<figcaption>'
+        + title
+        + chip
         + (f'<span class="board-cap">{_esc(d.caption)}</span>' if text_or_empty(d.caption) else "")
+        + (_arrow_key_html(d) if board and _has_annotations(d) else "")
         + (f'<span class="board-links">{" ".join(links)}</span>' if links else "")
-        + "</figcaption></figure>"
+        + "</figcaption>"
     )
+    fig = f'<figure class="{_FIG_CLASSES.get(variant, "board-fig")}">{board}{caption}</figure>'
+    strips = _strips_html(getattr(d, "strips", None) or [], d.orientation)
+    if strips:
+        return f'<div class="pos pos--lines">{fig}<div class="strips">{strips}</div></div>'
+    return fig
+
+
+def _diagram_html(d: Diagram, id_prefix: str = "b-", page: Optional[PageIndex] = None) -> str:
+    """A section's position diagram (kept for callers of the earlier layout)."""
+    return _position_html(d, id_prefix, page, "module")
 
 
 def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = None) -> str:
@@ -1885,7 +2208,11 @@ def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = 
     if getattr(module, "diagrams", None):
         parts.append(
             '<div class="boards">'
-            + "".join(_diagram_html(d, f"{anchor}-b{i}-") for i, d in enumerate(module.diagrams, 1))
+            + "".join(
+                _position_html(d, f"{anchor}-b{i}-", page, "module")
+                for i, d in enumerate(module.diagrams, 1)
+                if isinstance(d, Diagram)
+            )
             + "</div>"
         )
     blocks = []
@@ -1905,9 +2232,473 @@ def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = 
     return "".join(parts)
 
 
+# =========================================================================== coaching (Report.coaching)
+WHY_OPEN = 10  # explanations shown open; the rest fold away under one toggle
+REVIEW_OPEN = 8  # upcoming review items shown before "Show more"
+DRILL_BOARDS = 3  # puzzle boards previewed per drill
+_LICHESS_GROUPS = (0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2500)
+TABLEBASE_WORDS = {
+    "win": "a win",
+    "loss": "a loss",
+    "draw": "a draw",
+    "cursed-win": "a win, but the 50-move rule makes it a draw",
+    "blessed-loss": "a loss, but the 50-move rule saves it",
+    "maybe-win": "probably a win",
+    "maybe-loss": "probably a loss",
+    "unknown": "not known",
+}
+
+
+def _chip_links(themes: Iterable[Any], label: str) -> str:
+    """Motif chips, each linking to its Lichess training page, after a small label."""
+    chips, seen = [], set()
+    for theme in themes:
+        key = text_or_empty(theme)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        words, url = motif_words(key), training_url(key)
+        if url:
+            chips.append(
+                f'<a class="motif" href="{_esc(url)}" target="_blank" rel="noopener noreferrer" '
+                f'title="{_esc(words[:1].upper() + words[1:])} puzzles on Lichess">{_esc(words)}<span aria-hidden="true"> ↗</span></a>'
+            )
+        else:
+            chips.append(f'<span class="motif">{_esc(words)}</span>')
+    if not chips:
+        return ""
+    return f'<p class="motifs"><span class="mini-label">{_esc(label)}</span>{"".join(chips)}</p>'
+
+
+def _san_only(label: Any) -> str:
+    """"5...e5" -> "e5"."""
+    return re.sub(r"^\d+\.(?:\.\.)?\s*", "", text_or_empty(label))
+
+
+def _explanation_diagram(exp: Explanation) -> Optional[Diagram]:
+    """The explanation's board; built from its position and lines when the coach sent none."""
+    if isinstance(exp.diagram, Diagram):
+        return exp.diagram
+    if boards.parse_board(exp.fen) is None:
+        return None
+    # plain SAN: visuals.parse_move does not read a numbered move ("5...e5") yet
+    d = position_diagram("", exp.fen, orientation=exp.color, played=_san_only(exp.played),
+                         best=_san_only(exp.best) or None, link=exp.game_url, time_class=exp.time_class)
+    for line, title in ((exp.refutation, f"What {exp.played} allows"), (exp.best_line, f"Better: {exp.best}")):
+        if isinstance(line, Line) and line.moves_uci:
+            strip = line_strip(title, line.fen or exp.fen, line.moves_uci)
+            if strip.frames:
+                d.strips.append(strip)
+    return d
+
+
+def peer_label(groups: Sequence[Any]) -> str:
+    """Lichess rating groups [1200, 1400, 1600] -> "Lichess players rated 1200–1800"."""
+    values = sorted(int(g) for g in groups if to_number(g) is not None)
+    if not values:
+        return "Lichess players near your level"
+    top = next((g for g in _LICHESS_GROUPS if g > values[-1]), None)
+    return f"Lichess players rated {values[0]}–{top}" if top else f"Lichess players rated {values[0]}+"
+
+
+def _move_table(title: str, stats: Sequence[Any], played: str) -> str:
+    rows = []
+    for m in list(stats)[:4]:
+        san = text_or_empty(getattr(m, "san", ""))
+        if not san:
+            continue
+        rows.append([san + (" (yours)" if san == played else ""), getattr(m, "share", None), getattr(m, "score", None),
+                     getattr(m, "games", None)])
+    if not rows:
+        return ""
+    return _table_html(Table(title=title, columns=["Move", "Share", "Score", "Games"], rows=rows,
+                             formats=["text", "pct", "pct", "int"]))
+
+
+def _opening_html(op: Any, exp: Explanation) -> str:
+    """What the databases say here: where your move ranks (shown), then the masters' and peers' moves, engine
+    lines, a master game and a credited plan text (folded: they make a long card on a phone)."""
+    if not isinstance(op, OpeningFacts):
+        return ""
+    played = _san_only(exp.played)
+    name = " ".join(x for x in (text_or_empty(op.eco), text_or_empty(op.name)) if x)
+    ranks = []
+    if to_number(op.played_rank_masters):
+        ranks.append(f"the masters' choice number {int(op.played_rank_masters)}")
+    if to_number(op.played_rank_peers):
+        ranks.append(f"number {int(op.played_rank_peers)} among {peer_label(op.peer_groups or [])}")
+    rank = f"<p>Your move {_esc(played)} is {_esc(' and '.join(ranks))}.</p>" if ranks and played else ""
+    parts = []
+    tables = _move_table("Masters", op.masters or [], played) + _move_table(peer_label(op.peer_groups or []), op.peers or [], played)
+    if tables:
+        parts.append(f'<div class="of-tables">{tables}</div>')
+        parts.append('<p class="note">Share: how often each move is played here. Score: how the side to move '
+                     "(you) did after it.</p>")
+    lines = [t for t in (line_text(line) for line in (op.cloud_lines or [])[:3]) if t]
+    if lines:
+        parts.append('<p class="mini-label">Engine lines (Lichess cloud evaluation)</p><ul class="lines">'
+                     + "".join(f'<li class="mono">{_esc(t)}</li>' for t in lines) + "</ul>")
+    game = safe_url(op.master_game)
+    if game:
+        parts.append(f"<p>{_link(game, 'A master game from this position')}</p>")
+    if text_or_empty(op.wiki_text):
+        wiki = safe_url(op.wiki_url)
+        credit = _link(wiki, "Wikibooks, CC BY-SA 4.0") if wiki else "Wikibooks, CC BY-SA 4.0"
+        parts.append(f'<blockquote class="wiki"><p>{_esc(op.wiki_text)}</p><cite>{credit}</cite></blockquote>')
+    if not parts and not rank:
+        return ""
+    head = f'<p class="mini-label">Opening: {_esc(name)}</p>' if name else '<p class="mini-label">Opening databases</p>'
+    folded = (
+        '<details class="study"><summary>What masters and players near your level play here</summary>'
+        f'<div class="opening-facts">{"".join(parts)}</div></details>'
+    ) if parts else ""
+    return f'<div class="opening-facts">{head}{rank}{folded}</div>'
+
+
+def _tablebase_html(tb: Any) -> str:
+    if not isinstance(tb, dict) or not tb:
+        return ""
+    bits = []
+    category = text_or_empty(tb.get("category"))
+    if category:
+        bits.append(f"with perfect play this position is {TABLEBASE_WORDS.get(category, category)} for you")
+    best = text_or_empty(tb.get("best"))
+    if best:
+        bits.append(f"the tablebase move is {best}")
+    for key in ("played_category", "after"):
+        after = text_or_empty(tb.get(key))
+        if after:
+            bits.append(f"after your move it is {TABLEBASE_WORDS.get(after, after)}")
+            break
+    if not bits:
+        return ""
+    return f'<p class="tb"><span class="mini-label">Endgame tablebase</span> {_esc("; ".join(bits))}.</p>'
+
+
+def _maia_html(maia: Any, exp: Explanation) -> str:
+    if not isinstance(maia, dict) or not maia:
+        return ""
+    rating = to_number(maia.get("rating"))
+    who = f"players rated about {int(rating)}" if rating else "players at your level"
+    bits = []
+    p_best, p_played = to_number(maia.get("p_best")), to_number(maia.get("p_played"))
+    if p_best is not None and text_or_empty(exp.best):
+        bits.append(f"find {exp.best} {format_value(p_best, 'pct')} of the time")
+    if p_played is not None and text_or_empty(exp.played):
+        bits.append(f"play {exp.played} {format_value(p_played, 'pct')} of the time")
+    if not bits:
+        return ""
+    return (f'<p class="maia"><span class="mini-label">How findable</span> In the Maia-2 model of human play, '
+            f"{_esc(who)} {_esc(' and '.join(bits))}.</p>")
+
+
+def _sources_html(sources: Iterable[Any]) -> str:
+    items, seen = [], set()
+    for src in sources:
+        if not isinstance(src, Source) or not text_or_empty(src.name):
+            continue
+        key = (text_or_empty(src.name), text_or_empty(src.url))
+        if key in seen:
+            continue
+        seen.add(key)
+        url = safe_url(src.url)
+        name = _link(url, src.name) if url else _esc(src.name)
+        extra = " · ".join(_esc(x) for x in (text_or_empty(src.license), text_or_empty(src.retrieved) and
+                                              f"retrieved {text_or_empty(src.retrieved)}") if x)
+        items.append(f"<li>{name}{' · ' + extra if extra else ''}</li>")
+    return f'<div class="sources"><span class="mini-label">Sources</span><ul>{"".join(items)}</ul></div>' if items else ""
+
+
+def _concepts_html(exp: Explanation) -> str:
+    """The concept chart, or (without one) the concept differences as a short list."""
+    if isinstance(exp.chart, Chart):
+        return _chart_html(exp.chart, compact=True)
+    items = []
+    for c in exp.concepts or []:
+        value = to_number(getattr(c, "value", None))
+        if value is None:
+            continue
+        label = text_or_empty(getattr(c, "label", "")) or text_or_empty(getattr(c, "term", ""))
+        items.append(f"<li>{_esc(label)}: {_esc(format_value(value, 'signed_float2'))} pawns</li>")
+    if not items:
+        return ""
+    return ('<div class="concepts"><p class="mini-label">Where the lines end (pawns, from your side)</p>'
+            f'<ul class="facts">{"".join(items)}</ul></div>')
+
+
+def _explanation_html(exp: Explanation, k: int, page: PageIndex) -> str:
+    anchor = page.id(f"why-{k}")
+    tc = text_or_empty(exp.time_class).lower()
+    kicker = [EXPLANATION_KINDS.get(text_or_empty(exp.kind), "Position")]
+    if tc and tc != page.view_tc:
+        kicker.append(format_name(tc))
+    played, best = text_or_empty(exp.played), text_or_empty(exp.best)
+    title = _esc(played or "Your move") + (f' <span class="why-best">better {_esc(best)}</span>' if best and best != played else "")
+    meta = []
+    drop = to_number(exp.drop)
+    if drop:
+        meta.append(f"{format_value(drop / 100.0, 'pct')} winning chances lost")
+    repeats = int(to_number(exp.repeats) or 0)
+    if repeats > 1:
+        meta.append(f"you played it in {repeats} games")
+    head = (
+        f'<div class="why-head"><p class="kicker">{_esc(" · ".join(kicker))}</p><h3 class="why-title">{title}</h3>'
+        + (f'<p class="why-meta">{_esc(" · ".join(meta))}</p>' if meta else "")
+        + "</div>"
+    )
+
+    d = _explanation_diagram(exp)
+    fig = strips = ""
+    if d is not None:
+        fig = _position_html(replace(d, strips=[]), f"{anchor}-", page, "why", show_title=False)
+        strips = _strips_html(d.strips or [], d.orientation)
+
+    text = []
+    if text_or_empty(exp.text):
+        text.append(f'<p class="why-text">{_esc(exp.text)}</p>')
+        if text_or_empty(exp.text_source) == "llm":
+            text.append('<p class="note">Wording by the AI coach, checked move by move against the engine lines.</p>')
+    lines = []
+    for line, label in ((exp.refutation, f"What {played or 'your move'} allows"), (exp.best_line, f"Better: {best}" if best else "Better")):
+        t = line_text(line)
+        if t:
+            lines.append(f"<dt>{_esc(label)}</dt><dd class=\"mono\">{_esc(t)}</dd>")
+    if lines:
+        text.append(f'<dl class="why-lines">{"".join(lines)}</dl>')
+    motifs = [m for m in exp.motifs or [] if isinstance(m, Motif)]
+    allowed = [m.theme for m in motifs if m.line == "refutation"]
+    missed = [m.theme for m in motifs if m.line == "best"]
+    other = [m.theme for m in motifs if m.line not in ("refutation", "best")]
+    text += [
+        _chip_links(allowed, f"What {played or 'your move'} allowed"),
+        _chip_links(missed, "What you missed"),
+        _chip_links(other, "Patterns"),
+        _chip_links([t for t in exp.drill_themes or [] if t not in allowed + missed + other], "Practise"),
+    ]
+    facts = [text_or_empty(f) for f in exp.facts or [] if text_or_empty(f)]
+    if facts:
+        text.append('<ul class="facts">' + "".join(f"<li>{_esc(f)}</li>" for f in facts) + "</ul>")
+    text += [_maia_html(exp.maia, exp), _tablebase_html(exp.tablebase)]
+
+    extra = [_concepts_html(exp), _opening_html(exp.opening, exp)]
+    sources = list(exp.sources or []) + list(getattr(exp.opening, "sources", None) or [])
+    extra.append(_sources_html(sources))
+    foot = []
+    game_urls = ([exp.game_url] if text_or_empty(exp.game_url) else []) + list(exp.games or [])
+    games = _games_html(page.games_for(game_urls), "Review", page.labels)
+    if games:
+        foot.append(games)
+    finding = page.anchor_by_id.get(text_or_empty(exp.insight_id))
+    if finding:
+        foot.append(f'<p class="why-back"><a href="#{_esc(finding)}">Back to the finding</a></p>')
+
+    body = f'<div class="why-body">{fig}<div class="why-words">{"".join(t for t in text if t)}</div></div>'
+    return (
+        f'<article class="card why" id="{_esc(anchor)}">{head}{body}'
+        + (f'<div class="strips">{strips}</div>' if strips else "")
+        + "".join(x for x in extra if x)
+        + (f'<div class="why-foot">{"".join(foot)}</div>' if foot else "")
+        + "</article>"
+    )
+
+
+def _section_open(page: PageIndex, key: str, title: str, summary: str) -> str:
+    sid = page.id(key)
+    return (
+        f'<section class="section module coach" id="{_esc(sid)}" aria-labelledby="{_esc(sid)}-h">'
+        f'<div class="section-head"><h2 id="{_esc(sid)}-h">{_esc(title)}</h2>'
+        + (f'<p class="summary">{_esc(summary)}</p>' if summary else "")
+        + "</div>"
+    )
+
+
+def _notes_html(notes: Iterable[Any], llm: Any = None) -> str:
+    items = [text_or_empty(n) for n in notes or [] if text_or_empty(n)]
+    if isinstance(llm, dict) and llm:
+        accepted, rejected = to_number(llm.get("accepted")), to_number(llm.get("rejected"))
+        model = text_or_empty(llm.get("model"))
+        bits = [f"AI coach{f' ({model})' if model else ''}"]
+        if accepted is not None:
+            bits.append(f"{int(accepted)} explanations reworded")
+        if rejected is not None:
+            bits.append(f"{int(rejected)} kept as templates (the checker rejected the rewrite)")
+        items.append(": ".join([bits[0], ", ".join(bits[1:])]) if len(bits) > 1 else bits[0])
+    if not items:
+        return ""
+    return ('<div class="coach-notes"><p class="mini-label">Notes</p><ul>'
+            + "".join(f"<li>{_esc(n)}</li>" for n in items) + "</ul></div>")
+
+
+def _why_section_html(coaching: Any, page: PageIndex) -> str:
+    """"Why these moves go wrong": one card per explanation (board, lines, motifs, facts, sources), the motif
+    profile, where you leave opening theory, tablebase-checked endgames, and the coach's notes."""
+    if not isinstance(coaching, Coaching):
+        return ""
+    exps = _explanations(coaching)
+    blocks = []
+    if exps:
+        cards = [_explanation_html(e, k, page) for k, e in enumerate(exps, 1)]
+        blocks.append(f'<div class="why-list">{"".join(cards[:WHY_OPEN])}</div>')
+        rest = cards[WHY_OPEN:]
+        if rest:
+            blocks.append(
+                f'<details class="more why-more"><summary>Show {len(rest)} more explanation{"s" if len(rest) != 1 else ""}'
+                f'</summary><div class="more-body why-list">{"".join(rest)}</div></details>'
+            )
+    profile = []
+    if isinstance(coaching.motif_chart, Chart):
+        profile.append(_chart_html(coaching.motif_chart))
+    if isinstance(coaching.motif_profile, Table) and coaching.motif_profile is not getattr(coaching.motif_chart, "table", None):
+        profile.append(_table_html(coaching.motif_profile))
+    if profile:
+        blocks.append('<div class="coach-block"><h3 class="sub-head">Patterns in the mistakes</h3>'
+                      f'<div class="charts">{"".join(profile)}</div></div>')
+    for table, heading in ((coaching.theory_exit, "Where you leave opening theory"),
+                           (coaching.endgames, "Endgames checked with the tablebase")):
+        if isinstance(table, Table):
+            blocks.append(f'<div class="coach-block"><h3 class="sub-head">{_esc(heading)}</h3>{_table_html(table, show_title=False)}</div>')
+    notes = _notes_html(coaching.notes, coaching.llm)
+    if not blocks and not notes:
+        return ""
+    n = len(exps)
+    summary = (
+        f"The engine's lines for {n} position{'s' if n != 1 else ''} from your games: what your move allowed, "
+        "what was better, and the pattern to practise. On the boards, red is your move and green the better one."
+        if exps else "What the coach found in your games."
+    )
+    return _section_open(page, "why", "Why these moves go wrong", summary) + "".join(blocks) + notes + "</section>"
+
+
+def _short_date(value: Any) -> str:
+    """An ISO date as "26 Sep" (with the year when it is not the current one); other text as it is."""
+    text = text_or_empty(value)
+    try:
+        d = date.fromisoformat(text[:10])
+    except ValueError:
+        return text
+    return f"{d.day} {d:%b}" + (f" {d.year}" if d.year != datetime.now(timezone.utc).year else "")
+
+
+def _review_html(items: Sequence[Any], page: PageIndex, *, limit: Optional[int] = None) -> str:
+    """Review items as a tickable list (this browser remembers), each with a small board."""
+    lis = []
+    for it in items:
+        if not isinstance(it, ReviewItem):
+            continue
+        key = action_key(page.username, f"review:{text_or_empty(it.item_id)}:{text_or_empty(it.due)}")
+        svg = boards.board_svg(it.fen, orientation=boards.side_to_move(it.fen), mini=True, label=text_or_empty(it.title))
+        url = safe_url(it.url)
+        meta = [("From your games" if it.kind == "own" else "Puzzle"), f"due {_short_date(it.due)}" if text_or_empty(it.due) else ""]
+        meta_html = " · ".join(f'<span class="nowrap">{_esc(m)}</span>' for m in meta if m) + (f" · {_link(url, 'open')}" if url else "")
+        lis.append(
+            f'<li class="review-item">{svg}<div class="review-body"><label class="check"><input type="checkbox" '
+            f'data-k="{key}"><span>{_esc(it.title) or "Position"}</span></label><p class="review-meta">{meta_html}</p></div></li>'
+        )
+    if not lis:
+        return ""
+    shown, rest = (lis, []) if limit is None else (lis[:limit], lis[limit:])
+    html_out = f'<ul class="review">{"".join(shown)}</ul>'
+    if rest:
+        html_out += (f'<details class="study"><summary>Show {len(rest)} more</summary>'
+                     f'<ul class="review">{"".join(rest)}</ul></details>')
+    return html_out
+
+
+def _drill_html(drill: Drill) -> str:
+    link = safe_url(drill.link)
+    parts = [f'<article class="card drill"><h4 class="drill-title">{_esc(drill.title) or _esc(motif_words(drill.theme))}</h4>']
+    if text_or_empty(drill.reason):
+        parts.append(f'<p class="drill-reason">{_esc(drill.reason)}</p>')
+    meta = []
+    lo_hi = drill.rating_range if isinstance(drill.rating_range, (list, tuple)) and len(drill.rating_range) == 2 else None
+    if lo_hi and all(to_number(x) is not None for x in lo_hi):
+        meta.append(_esc(f"puzzles rated {int(lo_hi[0])}–{int(lo_hi[1])}"))
+    if text_or_empty(drill.file):
+        meta.append(f'saved as <span class="mono">{_esc(drill.file)}</span>')
+    if link:
+        meta.append(_link(link, "Practise on Lichess"))
+    if meta:
+        parts.append(f'<p class="drill-meta">{" · ".join(meta)}</p>')
+    frames = []
+    for p in (drill.puzzles or [])[:DRILL_BOARDS]:
+        board = boards.parse_board(p.fen)
+        if board is None:
+            continue
+        first = p.solution_uci[0] if p.solution_uci else ""
+        arrow = None
+        if first:
+            arrow = move_arrow(board, first, "best")
+        side = boards.side_to_move(p.fen)
+        svg = boards.board_svg(p.fen, orientation=side, arrows=[arrow] if arrow else [], mini=True,
+                               label=f"Puzzle, {side.title()} to play; the solution starts with the green arrow")
+        url = safe_url(p.url)
+        rating = f"rated {int(p.rating)}" if to_number(p.rating) else "puzzle"
+        cap = _link(url, rating) if url else _esc(rating)
+        frames.append(f'<li class="frame">{svg}<span class="frame-cap">{cap}</span></li>')
+    if frames:
+        parts.append(f'<ol class="frames">{"".join(frames)}</ol>')
+    parts.append("</article>")
+    return "".join(parts)
+
+
+def _progress_html(items: Sequence[Any]) -> str:
+    lis = []
+    for p in items:
+        text = text_or_empty(getattr(p, "text", ""))
+        if not text:
+            before, now = getattr(p, "before", None), getattr(p, "now", None)
+            text = f"{text_or_empty(getattr(p, 'title', ''))}: {format_value(before)} -> {format_value(now)}"
+        improved = getattr(p, "improved", None)
+        badge = ""
+        if improved is True:
+            badge = '<span class="prog prog--up">Improved</span>'
+        elif improved is False:
+            badge = '<span class="prog prog--down">Not yet</span>'
+        lis.append(f"<li>{badge}<span>{_esc(text)}</span></li>")
+    return f'<ul class="progress">{"".join(lis)}</ul>' if lis else ""
+
+
+def _practice_section_html(coaching: Any, page: PageIndex) -> str:
+    """Practice: progress since the last report, positions due for review, puzzle packs, the weekly plan and
+    the review schedule."""
+    if not isinstance(coaching, Coaching):
+        return ""
+    blocks = []
+
+    def block(heading: str, body: str, sub: str = "") -> None:
+        if body:
+            note = f'<p class="section-sub">{_esc(sub)}</p>' if sub else ""
+            blocks.append(f'<div class="coach-block"><h3 class="sub-head">{_esc(heading)}</h3>{note}{body}</div>')
+
+    block("Since your last report", _progress_html(coaching.progress or []))
+    block("Due for review", _review_html(coaching.review_due or [], page),
+          "Solve each position again without moving the pieces, then tick it off (this browser remembers).")
+    drills = [d for d in coaching.drills or [] if isinstance(d, Drill)]
+    block("Puzzle packs", f'<div class="cards cards--grid">{"".join(_drill_html(d) for d in drills)}</div>' if drills else "",
+          "Puzzles for the patterns you miss most, at your level. The green arrow is the first move of the solution.")
+    plan = [p for p in coaching.weekly_plan or [] if text_or_empty(getattr(p, "item", ""))]
+    if plan:
+        with_notes = any(text_or_empty(getattr(p, "note", "")) for p in plan)
+        table = Table(
+            title="",
+            columns=["What", "Minutes a week", "Check again"] + (["Note"] if with_notes else []),
+            rows=[[p.item, p.minutes_per_week, p.recheck_date or None] + ([p.note] if with_notes else []) for p in plan],
+            formats=["text", "int", "text"] + (["text"] if with_notes else []),
+        )
+        block("Your week", _table_html(table, show_title=False))
+    block("Coming up for review", _review_html(coaching.review or [], page, limit=REVIEW_OPEN),
+          "Scheduled 1, 3, 7 and 21 days after this report; the next report lists the ones due.")
+    if not blocks:
+        return ""
+    return (_section_open(page, "practice", "Practice", "Positions from your games to review and puzzles matched to "
+                          "the patterns you miss.") + "".join(blocks) + "</section>")
+
+
 # ids the page itself uses: the fixed sections and their headings ("study" / "study-h")
-_RESERVED_IDS = {"study", "strengths", "weaknesses", "top", "main"}
+_RESERVED_IDS = {"study", "strengths", "weaknesses", "top", "main", "why", "practice"}
 _RESERVED_IDS |= {f"{i}-h" for i in _RESERVED_IDS}
+# id prefixes the page uses: plan items, finding cards, explanations, format views and their tabs
+_RESERVED_PREFIX = re.compile(r"(?i)^(?:plan-\d+|f-|why-\d|v-|fmt-|ci-)")
 
 
 def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
@@ -1922,7 +2713,7 @@ def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
         base = re.sub(r"[^A-Za-z0-9_-]+", "-", text_or_empty(m.key)).strip("-") or f"module-{i}"
         if not base[0].isalpha():
             base = f"m-{base}"
-        if base.lower() in _RESERVED_IDS or re.match(r"(?i)^(?:plan-\d+|f-)", base):
+        if base.lower() in _RESERVED_IDS or _RESERVED_PREFIX.match(base):
             base = f"{base}-section"
         anchor, k = base, 2
         while anchor.lower() in taken or f"{anchor}-h".lower() in taken:
@@ -1932,7 +2723,18 @@ def module_anchors(modules: Sequence[ModuleResult]) -> list[str]:
     return out
 
 
-def _masthead_html(report: Report) -> str:
+def _engine_formats_html(report: Report) -> str:
+    """How many games of each format the engine analysed (not repeated in a one-format view)."""
+    counts = clean_formats(getattr(report, "engine_formats", None))
+    tc = text_or_empty(getattr(report, "time_class", "")).lower()
+    if not counts or (tc and list(counts) == [tc]):
+        return ""
+    return f'<p class="engine-note">Engine-analysed games: {_format_chip_html(counts, counts=True)}</p>'
+
+
+def _masthead_html(report: Report, *, with_engine: bool = True) -> str:
+    """Player, games, dates and filters; the engine note too when the page has no format views (each view
+    then shows its own)."""
     meta = [f"<span>{_esc(games_text(report.n_games))}</span>"]
     span = date_range_text(report.date_from, report.date_to)
     if span:
@@ -1940,12 +2742,18 @@ def _masthead_html(report: Report) -> str:
     if text_or_empty(report.filters):
         meta.append(f"<span>{_esc(report.filters)}</span>")
     sep = '<span class="sep" aria-hidden="true">·</span>'
-    engine = f'<p class="engine-note">{_esc(report.engine_note)}</p>' if text_or_empty(report.engine_note) else ""
+    formats = ""
+    if with_engine and clean_formats(getattr(report, "formats", None)):
+        formats = f'<p class="meta">{_format_chip_html(report.formats, counts=True)}</p>'
+    engine = ""
+    if with_engine:
+        engine = (f'<p class="engine-note">{_esc(report.engine_note)}</p>' if text_or_empty(report.engine_note) else "")
+        engine += _engine_formats_html(report)
     demo = f'<p class="demo-note" role="note">{_esc(DEMO_NOTE)}</p>' if getattr(report, "demo", False) else ""
     name = text_or_empty(report.username) or "Your games"
     return (
         '<header class="masthead"><p class="brand"><span class="board-mark" aria-hidden="true"></span>Chess Insights</p>'
-        f'<h1 class="player">{_esc(name)}</h1><p class="meta">{sep.join(meta)}</p>{engine}{demo}</header>'
+        f'<h1 class="player">{_esc(name)}</h1><p class="meta">{sep.join(meta)}</p>{formats}{engine}{demo}</header>'
     )
 
 
@@ -1973,18 +2781,28 @@ def _lede_html(report: Report) -> str:
     return '<ul class="lede lede--lines">' + "".join(f"<li>{_esc(line)}</li>" for line in lines) + "</ul>"
 
 
-def _nav_html(report: Report, anchors: Sequence[str]) -> str:
+def _nav_html(
+    report: Report,
+    anchors: Sequence[str],
+    page: Optional[PageIndex] = None,
+    extra: Sequence[tuple[int, str, str, Optional[int]]] = (),
+) -> str:
+    """Section chips. ``extra``: (position among the modules, id, label, count) for the coaching sections."""
+    page = page or PageIndex()
+
     def chip(href: str, text: str, count: Optional[int] = None) -> str:
         badge = f'<span class="count">{count}</span>' if count is not None else ""
-        return f'<a href="#{href}">{_esc(text)}{badge}</a>'
+        return f'<a href="#{_esc(href)}">{_esc(text)}{badge}</a>'
 
     chips = [
-        chip("weaknesses", "Weaknesses", len(report.weaknesses or [])),
-        chip("strengths", "Strengths", len(report.strengths or [])),
-        chip("study", "Study plan", len(report.study_plan or [])),
+        chip(page.id("weaknesses"), "Weaknesses", len(report.weaknesses or [])),
+        chip(page.id("strengths"), "Strengths", len(report.strengths or [])),
+        chip(page.id("study"), "Study plan", len(report.study_plan or [])),
     ]
-    chips += [chip(a, text_or_empty(m.title) or a) for m, a in zip(report.modules or [], anchors)]
-    return f'<nav class="chips" aria-label="Sections">{"".join(chips)}</nav>'
+    modules = [chip(a, text_or_empty(m.title) or a) for m, a in zip(report.modules or [], anchors)]
+    for shift, (at, href, text, count) in enumerate(sorted(extra, key=lambda e: e[0])):
+        modules.insert(min(at + shift, len(modules)), chip(href, text, count))
+    return f'<nav class="chips" aria-label="Sections">{"".join(chips + modules)}</nav>'
 
 
 def _footer_html(report: Report) -> str:
@@ -1994,25 +2812,138 @@ def _footer_html(report: Report) -> str:
     return f'<footer class="foot"><h2>How this report works</h2><ul>{notes}</ul>{gen}</footer>'
 
 
-def _body_html(report: Report) -> str:
+def _coaching_at(modules: Sequence[ModuleResult]) -> int:
+    """Where the coaching sections go: after the positions you keep getting wrong, else after the engine
+    review, else at the end."""
+    keys = [text_or_empty(m.key) for m in modules]
+    for key in ("mistakes", "engine_stats"):
+        if key in keys:
+            return keys.index(key) + 1
+    return len(keys)
+
+
+def _view_html(report: Report, prefix: str = "", *, coaching: Any = None, head: str = "", wrapper: str = "main") -> str:
+    """One report's lede, section chips and sections (glance lists, study plan, modules, coaching). Every id
+    starts with ``prefix``, so several views can share a page."""
     modules = list(report.modules or [])
-    anchors = module_anchors(modules)
-    page = page_index(report, anchors)
-    top = [_glance_html(report, page), _study_html(report.study_plan or [], page, text_or_empty(report.username))]
-    return "".join(
+    anchors = [prefix + a for a in module_anchors(modules)]
+    page = page_index(report, anchors, prefix, coaching)
+    at = _coaching_at(modules)
+    token = WHY_BY_EPD.set(page.why_by_epd)
+    try:
+        top = [_glance_html(report, page), _study_html(report.study_plan or [], page, page.username)]
+        before = [_module_html(m, a, page) for m, a in zip(modules[:at], anchors[:at])]
+        why = _why_section_html(coaching, page)
+        practice = _practice_section_html(coaching, page)
+        after = [_module_html(m, a, page) for m, a in zip(modules[at:], anchors[at:])]
+    finally:
+        WHY_BY_EPD.reset(token)
+    extra = []
+    if why:
+        extra.append((at, page.id("why"), "Why", len(_explanations(coaching)) or None))
+    if practice:
+        extra.append((at, page.id("practice"), "Practice", None))
+    body = "".join(top + before + [why, practice] + after)
+    return (
+        head
+        + _lede_html(report)
+        + _nav_html(report, anchors, page, extra)
+        + f'<{wrapper} class="sections">{body}</{wrapper}>'
+    )
+
+
+def _view_key(tc: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text_or_empty(tc).lower()).strip("-") or "other"
+
+
+def format_views(report: Report) -> list[tuple[str, Report]]:
+    """The per-format reports to show as views: (time class, report), in format order."""
+    reports = getattr(report, "format_reports", None) or {}
+    if not isinstance(reports, dict):
+        return []
+    order = {tc: i for i, tc in enumerate(FORMAT_ORDER)}
+    views = [(text_or_empty(tc).lower(), r) for tc, r in reports.items() if isinstance(r, Report) and text_or_empty(tc)]
+    return sorted(views, key=lambda v: (order.get(v[0], len(order)), v[0]))
+
+
+def view_coaching(sub: Report, main: Report, tc: str) -> Optional[Coaching]:
+    """A format view's coaching: its own when the pipeline ran it per format, else the main report's first
+    ``WHY_OPEN`` explanations of that format's games (the rest stay in the All formats view)."""
+    if isinstance(getattr(sub, "coaching", None), Coaching):
+        return sub.coaching
+    main_coaching = getattr(main, "coaching", None)
+    if not isinstance(main_coaching, Coaching):
+        return None
+    exps = [e for e in _explanations(main_coaching) if text_or_empty(e.time_class).lower() == tc]
+    if not exps:
+        return None
+    # the cards repeat the main view's, so only the first ones: every board adds to the page's weight
+    notes = []
+    if len(exps) > WHY_OPEN:
+        rest = len(exps) - WHY_OPEN
+        notes.append(f"{rest} more explanation{'s' if rest != 1 else ''} of {format_name(tc).lower()} positions "
+                     "are in the All formats view.")
+    return Coaching(explanations=exps[:WHY_OPEN], notes=notes)
+
+
+def _view_head_html(report: Report, *, main: bool) -> str:
+    """What a view covers ("Blitz only: 312 games"), its format mix and its engine note."""
+    chip = _format_chip_html(report.formats, counts=True) if main and len(clean_formats(report.formats)) > 1 else ""
+    engine = f'<p class="engine-note">{_esc(report.engine_note)}</p>' if text_or_empty(report.engine_note) else ""
+    return (
+        f'<div class="view-head"><p class="view-scope">{_esc(view_scope_text(report))}</p>'
+        + (f'<p class="meta">{chip}</p>' if chip else "")
+        + engine
+        + _engine_formats_html(report)
+        + "</div>"
+    )
+
+
+def _views_html(report: Report, views: Sequence[tuple[str, Report]]) -> str:
+    """The format switcher (radio inputs + CSS, no script) and one full view per format; "All formats" is the
+    main report."""
+    keys = ["all"] + [_view_key(tc) for tc, _ in views]
+    radios = "".join(
+        f'<input class="fmt-radio" type="radio" name="ci-fmt" id="fmt-{k}"{" checked" if i == 0 else ""}>'
+        for i, k in enumerate(keys)
+    )
+    labels = ['<label for="fmt-all">All<span class="fmt-long"> formats</span></label>'] + [
+        f'<label for="fmt-{_view_key(tc)}">{_esc(format_name(tc))}</label>' for tc, _ in views
+    ]
+    bar = f'<div class="fmt-bar"><span class="fmt-bar-label" aria-hidden="true">Show</span>{"".join(labels)}</div>'
+    parts = [
+        f'<section class="fmt-view fmt-view--all" aria-label="All formats">'
+        f'{_view_html(report, "", coaching=report.coaching, head=_view_head_html(report, main=True), wrapper="div")}</section>'
+    ]
+    for tc, sub in views:
+        key = _view_key(tc)
+        parts.append(
+            f'<section class="fmt-view fmt-view--{key}" aria-label="{_esc(format_name(tc))} only">'
+            + _view_html(sub, f"v-{key}-", coaching=view_coaching(sub, report, tc),
+                         head=_view_head_html(sub, main=False), wrapper="div")
+            + "</section>"
+        )
+    return f'<main class="fmt">{radios}{bar}{"".join(parts)}</main>'
+
+
+def _body_html(report: Report) -> str:
+    views = format_views(report)
+    if views:
+        content = _views_html(report, views)
+    else:
+        content = _view_html(report, "", coaching=getattr(report, "coaching", None))
+    body = "".join(
         [
             '<div class="ci" lang="en">',
-            _masthead_html(report),
-            _lede_html(report),
-            _nav_html(report, anchors),
-            '<main class="sections">',
-            *top,
-            *(_module_html(m, a, page) for m, a in zip(modules, anchors)),
-            "</main>",
+            _masthead_html(report, with_engine=not views),
+            content,
             _footer_html(report),
             "</div>",
         ]
     )
+    if '<svg class="cb' in body:  # one piece sprite for every board on the page, outside any view
+        body = body.replace('<div class="ci" lang="en">', '<div class="ci" lang="en">' + boards.sprite_svg(), 1)
+    return body
 
 
 # =========================================================================== CSS / JS
@@ -2264,6 +3195,92 @@ details.study[open] summary{margin-bottom:8px}
 .ci-tip[hidden]{display:none}
 .ci-tip-head{opacity:.72;margin-bottom:2px}
 .ci-tip strong{font-family:var(--font-mono);font-weight:600;margin-right:8px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.mono{font-family:var(--font-mono);font-size:13px}
+.nowrap{white-space:nowrap}
+.fmt-line{margin-top:4px}
+.fmt-chip{display:inline-flex;flex-wrap:wrap;align-items:center;max-width:100%;padding:1px 10px;border-radius:10px;background:var(--accent-wash);color:var(--ink);font-size:13px;line-height:1.55;font-variant-numeric:tabular-nums}
+.fmt-seg{white-space:nowrap}
+.fmt-sep{padding:0 .45em;color:var(--muted)}
+.insight-vis{display:grid;gap:14px;min-width:0}
+.ci-chart.ci-chart--card{max-width:460px;padding:12px 0 0;background:none;border-top:1px solid var(--hairline);border-radius:0}
+.why-line{font-size:14px}
+.why-link{font-weight:500}
+.board-svg{min-width:0}
+.board-fig--card .cb{max-width:260px}
+.board-fig figcaption .fmt-chip{align-self:flex-start}
+.board-key{display:flex;flex-wrap:wrap;gap:2px 14px;font-size:13px;color:var(--ink-2)}
+.ak{display:inline-flex;align-items:center;gap:6px}
+.ak-sw{display:inline-block;flex:none;width:16px;height:4px;border-radius:2px;background:var(--ar-neutral)}
+.ak-played{background:var(--ar-played)}.ak-best{background:var(--ar-best)}.ak-threat{background:var(--ar-threat)}.ak-line{background:var(--ar-line)}
+.pos{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:16px 20px;align-items:start;min-width:0}
+.pos--lines{grid-column:1/-1}
+@media (min-width:700px){.pos--lines{grid-template-columns:minmax(0,300px) minmax(0,1fr)}}
+.strips{display:flex;flex-direction:column;gap:16px;min-width:0}
+.strip{display:grid;gap:6px;min-width:0}
+.strip-title{font:600 14px/1.3 var(--font-cond);color:var(--ink)}
+.frames{list-style:none;display:flex;flex-wrap:wrap;gap:12px 8px}
+.frame{flex:1 1 84px;max-width:110px;min-width:0;display:flex;flex-direction:column;gap:3px}
+.frame .cb{max-width:none}
+.frame-move{font:600 13px/1.25 var(--font-mono);color:var(--ink)}
+.frame-cap{font-size:12px;line-height:1.35;color:var(--ink-2);overflow-wrap:anywhere}
+.why-list{display:grid;gap:16px;min-width:0}
+.why{display:grid;gap:16px;padding:16px;align-content:start}
+.why-head{display:grid;gap:2px}
+.why-title{font:600 19px/1.3 var(--font-mono);overflow-wrap:anywhere}
+.why-best{font:500 15px var(--font-sans);color:var(--good);margin-left:8px;white-space:nowrap}
+.why-meta{font-size:13px;color:var(--muted)}
+.why-body{display:grid;gap:16px 24px;align-items:start}
+@media (min-width:700px){.why-body{grid-template-columns:minmax(0,300px) minmax(0,1fr)}}
+.why-words{display:grid;gap:12px;min-width:0;max-width:64ch}
+.why-text{font-size:16px;line-height:1.5}
+.why-lines{display:grid;gap:2px}
+.why-lines dt{font:600 13px/1.3 var(--font-cond);color:var(--ink-2)}
+.why-lines dd{margin:0 0 6px;overflow-wrap:anywhere}
+.motifs{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.motifs .mini-label{margin-right:2px}
+.motif{display:inline-flex;align-items:center;padding:2px 10px;border:1px solid var(--hairline);border-radius:999px;background:var(--paper);color:var(--ink);font-size:13px;line-height:1.5}
+.ci a.motif{color:var(--ink);text-decoration:none}
+.ci a.motif:hover{border-color:var(--accent);color:var(--accent)}
+.facts{padding-left:1.1em;display:grid;gap:4px;font-size:14px;color:var(--ink-2)}
+.lines{list-style:none;display:grid;gap:2px}
+.opening-facts,.concepts,.coach-block{display:grid;gap:10px;min-width:0}
+.of-tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px 20px;align-items:start}
+.of-tables .table-wrap{--wrap-bg:var(--surface)}
+.wiki{margin:0;padding:6px 12px;border-left:3px solid var(--axis);color:var(--ink-2);font-size:14px}
+.wiki cite{display:block;margin-top:4px;font-style:normal;font-size:12px;color:var(--muted)}
+.tb,.maia{font-size:14px;color:var(--ink-2)}
+.sources{font-size:12px;color:var(--muted)}
+.sources ul{list-style:none;display:flex;flex-wrap:wrap;gap:2px 14px;margin-top:2px}
+.why-foot{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;font-size:13px}
+.coach-notes{font-size:13px;color:var(--muted)}
+.coach-notes ul{padding-left:1.1em;display:grid;gap:4px;margin-top:4px}
+.review{list-style:none;display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr))}
+.review-item{display:grid;grid-template-columns:88px minmax(0,1fr);gap:12px;align-items:start;padding:10px;border:1px solid var(--hairline);border-radius:8px;background:var(--surface)}
+.review-item .cb{max-width:88px}
+.check{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;align-items:start;cursor:pointer;overflow-wrap:anywhere}
+.check input{width:18px;height:18px;margin:2px 0 0;accent-color:var(--accent)}
+.check input:checked+span{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--axis)}
+.review-meta{font-size:13px;color:var(--muted);margin-top:4px}
+.drill{display:grid;gap:8px;padding:14px 16px;align-content:start}
+.drill-title{font:600 15px/1.35 var(--font-sans)}
+.drill-reason{color:var(--ink-2);font-size:14px}
+.drill-meta{font-size:13px;color:var(--ink-2)}
+.drill .frames{margin-top:4px}
+.progress{list-style:none;display:grid;gap:8px}
+.progress li{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.prog{font:600 12px/1.6 var(--font-cond);letter-spacing:.03em;padding:0 8px;border-radius:999px}
+.prog--up{background:var(--good-wash);color:var(--good)}
+.prog--down{background:var(--neutral-wash);color:var(--neutral)}
+.fmt{display:block;margin-top:24px}
+.fmt-radio{position:absolute;opacity:0;width:1px;height:1px;margin:0;pointer-events:none}
+.fmt-bar{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:fit-content;max-width:100%;padding:4px;border:1px solid var(--hairline);border-radius:10px;background:var(--surface)}
+.fmt-bar-label{padding:0 6px 0 8px;font-size:13px;color:var(--muted)}
+.fmt-bar label{padding:6px 12px;border-radius:7px;cursor:pointer;font:600 14px/1.3 var(--font-cond);color:var(--ink-2);white-space:nowrap}
+.fmt-bar label:hover{color:var(--accent)}
+.fmt-view{display:none}
+.view-head{display:grid;gap:4px;margin-top:20px;padding:12px 14px;border:1px solid var(--hairline);border-radius:8px;background:var(--surface)}
+.view-scope{font:600 18px/1.3 var(--font-cond);color:var(--ink)}
 @media (max-width:560px){
   .allcols{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-2);cursor:pointer;width:max-content}
   .allcols-hint{color:var(--muted)}
@@ -2274,6 +3291,14 @@ details.study[open] summary{margin-bottom:8px}
   .insight{padding:12px 14px}
   .plan-item{grid-template-columns:2rem minmax(0,1fr);gap:8px}
   .plan-num{font-size:18px;line-height:1.35}
+  .why{padding:14px 12px}
+  .why-title{font-size:17px}
+  .review-item{grid-template-columns:72px minmax(0,1fr)}
+  .review-item .cb{max-width:72px}
+  .fmt-bar{width:100%}
+  .fmt-bar-label{display:none}
+  .fmt-long{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+  .fmt-bar label{flex:1 1 auto;padding:6px 8px;text-align:center}
 }
 @media (prefers-reduced-motion:no-preference){.chips a,.ci-chart .bar{transition:opacity .12s,border-color .12s,color .12s}}
 """
@@ -2319,18 +3344,29 @@ _SCRIPT = """<script>
     var el = e.target && e.target.closest ? e.target.closest(".ci-chart [data-tip]") : null;
     if (el) show(el, e.clientX, e.clientY); else tip.hidden = true;
   }
-  var boxes = document.querySelectorAll(".plan input[type=checkbox][data-k]");
+  var boxes = document.querySelectorAll(".plan input[type=checkbox][data-k], .review input[type=checkbox][data-k]");
   for (var b = 0; b < boxes.length; b++) {
     (function (box) {
-      var key = "chess-insights:" + box.getAttribute("data-k");
+      var k = box.getAttribute("data-k"), key = "chess-insights:" + k;
       try { box.checked = window.localStorage.getItem(key) === "1"; } catch (e) {}
       box.addEventListener("change", function () {
         try {
           if (box.checked) window.localStorage.setItem(key, "1"); else window.localStorage.removeItem(key);
         } catch (e) {}
+        var same = document.querySelectorAll('input[data-k="' + k + '"]');  // the same item in the other views
+        for (var j = 0; j < same.length; j++) same[j].checked = box.checked;
       });
     })(boxes[b]);
   }
+  function reveal(id) {  // a link into a folded part of the page opens it
+    var el = id ? document.getElementById(id) : null;
+    for (var p = el && el.parentElement; p; p = p.parentElement) if (p.tagName === "DETAILS") p.open = true;
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[href^="#"]') : null;
+    if (a) { try { reveal(decodeURIComponent(a.getAttribute("href").slice(1))); } catch (err) {} }
+  });
+  if (location.hash) { try { reveal(decodeURIComponent(location.hash.slice(1))); } catch (err) {} }
   document.addEventListener("pointermove", track);
   document.addEventListener("pointerdown", track);
   window.addEventListener("scroll", function () { tip.hidden = true; }, { passive: true });
@@ -2342,7 +3378,22 @@ def _tokens(values: dict[str, str]) -> str:
     return "".join(f"--{k}:{v};" for k, v in values.items())
 
 
-def build_css(standalone: bool = True) -> str:
+def _view_css(views: Sequence[str]) -> str:
+    """The format switcher: the checked radio shows its view and highlights its tab (no script needed)."""
+    out = []
+    for k in views:
+        out.append(
+            f"#fmt-{k}:checked~.fmt-view--{k}{{display:block}}"
+            f'#fmt-{k}:checked~.fmt-bar label[for="fmt-{k}"]{{background:var(--accent);color:var(--surface)}}'
+            f'#fmt-{k}:focus-visible~.fmt-bar label[for="fmt-{k}"]{{outline:2px solid var(--accent);outline-offset:2px}}'
+        )
+    return "".join(out)
+
+
+DEFAULT_VIEWS = ("all",) + FORMAT_ORDER
+
+
+def build_css(standalone: bool = True, views: Sequence[str] = DEFAULT_VIEWS) -> str:
     fonts = (
         '--font-sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;'
         '--font-cond:"IBM Plex Sans Condensed","Roboto Condensed","Arial Narrow","IBM Plex Sans",system-ui,sans-serif;'
@@ -2357,15 +3408,15 @@ def build_css(standalone: bool = True) -> str:
         f".{_cls('sw', s)}{{background:var(--s{'' if s.isdigit() else '-'}{s})}}"
         for s in slots
     )
-    dark = _tokens(_DARK) + "color-scheme:dark;"
+    dark = _tokens({**_DARK, **boards.BOARD_DARK}) + "color-scheme:dark;"
     safe_area = (
         ":root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}" if standalone else ""
     )
     return (
-        f":root{{{_tokens(_LIGHT)}{fonts}color-scheme:light}}"
+        f":root{{{_tokens({**_LIGHT, **boards.BOARD_LIGHT})}{fonts}color-scheme:light}}"
         f'@media (prefers-color-scheme:dark){{:root:not([data-theme="light"]){{{dark}}}}}'
         f':root[data-theme="dark"]{{{dark}}}'
-        f"{safe_area}{_BASE_CSS}{series}"
+        f"{safe_area}{_BASE_CSS}{boards.BOARD_CSS}{series}{_view_css(views)}"
     )
 
 
@@ -2378,7 +3429,8 @@ def render_html(report: Report, *, standalone: bool = True) -> str:
     ``<style>`` and has no doctype/html/head/body tags (the host wraps it).
     """
     title = f"<title>{_esc(report_title(report))}</title>"
-    style = f"<style>{build_css(standalone)}</style>"
+    views = ["all"] + [_view_key(tc) for tc, _ in format_views(report)]
+    style = f"<style>{build_css(standalone, views if len(views) > 1 else ())}</style>"
     token = NO_GAME_LINKS.set(bool(getattr(report, "demo", False)))
     try:
         body = _body_html(report)
