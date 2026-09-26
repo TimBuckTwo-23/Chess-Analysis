@@ -1,0 +1,3 @@
+info string NNUE evaluation using nn-5af11540bbfe.nnue enabled
+
+Final evaluation: none (in check)

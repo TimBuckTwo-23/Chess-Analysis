@@ -8,6 +8,8 @@
         ├─ concepts                   Stockfish 16 classical eval terms at the two line ends, board facts
         ├─ sources/*, openings_info   opening explorer, cloud eval, tablebase, opening names, Wikibooks (C3)
         ├─ explain                    two or three plain sentences + the board with both lines
+        ├─ deep.profile_lines         short lines for every error, both sides (motif profile, puzzle export)
+        ├─ puzzles.fill_puzzle_lines  your errors' best lines and motif themes for the --puzzles PGN
         ├─ profile, drills            motif profile (you vs opponents), puzzle packs, review schedule (C2)
         └─ finish_coaching            after ranking: progress vs the last report, Maia, the LLM coach (C4)
 
@@ -52,7 +54,7 @@ def build_coaching(ctx: "AnalysisContext", modules: list[ModuleResult], cfg: Opt
     opening facts under the openings tables) and, through ``profile.motif_claims`` only, motif findings to the
     Engine review section. Never raises.
     """
-    from . import critical, deep, drills, endgames, explain, openings_info, profile
+    from . import critical, deep, drills, endgames, explain, openings_info, profile, puzzles
 
     cfg = cfg or CoachConfig()
     coaching = Coaching(settings={"depth": cfg.depth, "max_positions": cfg.max_positions, "multipv": cfg.multipv})
@@ -61,12 +63,25 @@ def build_coaching(ctx: "AnalysisContext", modules: list[ModuleResult], cfg: Opt
         return coaching
     today = cfg.today or datetime.now(timezone.utc).date()
 
-    positions = _step(coaching, "Critical positions", lambda: critical.select_critical(ctx, modules, cfg.max_positions)) or []
+    positions = _step(
+        coaching, "Critical positions", lambda: critical.select_critical(ctx, modules, cfg.max_positions)
+    ) or []
+    coaching.settings["positions"] = len(positions)
     lines = _step(coaching, "Deep analysis", lambda: deep.analyse_positions(positions, cfg, coaching.notes)) or {}
+    engine_name = next((r.engine for r in lines.values() if r.engine), "")
+    if engine_name:
+        coaching.settings["engine"] = engine_name
     explanations = _step(
         coaching, "Explanations", lambda: explain.explain_all(ctx, positions, lines, cfg, coaching.notes)
     ) or []
     coaching.explanations = list(explanations)
+    coaching.settings["explained"] = len(coaching.explanations)
+
+    # Your errors' best lines for the puzzle export: from the deep pass, else the profile pass (which the motif
+    # profile below reuses: deep.profile_lines keeps its result for the run).
+    profile_errors = (_step(coaching, "Motif lines", lambda: deep.profile_lines(ctx, cfg, coaching.notes)) or []
+                      if cfg.profile else [])
+    _step(coaching, "Puzzle lines", lambda: puzzles.fill_puzzle_lines(ctx, coaching, lines, profile_errors))
 
     _step(coaching, "Opening facts", lambda: openings_info.annotate(ctx, coaching, modules, cfg))
     _step(coaching, "Endgames", lambda: endgames.annotate(ctx, coaching, cfg))
