@@ -2,25 +2,25 @@
 
 **3,354 games** · 23 Sep 2023 – 26 Sep 2026 · rated + casual, all time controls, standard chess
 
-_Stockfish 16 at depth 12 on the 300 most recent games._
+_Stockfish 16 at depth 15 on the 1000 most recent games._
 
 > Your ratings: blitz 949 (−201 over these games), bullet 652 (+94), rapid 1132 (−131).
 >
 > Start with: 1. Queen's Gambit, move 4: you played 4.e4 in 6 of 7 games; 4.Nf3 is better.
 >
-> Strength to build on: You score more with the Queen's Gambit than with your other White openings.
+> Strength to build on: The Queen's Gambit gives you good positions as White.
 
 ## At a glance
 
 **Weaknesses** (3)
 
 - `??` Queen's Gambit, move 4: you played 4.e4 in 6 of 7 games; 4.Nf3 is better — _Positions you keep getting wrong · plan item 1_
-- `??` Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...a6 is better — _Positions you keep getting wrong · plan item 1_
-- `??` Sicilian Defense, move 5: you played 5...e5 in 6 of 10 games; 5...Nf6 is better — _Positions you keep getting wrong · plan item 1_
+- `??` Queen's Gambit, move 4: you played 4.d5 in 9 of 16 games; 4.Nf3 is better — _Positions you keep getting wrong · plan item 1_
+- `??` Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...d6 is better — _Positions you keep getting wrong · plan item 1_
 
 **Strengths** (1)
 
-- `!` You score more with the Queen's Gambit than with your other White openings — _Openings_
+- `!!` The Queen's Gambit gives you good positions as White — _Engine review_
 
 _Marks: `??` serious weakness · `?` weakness · `?!` minor weakness · `!!` major strength · `!` strength · `i` observation. Most important first; each one is explained in its section._
 
@@ -30,17 +30,17 @@ Easiest changes first. Related findings share one item, with at most three actio
 
 1. **Queen's Gambit, move 4: you played 4.e4 in 6 of 7 games; 4.Nf3 is better** — _Your own positions · 10 minutes a day_
 
-   Also covers: Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...a6 is better · Sicilian Defense, move 5: you played 5...e5 in 6 of 10 games; 5...Nf6 is better
+   Also covers: Queen's Gambit, move 4: you played 4.d5 in 9 of 16 games; 4.Nf3 is better · Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...d6 is better
 
-   After 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 you played 4.e4 in 6 of the 7 games that reached this position. Stockfish analysed 2 of them: the move cost you about 12 in 100 of your chances to win; Stockfish prefers 4.Nf3. You go wrong on about 1 move in 7 overall, so playing this one move in 6 of 7 games is a habit, not bad luck.
+   After 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 you played 4.e4 in 6 of the 7 games that reached this position. Stockfish analysed 2 of them: the move cost you about 10 in 100 of your chances to win; Stockfish prefers 4.Nf3. You go wrong on about 1 move in 7 overall, so playing this one move in 6 of 7 games is a habit, not bad luck.
 
    - [ ] Set up the position after 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 and work out why 4.Nf3 beats 4.e4.
-   - [ ] Set up the position after 1.e4 c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4 and work out why 5...a6 beats 5...e5.
+   - [ ] Set up the position after 1.d4 d5 2.c4 dxc4 3.e4 e5 and work out why 4.Nf3 beats 4.d5.
    - [ ] Solve 10 of your own puzzles a day: 300 positions from your games where your move cost a lot, in bigmuffeater-puzzles.pgn. Import the file into a Lichess study or any chess program.
 
    _Target for your next report:_ Play 4.Nf3 the next time this position comes up (you played 4.e4 in 6 of 7 games).
 
-   Review: [Win · 1+0 · vs 629 · 3 Sep](https://www.chess.com/game/live/173948256678) · [Win · 1+1 · vs 591 · 21 Sep](https://www.chess.com/game/live/184164572016) · [Loss · 1+1 · vs 686 · 30 Aug](https://www.chess.com/game/live/173726619240)
+   Review: [Win · 1+0 · vs 629 · 3 Sep](https://www.chess.com/game/live/173948256678) · [Loss · 3+2 · vs 926 · 23 Jul](https://www.chess.com/game/live/171978689588) · [Win · 1+1 · vs 591 · 21 Sep](https://www.chess.com/game/live/184164572016)
 
 ---
 
@@ -563,22 +563,22 @@ _Days in UTC. vs rating = your score minus what your rating predicts, per game (
 
 ## Engine review
 
-Stockfish reviewed 300 of your games: your engine accuracy averaged 76.0 against 75.0 for your opponents, and you blundered 7.5 times per 100 moves (opponents 7.9).
+Stockfish reviewed 1000 of your games: your engine accuracy averaged 76.4 against 75.1 for your opponents, and you blundered 7.2 times per 100 moves (opponents 7.4). Key finding: The Queen's Gambit gives you good positions as White.
 
-- Games analysed: **300** — Stockfish 16, depth 12
-- Your engine accuracy: **76.0** — opponents 75.0 in the same games
-- Blunders /100 moves: **7.5** — opponents 7.9
-- Mistakes /100 moves: **5.1** — opponents 4.7
-- Inaccuracies /100 moves: **11.3** — opponents 10.9
-- Pawns given away per move: **0.64** — opponents 0.65 (average centipawn loss / 100)
+- Games analysed: **1,000** — Stockfish 16, depth 15
+- Your engine accuracy: **76.4** — opponents 75.1 in the same games
+- Blunders /100 moves: **7.2** — opponents 7.4
+- Mistakes /100 moves: **4.4** — opponents 4.5
+- Inaccuracies /100 moves: **10.1** — opponents 10.0
+- Pawns given away per move: **0.62** — opponents 0.63 (average centipawn loss / 100)
 
 #### Mistakes and blunders per 100 moves, by phase
 
 | Phase | Your moves | Pawns you give away per move | Your mistakes+blunders /100 | Opponents' moves | Pawns they give away per move | Opponents' mistakes+blunders /100 |
 |---|---:|---:|---:|---:|---:|---:|
-| Opening | 2,926 | 0.38 | 7.9 | 2,943 | 0.40 | 7.8 |
-| Middlegame | 3,469 | 0.88 | 18.2 | 3,450 | 0.89 | 18.3 |
-| Endgame | 2,522 | 0.61 | 10.2 | 2,530 | 0.63 | 10.2 |
+| Opening | 9,934 | 0.37 | 7.5 | 10,029 | 0.40 | 7.8 |
+| Middlegame | 11,281 | 0.85 | 16.9 | 11,182 | 0.85 | 17.4 |
+| Endgame | 9,641 | 0.60 | 9.7 | 9,641 | 0.61 | 9.8 |
 
 _Phases follow Lichess's rules: the middlegame starts once pieces come off or the back ranks empty; the endgame once at most 6 queens, rooks, bishops and knights remain. Pawns given away per move: how much worse Stockfish rated the position after the move, on average (the average centipawn loss / 100)._
 
@@ -586,18 +586,25 @@ _Phases follow Lichess's rules: the middlegame starts once pieces come off or th
 
 | Move numbers | Your moves | Your blunders /100 | Opponents' moves | Opponents' blunders /100 |
 |---|---:|---:|---:|---:|
-| 1–10 | 2,981 | 3.3 | 2,981 | 4.0 |
-| 11–20 | 2,798 | 11.6 | 2,801 | 11.4 |
-| 21–30 | 1,861 | 9.8 | 1,857 | 10.7 |
-| 31–40 | 818 | 5.3 | 822 | 6.8 |
-| 41+ | 459 | 3.9 | 462 | 2.6 |
+| 1–10 | 9,906 | 3.4 | 9,902 | 3.8 |
+| 11–20 | 8,959 | 10.6 | 8,941 | 10.7 |
+| 21–30 | 6,105 | 9.6 | 6,097 | 9.9 |
+| 31–40 | 3,066 | 6.7 | 3,078 | 6.6 |
+| 41+ | 2,820 | 5.5 | 2,834 | 5.4 |
 
 #### Accuracy by month
 
 |  | You | Opponents |
 |---|---:|---:|
-| 2026-08 | 76.3 | 76.0 |
-| 2026-09 | 75.9 | 74.7 |
+| 2026-01 | 79.0 | 72.4 |
+| 2026-02 | 77.8 | 78.9 |
+| 2026-03 | 71.6 | 73.6 |
+| 2026-04 | 77.7 | 80.1 |
+| 2026-05 | 75.9 | 73.2 |
+| 2026-06 | 76.9 | 75.1 |
+| 2026-07 | 76.2 | 75.8 |
+| 2026-08 | 76.6 | 74.9 |
+| 2026-09 | 75.6 | 74.2 |
 
 _Months with fewer than 3 analysed games are left blank._
 
@@ -605,9 +612,10 @@ _Months with fewer than 3 analysed games are left blank._
 
 | Time control | Games | Your engine accuracy | Opponents' engine accuracy | Pawns you give away per move | Pawns they give away per move | Your blunders /100 moves | Opponents' blunders /100 moves |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Bullet | 295 | 75.8 | 74.8 | 0.65 | 0.66 | 7.6 | 8.0 |
-| Blitz | 3 | 85.7 | 88.2 | 0.41 | 0.34 | 3.3 | 4.3 |
-| Rapid | 2 | 90.2 | 88.0 | 0.46 | 0.47 | 2.4 | 3.9 |
+| Bullet | 441 | 75.7 | 74.3 | 0.64 | 0.67 | 7.6 | 8.1 |
+| Blitz | 512 | 76.8 | 75.5 | 0.62 | 0.61 | 7.1 | 7.1 |
+| Rapid | 39 | 77.6 | 76.4 | 0.50 | 0.52 | 5.2 | 5.5 |
+| Daily | 8 | 93.0 | 87.3 | 0.27 | 0.42 | 0.9 | 4.7 |
 
 _Engine accuracy is Lichess's formula (0-100), not chess.com's. Pawns given away per move: how much worse Stockfish rated the position after each move, on average (the average centipawn loss / 100)._
 
@@ -615,9 +623,9 @@ _Engine accuracy is Lichess's formula (0-100), not chess.com's. Pawns given away
 
 | Time control | Your moves short of time | Your blunders /100 (short of time) | Your blunders /100 (otherwise) | Opponents' moves short of time | Opponents' blunders /100 (short of time) | Opponents' blunders /100 (otherwise) |
 |---|---:|---:|---:|---:|---:|---:|
-| Bullet | 885 | 9.0 | 7.5 | 820 | 8.9 | 7.9 |
-| Blitz | 13 | 0.0 | 3.5 | 23 | 0.0 | 4.9 |
-| Rapid | 0 | — | 2.4 | 0 | — | 3.9 |
+| Bullet | 1,321 | 8.9 | 7.5 | 1,279 | 9.2 | 7.9 |
+| Blitz | 2,190 | 8.8 | 6.9 | 1,636 | 8.3 | 7.0 |
+| Rapid | 14 | 7.1 | 5.2 | 36 | 0.0 | 5.7 |
 
 _Short of time: less than 15% of the starting clock left before the move. Live games with clock data only._
 
@@ -625,8 +633,8 @@ _Short of time: less than 15% of the starting clock left before the move. Live g
 
 | Situation | Games | Won | Drawn | Lost | You won or held |
 |---|---:|---:|---:|---:|---:|
-| You got a winning position first (≥ 85%) | 132 | 86 | 1 | 45 | 65% |
-| Your opponent got one first (you ≤ 15%) | 133 | 42 | 0 | 91 | 32% |
+| You got a winning position first (≥ 85%) | 496 | 356 | 15 | 125 | 72% |
+| Your opponent got one first (you ≤ 15%) | 414 | 105 | 9 | 300 | 28% |
 
 _Winning position: Stockfish gave that side at least a 85% chance to win. Each game counts once, for the side that got there first. You won or held: in the first row the share you won, in the second the share you still drew or won._
 
@@ -634,10 +642,10 @@ _Winning position: Stockfish gave that side at least a 85% chance to win. Each g
 
 | Pattern | You | You /100 moves | Opponents | Opponents /100 moves |
 |---|---:|---:|---:|---:|
-| Missed a tactical shot | 235 | 2.64 | 258 | 2.89 |
-| Left material hanging | 440 | 4.93 | 421 | 4.72 |
-| Missed a forced mate | 46 | 0.52 | 59 | 0.66 |
-| Allowed a forced mate | 111 | 1.24 | 97 | 1.09 |
+| Missed a tactical shot | 743 | 2.41 | 734 | 2.38 |
+| Left material hanging | 1,371 | 4.44 | 1,307 | 4.24 |
+| Missed a forced mate | 180 | 0.58 | 177 | 0.57 |
+| Allowed a forced mate | 404 | 1.31 | 405 | 1.31 |
 
 _Missed tactical shot: the engine's best move was a capture, check or promotion, you played something else and lost at least 15% of your winning chances. Left material hanging: a mistake or blunder the opponent could punish with a capture that wins material (recapturing in a trade doesn't count)._
 
@@ -645,12 +653,12 @@ _Missed tactical shot: the engine's best move was a capture, check or promotion,
 
 | Piece moved | Your moves | Your blunders | Blunders /100 moves | Share of your blunders |
 |---|---:|---:|---:|---:|
-| King | 997 | 60 | 6.0 | 9.0% |
-| Queen | 1,137 | 112 | 9.9 | 17% |
-| Rook | 1,252 | 104 | 8.3 | 16% |
-| Bishop | 1,514 | 119 | 7.9 | 18% |
-| Knight | 1,434 | 128 | 8.9 | 19% |
-| Pawn | 2,583 | 143 | 5.5 | 21% |
+| King | 4,042 | 204 | 5.0 | 9.2% |
+| Queen | 4,046 | 396 | 9.8 | 18% |
+| Rook | 4,415 | 398 | 9.0 | 18% |
+| Bishop | 4,758 | 388 | 8.2 | 17% |
+| Knight | 4,927 | 360 | 7.3 | 16% |
+| Pawn | 8,668 | 480 | 5.5 | 22% |
 
 _Castling counts as a king move._
 
@@ -658,38 +666,62 @@ _Castling counts as a king move._
 
 | Opening | Colour | Games | Eval after move 10 | Games a pawn or more worse | Score |
 |---|---|---:|---:|---:|---:|
-| Sicilian Defense | Black | 58 | 0.00 | 14 | 53% |
-| Queen's Gambit | White | 48 | +0.38 | 11 | 54% |
-| Slav Defense | White | 17 | +0.85 | 3 | 47% |
-| Queen's Pawn Opening | Black | 13 | −1.00 | 4 | 23% |
-| Queen's Gambit | Black | 11 | −0.13 | 1 | 45% |
-| Scotch Game | White | 11 | +0.56 | 2 | 64% |
-| King's Indian Defense | White | 10 | −0.57 | 5 | 50% |
-| Caro-Kann Defense | Black | 8 | −0.12 | 2 | 63% |
-| Caro-Kann Defense | White | 8 | +0.26 | 2 | 25% |
-| Englund Gambit | White | 8 | +2.57 | 1 | 50% |
-| Alapin Sicilian Defense | Black | 7 | −1.19 | 3 | 43% |
-| Alapin Sicilian | Black | 6 | −0.91 | 1 | 67% |
-| Queen's Pawn Opening | White | 6 | +0.10 | 2 | 17% |
-| English Opening | Black | 5 | −0.16 | 0 | 20% |
-| Englund Gambit | Black | 5 | +0.72 | 2 | 80% |
-| Old Benoni Defense | White | 5 | −2.91 | 5 | 40% |
+| Sicilian Defense | Black | 232 | +0.27 | 46 | 51% |
+| Queen's Gambit | White | 186 | +0.78 | 33 | 58% |
+| Queen's Pawn Opening | Black | 52 | −0.15 | 15 | 40% |
+| Englund Gambit | White | 34 | +0.55 | 11 | 47% |
+| Slav Defense | White | 33 | +0.36 | 8 | 45% |
+| Queen's Gambit | Black | 26 | −0.18 | 7 | 42% |
+| King's Indian Defense | White | 25 | −0.20 | 7 | 48% |
+| Caro-Kann Defense | White | 23 | +0.45 | 4 | 43% |
+| Alapin Sicilian Defense | Black | 20 | −0.54 | 10 | 50% |
+| Caro-Kann Defense | Black | 17 | −0.14 | 4 | 62% |
+| Queen's Pawn Opening | White | 17 | +0.96 | 2 | 29% |
+| Scotch Game | White | 15 | 0.00 | 4 | 67% |
+| French Defense | White | 14 | +0.65 | 2 | 54% |
+| Scandinavian Defense | Black | 13 | +0.17 | 3 | 54% |
+| Old Benoni Defense | White | 12 | −1.39 | 6 | 33% |
+| Modern Defense | White | 11 | −0.19 | 3 | 68% |
+| Alapin Sicilian | Black | 10 | −0.04 | 1 | 80% |
+| English Opening | Black | 10 | −0.02 | 1 | 40% |
+| Englund Gambit | Black | 10 | −1.13 | 7 | 60% |
+| Closed Sicilian Defense | Black | 9 | −0.31 | 2 | 56% |
+| Indian Game | White | 9 | +1.42 | 2 | 56% |
+| London System | Black | 9 | −0.15 | 2 | 44% |
+| Owen's Defense | White | 8 | +0.11 | 2 | 38% |
+| Semi-Slav Defense | White | 8 | −0.52 | 2 | 63% |
+| Sicilian Defense | White | 8 | +0.45 | 2 | 56% |
+| Dutch Defense | White | 7 | +0.09 | 1 | 57% |
+| Indian Game | Black | 7 | +0.16 | 2 | 43% |
+| Philidor Defense | White | 7 | +1.76 | 0 | 71% |
+| French Defense | Black | 6 | −0.95 | 3 | 50% |
+| Grunfeld Defense | White | 6 | +1.05 | 0 | 50% |
+| Nimzowitsch-Larsen Attack | Black | 6 | +0.79 | 1 | 50% |
+| Pirc Defense | White | 6 | −0.80 | 3 | 67% |
+| Reti Opening | Black | 6 | +0.77 | 1 | 50% |
+| King's Pawn Opening | White | 5 | −2.35 | 4 | 20% |
+| Nimzo-Indian Defense | Black | 5 | −0.31 | 1 | 40% |
+| Nimzo-Indian Defense | White | 5 | +0.91 | 0 | 20% |
+| Scandinavian Defense | White | 5 | +2.49 | 0 | 100% |
 
 _Stockfish's evaluation from your side after both players' 10th move, in pawns (+0.40 = you are 0.4 of a pawn better), compared with its evaluation of the start position, so White's usual small edge counts as 0; capped at ±5 pawns per game. Only engine-analysed games that reached move 10 count, so the numbers of games are lower than in the Openings section. Games started from a custom position are left out._
 
 ### Findings
 
-- `i` **Observation · Tactics: You missed 46 forced checkmates (your opponents 59)** — Stockfish saw a forced mate for you 46 times that you didn't follow through (your opponents: 59); you also allowed 111 forced mates against you (your opponents: 97). _(High confidence)_ · review: [Loss · 1+1 · vs 666 · 7 Sep](https://www.chess.com/game/live/174130766058) · [Loss · 1+1 · vs 694 · 13 Sep](https://www.chess.com/game/live/174431116926) · [Loss · 1+1 · vs 666 · 11 Sep](https://www.chess.com/game/live/174335387384)
+- `i` **Observation · Tactics: You missed 180 forced checkmates (your opponents 177)** — Stockfish saw a forced mate for you 180 times that you didn't follow through (your opponents: 177); you also allowed 404 forced mates against you (your opponents: 405). _(High confidence)_ · review: [Loss · 1+1 · vs 666 · 7 Sep](https://www.chess.com/game/live/174130766058) · [Loss · 1+1 · vs 590 · 22 Aug](https://www.chess.com/game/live/173348648442) · [Loss · 1+1 · vs 483 · 20 Aug](https://www.chess.com/game/live/173275476862)
   - Solve mate-in-2 and mate-in-3 puzzles until the common patterns (back rank, smothered, Anastasia's) are automatic.
   - When your opponent's king is exposed, look at every check first, even ones that sacrifice material.
-- `i` **Observation · Overall accuracy: Your engine accuracy: 80 in wins, 84 in draws, 72 in losses** — Your average engine accuracy (Lichess's formula, 0-100) was 79.6 in 146 wins, 84.4 in 2 draws, 72.3 in 152 losses. Your opponents averaged 75.0 over the same games. _(High confidence)_ · review: [Loss · 1+1 · vs 655 · 12 Sep](https://www.chess.com/game/live/174349480852) · [Loss · 1+1 · vs 675 · 27 Aug](https://www.chess.com/game/live/173627400082) · [Loss · 1+1 · vs 666 · 7 Sep](https://www.chess.com/game/live/174130766058)
+- `!!` **Strength · Opening repertoire: The Queen's Gambit gives you good positions as White** — In 186 analysed games as White in the Queen's Gambit, Stockfish rated your position after move 10 at +0.78 pawns on average compared with the start; 78 of them were already a pawn or more better. _(High confidence)_ · review: [Win · 1+1 · vs 573 · 20 Sep](https://www.chess.com/game/live/184127535172) · [Win · 2+1 · vs 555 · 14 Sep](https://www.chess.com/game/live/174444111776) · [Win · 1+0 · vs 629 · 3 Sep](https://www.chess.com/game/live/173948256678)
+  - Keep the Queen's Gambit in your repertoire and deepen it with one new sideline a month.
+  - Review the linked games from move 10 onward: are you turning the early edge into wins?
+- `i` **Observation · Overall accuracy: Your engine accuracy: 80 in wins, 77 in draws, 72 in losses** — Your average engine accuracy (Lichess's formula, 0-100) was 80.5 in 504 wins, 77.1 in 29 draws, 72.1 in 467 losses. Your opponents averaged 75.1 over the same games. _(High confidence)_ · review: [Loss · 1+1 · vs 655 · 12 Sep](https://www.chess.com/game/live/174349480852) · [Loss · 1+1 · vs 675 · 27 Aug](https://www.chess.com/game/live/173627400082) · [Loss · 3+2 · vs 851 · 13 Mar](https://www.chess.com/game/live/165895438742)
   - Compare your least accurate losses (linked): were they lost to one big blunder or to many small inaccuracies? The fix is different.
   - In each linked loss, find the first move that lost 10% or more of your winning chances and name what you should have checked.
-- `i` **Observation · Blunders: Queen moves account for 17% of your blunders** — Queen moves were 13% of your moves but 17% of your 666 blunders (112). Your blunder rate peaks at moves 11–20 (11.6 per 100 moves). _(High confidence)_ · review: [Loss · 1+1 · vs 653 · 26 Sep](https://www.chess.com/game/live/184402987550) · [Loss · 1+1 · vs 667 · 26 Sep](https://www.chess.com/game/live/184402658572) · [Loss · 1+1 · vs 691 · 25 Sep](https://www.chess.com/game/live/184372113148)
+- `i` **Observation · Blunders: Queen moves account for 18% of your blunders** — Queen moves were 13% of your moves but 18% of your 2226 blunders (396). Your blunder rate peaks at moves 11–20 (10.6 per 100 moves). _(High confidence)_ · review: [Loss · 1+1 · vs 653 · 26 Sep](https://www.chess.com/game/live/184402987550) · [Loss · 1+1 · vs 667 · 26 Sep](https://www.chess.com/game/live/184402658572) · [Loss · 1+1 · vs 691 · 25 Sep](https://www.chess.com/game/live/184372113148)
   - Before every queen move, check which squares and pieces it stops guarding and whether it can be attacked or trapped on its new square.
   - Keep a blunder log: for each blunder note the piece, the move number and what you missed; patterns repeat.
   - Around moves 11–20, slow down and double-check every capture and check for both sides.
-- `i` **Observation · Converting advantages: You saved 42 of 133 lost positions (32%)** — In 133 games your opponent got a winning position first (you had at most 15% winning chances); you still drew or won 42 of them. Your opponents saved 46 of the 132 games where you got there first (35%). _(High confidence)_ · review: [Win · 1+1 · vs 636 · 25 Sep](https://www.chess.com/game/live/184368038032) · [Win · 1+1 · vs 659 · 25 Sep](https://www.chess.com/game/live/184333134550) · [Win · 1+1 · vs 616 · 25 Sep](https://www.chess.com/game/live/184332374038)
+- `i` **Observation · Converting advantages: You saved 114 of 414 lost positions (28%)** — In 414 games your opponent got a winning position first (you had at most 15% winning chances); you still drew or won 114 of them. Your opponents saved 140 of the 496 games where you got there first (28%). _(High confidence)_ · review: [Win · 1+1 · vs 636 · 25 Sep](https://www.chess.com/game/live/184368038032) · [Win · 1+1 · vs 659 · 25 Sep](https://www.chess.com/game/live/184333134550) · [Win · 1+1 · vs 616 · 25 Sep](https://www.chess.com/game/live/184332374038)
   - In a lost position, set practical problems: keep pieces on, create threats and make every move matter for your opponent.
   - Replay the linked comebacks to see which defensive ideas worked for you.
 
@@ -697,39 +729,39 @@ _Stockfish's evaluation from your side after both players' 10th move, in pawns (
 
 ## Positions you keep getting wrong
 
-In 300 analysed games Stockfish found 28 wrong moves you played in more than one game in the same position, 5 of them often enough to be a habit. These are the cheapest points to win back: learn the right move once and it pays off every time the position comes up.
+In 1000 analysed games Stockfish found 68 wrong moves you played in more than one game in the same position, 6 of them often enough to be a habit. These are the cheapest points to win back: learn the right move once and it pays off every time the position comes up.
 
-- Wrong moves you repeated: **28** — 5 of them a clear habit
-- Games with those moves: **128**
-- Puzzles from your games: **300** — the 300 costliest of 1056; in bigmuffeater-puzzles.pgn (a Lichess study holds 64: start with the first ones)
+- Wrong moves you repeated: **68** — 6 of them a clear habit
+- Games with those moves: **238**
+- Puzzles from your games: **300** — the 300 costliest of 3354; in bigmuffeater-puzzles.pgn (a Lichess study holds 64: start with the first ones)
 
 - **Sicilian Defense: 2...Nc6**: After 1.e4 c5 2.d4. Red: your move (in 17 of 73 games). Green: engine's choice. `rnbqkbnr/pp1ppppp/8/2p5/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 2` [Win · 1+1 · vs 618 · 16 Sep](https://www.chess.com/game/live/174559149036) · [analyse on Lichess](https://lichess.org/analysis/rnbqkbnr/pp1ppppp/8/2p5/3PP3/8/PPP2PPP/RNBQKBNR_b_KQkq_-_0_2)
 
-- **Englund Gambit: 1...e5**: After 1.d4. Red: your move (in 15 of 401 games). Green: engine's choice. `rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1` [Win · 1+1 · vs 578 · 26 Sep](https://www.chess.com/game/live/184402801730) · [analyse on Lichess](https://lichess.org/analysis/rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR_b_KQkq_-_0_1)
+- **Englund Gambit: 5.dxe7**: After … 2.dxe5 Bc5 3.Nf3 d6 4.exd6 Ne7. Red: your move (in 4 of 5 games). Green: engine's choice. `rnbqk2r/ppp1nppp/3P4/2b5/8/5N2/PPP1PPPP/RNBQKB1R w KQkq - 1 5` [Loss · 1+1 · vs 726 · 25 Aug](https://www.chess.com/game/live/173509578018) · [analyse on Lichess](https://lichess.org/analysis/rnbqk2r/ppp1nppp/3P4/2b5/8/5N2/PPP1PPPP/RNBQKB1R_w_KQkq_-_1_5)
+
+- **Englund Gambit: 7.Rb1**: After … 4.Bf4 Qb4+ 5.Bd2 Qxb2 6.Nc3 Nb4. Red: your move (in 3 of 5 games). Green: engine's choice. `r1b1kbnr/pppp1ppp/8/4P3/1n6/2N2N2/PqPBPPPP/R2QKB1R w KQkq - 2 7` [Loss · 2+1 · vs 578 · 6 Aug](https://www.chess.com/game/live/172613222048) · [analyse on Lichess](https://lichess.org/analysis/r1b1kbnr/pppp1ppp/8/4P3/1n6/2N2N2/PqPBPPPP/R2QKB1R_w_KQkq_-_2_7)
 
 - **Sicilian Defense: 3...e6**: After 1.e4 c5 2.Nf3 Nc6 3.d4. Red: your move (in 11 of 123 games). Green: engine's choice. `r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3` [Win · 1+1 · vs 636 · 25 Sep](https://www.chess.com/game/live/184368038032) · [analyse on Lichess](https://lichess.org/analysis/r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R_b_KQkq_-_0_3)
-
-- **Sicilian Defense: 5...e5**: After … 2...Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4. Red: your move (in 10 of 21 games). Green: engine's choice. `r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/2N5/PPP2PPP/R1BQKB1R b KQkq - 0 5` [Win · 1+1 · vs 591 · 21 Sep](https://www.chess.com/game/live/184164572016) · [analyse on Lichess](https://lichess.org/analysis/r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/2N5/PPP2PPP/R1BQKB1R_b_KQkq_-_0_5)
 
 #### Repeated mistakes
 
 | Moves to reach it | Opening | Reached | Played it | Your move | Engine move | Avg win chance lost | Game |
 |---|---|---:|---:|---|---|---:|---|
 | 1.e4 c5 2.d4 | Sicilian Defense | 73 | 17 | 2...Nc6 | 2...cxd4 | 12% | [game ↗](https://www.chess.com/game/live/174559149036) |
-| 1.d4 | Englund Gambit | 401 | 15 | 1...e5 | 1...Nf6 | 9.5% | [game ↗](https://www.chess.com/game/live/184402801730) |
-| 1.e4 c5 2.Nf3 Nc6 3.d4 | Sicilian Defense | 123 | 11 | 3...e6 | 3...cxd4 | 12% | [game ↗](https://www.chess.com/game/live/184368038032) |
-| … 1...c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4 | Sicilian Defense | 21 | 10 | 5...e5 | 5...a6 | 11% | [game ↗](https://www.chess.com/game/live/184164572016) |
-| 1.d4 c6 2.c4 d5 | Slav Defense | 88 | 9 | 3.c5 | 3.e3 | 8.7% | [game ↗](https://www.chess.com/game/live/174134853682) |
-| 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 | Queen's Gambit | 7 | 6 | 4.e4 | 4.Nf3 | 12% | [game ↗](https://www.chess.com/game/live/173948256678) |
-| … 2.c4 c6 3.Nc3 Nf6 4.Nf3 e6 5.Bg5 h6 | Queen's Gambit | 2 | 2 | 6.e3 | 6.Bxf6 | 35% | [game ↗](https://www.chess.com/game/live/173755093304) |
-| … 1...c5 2.Nf3 Nc6 3.Bc4 e6 4.d4 cxd4 5.Nxd4 | Sicilian Defense | 10 | 6 | 5...e5 | 5...Nf6 | 9.6% | [game ↗](https://www.chess.com/game/live/173726619240) |
-| 1.e4 e5 2.d4 | Center Game | 9 | 5 | 2...d5 | 2...exd4 | 11% | [game ↗](https://www.chess.com/game/live/184212384490) |
-| … 1...c5 2.Nf3 Nc6 3.d4 cxd4 4.Nxd4 e5 5.Nb5 | Sicilian Defense | 5 | 5 | 5...Qa5+ | 5...d6 | 11% | [game ↗](https://www.chess.com/game/live/173627400082) |
-| … 2...Nc6 3.Bc4 e6 4.Nc3 a6 5.a3 b5 6.Ba2 | Sicilian Defense | 6 | 5 | 6...c4 | 6...Nf6 | 10% | [game ↗](https://www.chess.com/game/live/184323574144) |
-| 1.d4 d5 2.e4 | Queen's Pawn Opening | 13 | 3 | 2...e5 | 2...dxe4 | 16% | [game ↗](https://www.chess.com/game/live/173608657088) |
-| … 3...cxd4 4.cxd4 e6 5.d5 exd5 6.exd5 Ne5 7.Qe2 | Alapin Sicilian Defense | 2 | 2 | 7...d6 | 7...Bb4+ | 21% | [game ↗](https://www.chess.com/game/live/184269540536) |
-| 1.e4 e5 2.Nc3 Nf6 3.Nf3 Nc6 4.Bc4 | Four Knights Game | 14 | 3 | 4...d5 | 4...Nxe4 | 13% | [game ↗](https://www.chess.com/game/live/184135565790) |
-| … 4...e5 5.Nxc6 bxc6 6.Bc4 Nf6 7.Bg5 Be7 8.O-O | Sicilian Defense | 3 | 2 | 8...h6 | 8...Nxe4 | 18% | [game ↗](https://www.chess.com/game/live/184307920070) |
+| 1.d4 e5 2.dxe5 Bc5 3.Nf3 d6 4.exd6 Ne7 | Englund Gambit | 5 | 4 | 5.dxe7 | 5.Nc3 | 41% | [game ↗](https://www.chess.com/game/live/173509578018) |
+| … 3.Nf3 Qe7 4.Bf4 Qb4+ 5.Bd2 Qxb2 6.Nc3 Nb4 | Englund Gambit | 5 | 3 | 7.Rb1 | 7.Nd4 | 52% | [game ↗](https://www.chess.com/game/live/172613222048) |
+| 1.e4 c5 2.Nf3 Nc6 3.d4 | Sicilian Defense | 123 | 11 | 3...e6 | 3...cxd4 | 13% | [game ↗](https://www.chess.com/game/live/184368038032) |
+| 1.d4 | Englund Gambit | 401 | 15 | 1...e5 | 1...d5 | 9.0% | [game ↗](https://www.chess.com/game/live/184402801730) |
+| 1.d4 d5 2.c4 dxc4 3.e4 e5 | Queen's Gambit | 16 | 9 | 4.d5 | 4.Nf3 | 12% | [game ↗](https://www.chess.com/game/live/171978689588) |
+| … 2.dxe5 Nc6 3.Nf3 Qe7 4.Bf4 Qb4+ 5.Bd2 Qxb2 | Englund Gambit | 17 | 2 | 6.Bc3 | 6.Nc3 | 46% | [game ↗](https://www.chess.com/game/live/171970704056) |
+| … 1...c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4 | Sicilian Defense | 21 | 10 | 5...e5 | 5...d6 | 8.7% | [game ↗](https://www.chess.com/game/live/184164572016) |
+| 1.d4 c6 2.c4 d5 | Slav Defense | 88 | 9 | 3.c5 | 3.e3 | 9.6% | [game ↗](https://www.chess.com/game/live/184322039796) |
+| 1.d4 d6 2.e4 Nf6 | Pirc Defense | 15 | 5 | 3.e5 | 3.Nc3 | 17% | [game ↗](https://www.chess.com/game/live/173348561666) |
+| … 4.Nf3 Nc6 5.Bxc4 Nf6 6.Nc3 Bb4 7.Qc2 Bxc3+ | Queen's Gambit | 3 | 3 | 8.Qxc3 | 8.bxc3 | 23% | [game ↗](https://www.chess.com/game/live/173092236010) |
+| … 2.c4 d5 3.Nc3 e6 4.Bg5 Bb4 5.Qa4+ Nc6 | Queen's Gambit | 8 | 3 | 6.Qc2 | 6.e3 | 23% | [game ↗](https://www.chess.com/game/live/172630032788) |
+| 1.d4 e5 2.dxe5 Nc6 3.Nf3 Qe7 4.Bf4 Qb4+ | Englund Gambit | 25 | 5 | 5.Nc3 | 5.Bd2 | 13% | [game ↗](https://www.chess.com/game/live/171702312676) |
+| 1.e4 e5 2.d4 | Center Game | 9 | 5 | 2...d5 | 2...exd4 | 13% | [game ↗](https://www.chess.com/game/live/184212384490) |
+| … 2.c4 c6 3.Nc3 Nf6 4.Nf3 e6 5.Bg5 h6 | Queen's Gambit | 2 | 2 | 6.e3 | 6.Bxf6 | 33% | [game ↗](https://www.chess.com/game/live/173755093304) |
 
 _A wrong move lost at least 8 percentage points of winning chances in Stockfish's analysis. Reached and Played it count all your games, analysed or not; positions are matched exactly, so the same position reached by a different move order counts together._
 
@@ -737,24 +769,24 @@ _A wrong move lost at least 8 percentage points of winning chances in Stockfish'
 
 | Opening | Your move | Better | Winning chances lost | Position | Game |
 |---|---|---|---:|---|---|
+| Sicilian Defense | 32...exd4 | 32...Ra2 | 95% | [board ↗](https://lichess.org/analysis/6k1/p4ppp/6b1/4p1P1/3N3P/2q5/1rP1QP2/2K4R_b_-_-_0_32) | [game ↗](https://www.chess.com/game/live/164205690894) |
+| Caro-Kann Defense | 26...Rg8 | 26...Qh3+ | 95% | [board ↗](https://lichess.org/analysis/4r3/pp5k/2p5/2np4/P7/1P4q1/2P5/3Q1R1K_b_-_-_1_26) | [game ↗](https://www.chess.com/game/live/165339293040) |
+| Scandinavian Defense | 16...Rxc2 | 16...Qxf2+ | 95% | [board ↗](https://lichess.org/analysis/4r1k1/ppp2ppp/2n2q2/2P5/8/2N5/PPPr1PPP/R3R1K1_b_-_-_1_16) | [game ↗](https://www.chess.com/game/live/173275476862) |
+| Nimzowitsch-Larsen Attack | 24...Kg7 | 24...Bxf3 | 95% | [board ↗](https://lichess.org/analysis/r5k1/5p2/5n1p/1p1bQ1p1/1P6/3P1NPq/1B3P1P/1R3RK1_b_-_-_1_24) | [game ↗](https://www.chess.com/game/live/173348648442) |
 | Queen's Gambit | 26.Be1 | 26.Qb8+ | 95% | [board ↗](https://lichess.org/analysis/7k/2p3p1/p1p3b1/4P1Np/6qP/1QB5/PP3r2/R6K_w_-_-_0_26) | [game ↗](https://www.chess.com/game/live/174130766058) |
-| Queen's Gambit | 28.Kh1 | 28.Qxg3 | 92% | [board ↗](https://lichess.org/analysis/7k/2p3p1/p1p3b1/4P1Np/8/1Q4q1/PP3r2/R3B1K1_w_-_-_2_28) | [game ↗](https://www.chess.com/game/live/174130766058) |
+| Queen's Gambit | 28.Kh1 | 28.Qxg3 | 94% | [board ↗](https://lichess.org/analysis/7k/2p3p1/p1p3b1/4P1Np/8/1Q4q1/PP3r2/R3B1K1_w_-_-_2_28) | [game ↗](https://www.chess.com/game/live/174130766058) |
 | — | 18...Qf3 | 18...Rd1+ | 92% | [board ↗](https://lichess.org/analysis/2kr3r/pp3pRp/2n5/2p1p1N1/4P3/8/PPP2P2/RN2KQ1q_b_Q_-_0_18) | [game ↗](https://www.chess.com/game/live/174038248548) |
-| Queen's Gambit | 25.Rxf8+ | 25.Rxg7+ | 90% | [board ↗](https://lichess.org/analysis/q1r2rk1/1Q3Rpp/4p3/3pP3/8/P3P3/5PPP/2n2K2_w_-_-_1_25) | [game ↗](https://www.chess.com/game/live/174431116926) |
-| Sicilian Defense | 20...gxh6 | 20...Qxd4 | 88% | [board ↗](https://lichess.org/analysis/r4rk1/p4pp1/2p4B/3p3n/P2Q2q1/2N1R3/1PP2P2/R4K2_b_-_-_0_20) | [game ↗](https://www.chess.com/game/live/173729427324) |
-| Sicilian Defense | 20...Bf4 | 20...Nxg5 | 85% | [board ↗](https://lichess.org/analysis/r4rk1/5p1p/p2bbqpQ/1p1p2N1/3Pn3/1PP1B3/1n3PPP/R4RK1_b_-_-_3_20) | [game ↗](https://www.chess.com/game/live/174003462924) |
-| London System | 39...Kf7 | 39...Qxb8 | 83% | [board ↗](https://lichess.org/analysis/1Q4k1/6pp/4p3/3p4/3P3n/5pqP/8/R4B1K_b_-_-_0_39) | [game ↗](https://www.chess.com/game/live/174128546686) |
-| Sicilian Defense | 19...Nxd1 | 19...Qxd6 | 82% | [board ↗](https://lichess.org/analysis/2rrk3/pp1p1ppp/1q1Q4/4p3/1B2P3/1P6/1PP2n1P/2KR3R_b_-_-_3_19) | [game ↗](https://www.chess.com/game/live/173627400082) |
-| — | 20...Qxc2 | 20...Qh1+ | 81% | [board ↗](https://lichess.org/analysis/2kr3r/pp3NRp/2n5/2p1p3/4q3/8/PPP1QP2/RN2K3_b_Q_-_1_20) | [game ↗](https://www.chess.com/game/live/174038248548) |
-| Sicilian Defense | 34...Bxe4 | 34...Rxh8 | 81% | [board ↗](https://lichess.org/analysis/3r3Q/1b2k3/4pp2/p7/4P2B/P2r4/1P3PP1/2R3K1_b_-_-_5_34) | [game ↗](https://www.chess.com/game/live/174128212330) |
+| Queen's Pawn Opening | 33.Qxh4 | 33.Rf2 | 90% | [board ↗](https://lichess.org/analysis/2r2k2/5r2/4pP2/6Q1/P2Bb2p/1P5P/2q3PK/4RR2_w_-_-_1_33) | [game ↗](https://www.chess.com/game/live/167807088992) |
+| Indian Game | 50...Re3 | 50...e1=R+ | 90% | [board ↗](https://lichess.org/analysis/4B3/8/7p/3R4/2p2p1k/2r5/r3pKPP/8_b_-_-_1_50) | [game ↗](https://www.chess.com/game/live/171700988372) |
+| Slav Defense | 57.f7 | 57.Rg8# | 90% | [board ↗](https://lichess.org/analysis/5k2/6RP/pp3PK1/8/7r/8/2p5/8_w_-_-_0_57) | [game ↗](https://www.chess.com/game/live/171744576990) |
 
 _Open the position (a Lichess analysis board) and find the better move before you look at it. All 300 are in bigmuffeater-puzzles.pgn._
 
 ### Findings
 
-- `??` **Weakness · Your own positions: Queen's Gambit, move 4: you played 4.e4 in 6 of 7 games; 4.Nf3 is better** — After 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 you played 4.e4 in 6 of the 7 games that reached this position. Stockfish analysed 2 of them: the move cost you about 12 in 100 of your chances to win; Stockfish prefers 4.Nf3. You go wrong on about 1 move in 7 overall, so playing this one move in 6 of 7 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
-- `??` **Weakness · Your own positions: Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...a6 is better** — After 1.e4 c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4 you played 5...e5 in 10 of the 21 games that reached this position. Stockfish analysed one of them: the move cost you about 11 in 100 of your chances to win; Stockfish prefers 5...a6. You go wrong on about 1 move in 7 overall, so playing this one move in 10 of 21 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
-- `??` **Weakness · Your own positions: Sicilian Defense, move 5: you played 5...e5 in 6 of 10 games; 5...Nf6 is better** — After 1.e4 c5 2.Nf3 Nc6 3.Bc4 e6 4.d4 cxd4 5.Nxd4 you played 5...e5 in 6 of the 10 games that reached this position. Stockfish analysed one of them: the move cost you about 10 in 100 of your chances to win; Stockfish prefers 5...Nf6. You go wrong on about 1 move in 7 overall, so playing this one move in 6 of 10 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
+- `??` **Weakness · Your own positions: Queen's Gambit, move 4: you played 4.e4 in 6 of 7 games; 4.Nf3 is better** — After 1.d4 d5 2.c4 dxc4 3.Nc3 Nc6 you played 4.e4 in 6 of the 7 games that reached this position. Stockfish analysed 2 of them: the move cost you about 10 in 100 of your chances to win; Stockfish prefers 4.Nf3. You go wrong on about 1 move in 7 overall, so playing this one move in 6 of 7 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
+- `??` **Weakness · Your own positions: Queen's Gambit, move 4: you played 4.d5 in 9 of 16 games; 4.Nf3 is better** — After 1.d4 d5 2.c4 dxc4 3.e4 e5 you played 4.d5 in 9 of the 16 games that reached this position. Stockfish analysed one of them: the move cost you about 12 in 100 of your chances to win; Stockfish prefers 4.Nf3. You go wrong on about 1 move in 7 overall, so playing this one move in 9 of 16 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
+- `??` **Weakness · Your own positions: Sicilian Defense, move 5: you played 5...e5 in 10 of 21 games; 5...d6 is better** — After 1.e4 c5 2.Nf3 Nc6 3.Nc3 e6 4.d4 cxd4 5.Nxd4 you played 5...e5 in 10 of the 21 games that reached this position. Stockfish analysed 3 of them: the move cost you about 9 in 100 of your chances to win; Stockfish prefers 5...d6. You go wrong on about 1 move in 7 overall, so playing this one move in 10 of 21 games is a habit, not bad luck. _(High confidence)_ · what to do: study plan item 1
 
 ---
 
@@ -767,4 +799,4 @@ _Open the position (a Lichess analysis board) and find the better move before yo
 - The lists at the top show every strength and weakness, most important first (importance = how big the effect is × how sure we are); each finding is explained in its section.
 - chess.com Game Review accuracy and this report's engine accuracy use different formulas. Compare each only with itself.
 
-_Generated 26 Sep 2026, 16:04 UTC by chess-insights._
+_Generated 26 Sep 2026, 16:50 UTC by chess-insights._
