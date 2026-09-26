@@ -245,10 +245,10 @@ class Insight:
     example_games: list[str] = field(default_factory=list)  # chess.com URLs, most instructive first, <=5
     # Which formats the finding is about: games (or engine-analysed games) behind it per time class, e.g.
     # {"bullet": 210, "blitz": 88}. Every finding carries it, so the report can say "blitz and rapid" or
-    # "bullet only"; pipeline.fill_formats sets it from the module's games when a module leaves it empty.
+    # "bullet only"; fill.fill_formats sets it from the module's games when a module leaves it empty.
     formats: dict[str, int] = field(default_factory=dict)
     # Every finding carries a picture: a small chart of the numbers behind it (you vs the benchmark, split by
-    # format where the data allows) and/or the position it is about. pipeline.fill_visuals adds a chart from
+    # format where the data allows) and/or the position it is about. fill.fill_visuals adds a chart from
     # ``evidence`` when a module sets neither.
     chart: Optional["Chart"] = None
     diagram: Optional["Diagram"] = None
@@ -630,6 +630,7 @@ class Coaching:
     review_due: list[ReviewItem] = field(default_factory=list)  # due now, from earlier reports
     theory_exit: Optional[Table] = None  # where you leave named opening theory, per line (C3)
     endgames: Optional[Table] = None  # tablebase-checked endings (C3)
+    endgame_diagrams: list[Diagram] = field(default_factory=list)  # boards for those endings
     weekly_plan: list[PlanEntry] = field(default_factory=list)  # C4
     progress: list[ProgressItem] = field(default_factory=list)  # C4
     llm: dict[str, Any] = field(default_factory=dict)  # {"model", "accepted", "rejected"} when the LLM ran

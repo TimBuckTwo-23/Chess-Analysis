@@ -37,3 +37,16 @@ def test_line_strip_numbers_moves_and_stops_at_illegal():
     assert strip.frames[0].caption == "a" and strip.frames[0].marks[0].square == "e4"
     assert strip.frames[-1].last_move == "b8c6"
     assert len(visuals.line_strip("t", start, ["e2e4", "e2e4"]).frames) == 1
+
+
+def test_numbered_moves_threats_and_shredder_fens():
+    sicilian = "r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/2N5/PPP2PPP/R1BQKB1R b KQkq - 0 5"
+    d = visuals.position_diagram("x", sicilian, played="5...e5", best="5... a6", others=[("Ndb5", "threat")])
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("e6", "e5", "played"), ("a7", "a6", "best"),
+                                                            ("d4", "b5", "threat")]
+    assert visuals.position_diagram("x", chess.Board().fen(), played="1.e4").arrows[0].end == "e4"
+    # a threat is not read for the side to move when it isn't a threat
+    assert visuals.position_diagram("x", sicilian, others=[("Ndb5", "neutral")]).arrows == []
+    shredder = "4k3/8/8/8/8/8/8/R3K2R w HA - 0 1"
+    castle = visuals.position_diagram("x", shredder, played="O-O").arrows
+    assert castle and castle[0].start == "e1"

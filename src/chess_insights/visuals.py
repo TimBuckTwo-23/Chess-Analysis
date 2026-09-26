@@ -92,13 +92,23 @@ def _squares(board: chess.Board, move: chess.Move) -> tuple[str, str]:
     return chess.square_name(move.from_square), chess.square_name(move.to_square)
 
 
+def _strip_number(move: str) -> str:
+    """"5...e5" / "5. e5" / "4.e4" -> the bare SAN."""
+    text = move.strip()
+    head, dot, tail = text.partition(".")
+    if dot and head.isdigit():
+        return tail.lstrip(". ")
+    return text
+
+
 def parse_move(board: chess.Board, move: str) -> Optional[chess.Move]:
-    """A SAN or UCI move that is legal in ``board``; None otherwise."""
+    """A SAN (numbered or not: "5...e5") or UCI move that is legal in ``board``; None otherwise."""
     if not move:
         return None
-    for parse in (board.parse_san, board.parse_uci):
+    candidates = ((board.parse_san, _strip_number(move)), (board.parse_uci, move.strip()))
+    for parse, text in candidates:
         try:
-            m = parse(move.split(".")[-1].lstrip(". ") if parse is board.parse_san else move)
+            m = parse(text)
         except ValueError:
             continue
         if m in board.legal_moves:
@@ -106,9 +116,22 @@ def parse_move(board: chess.Board, move: str) -> Optional[chess.Move]:
     return None
 
 
-def move_arrow(board: chess.Board, move: str, kind: str) -> Optional[Arrow]:
-    """An arrow for a SAN/UCI move in ``board`` (None if it isn't legal there)."""
+def move_arrow(board: chess.Board, move: str, kind: str, either_side: bool = False) -> Optional[Arrow]:
+    """An arrow for a SAN/UCI move in ``board`` (None if it isn't legal there).
+
+    ``either_side``: also accept a move of the side NOT to move (a threat), read in the same position with the
+    turn passed over.
+    """
     m = parse_move(board, move)
+    if m is None and either_side and not board.is_check():
+        other = board.copy(stack=False)
+        other.turn = not other.turn
+        other.ep_square = None
+        if not other.is_check():  # the side not to move can't be in check in a legal position, but be safe
+            m = parse_move(other, move)
+            if m is not None:
+                start, end = _squares(other, m)
+                return Arrow(start, end, kind)
     if m is None:
         return None
     start, end = _squares(board, m)
@@ -116,14 +139,15 @@ def move_arrow(board: chess.Board, move: str, kind: str) -> Optional[Arrow]:
 
 
 def _board(fen: str) -> Optional[chess.Board]:
-    try:
-        board = chess.Board(fen)
-    except ValueError:
+    """The position of ``fen``; a Shredder-FEN castling field (file letters) is read as Chess960."""
+    parts = fen.split()
+    shredder = len(parts) > 2 and parts[2] != "-" and any(c not in "KQkq" for c in parts[2])
+    for chess960 in ((True, False) if shredder else (False, True)):
         try:
-            board = chess.Board(fen, chess960=True)
+            return chess.Board(fen, chess960=chess960)
         except ValueError:
-            return None
-    return board
+            continue
+    return None
 
 
 def position_diagram(
@@ -140,13 +164,16 @@ def position_diagram(
     last_move: str = "",
     marks: Sequence[Mark] = (),
 ) -> Diagram:
-    """A board before a decision: your move as a red arrow, the better move green, ``others`` as (move, kind)."""
+    """A board before a decision: your move as a red arrow, the better move green, ``others`` as (move, kind).
+
+    Moves may be SAN (numbered or not) or UCI; a "threat" in ``others`` may be the other side's move.
+    """
     board = _board(fen)
     arrows: list[Arrow] = []
     if board is not None:
         for move, kind in [(played, "played"), (best, "best"), *others]:
             if move:
-                arrow = move_arrow(board, move, kind)
+                arrow = move_arrow(board, move, kind, either_side=kind == "threat")
                 if arrow is not None and not any((a.start, a.end) == (arrow.start, arrow.end) for a in arrows):
                     arrows.append(arrow)
     return Diagram(

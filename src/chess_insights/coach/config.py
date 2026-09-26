@@ -37,7 +37,7 @@ class CoachConfig:
     profile: bool = True  # the motif profile over every error, both sides (a cheap PV per error)
     profile_depth: int = DEFAULT_PROFILE_DEPTH
     offline: bool = False  # no network sources at all
-    lichess_token: Optional[str] = None  # LICHESS_TOKEN / --lichess-token (opening explorer only)
+    lichess_token: Optional[str] = field(default=None, repr=False)  # LICHESS_TOKEN / --lichess-token (explorer)
     puzzle_db: Optional[Path] = None  # filtered Lichess puzzle subset from `chess-insights puzzles-db`
     drill_rating: tuple[int, int] = DEFAULT_DRILL_RATING
     drill_size: int = DEFAULT_DRILL_SIZE
@@ -45,7 +45,7 @@ class CoachConfig:
     practice_minutes: int = DEFAULT_PRACTICE_MINUTES
     llm: bool = False  # --coach-llm (needs ANTHROPIC_API_KEY)
     llm_model: str = DEFAULT_LLM_MODEL
-    anthropic_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = field(default=None, repr=False)
     maia: bool = False  # --maia (optional extra: pip install maia2)
     previous: Optional[dict[str, Any]] = None  # the previous report's JSON (progress, reviews due)
     today: Optional[date] = None  # None = the report's date
