@@ -376,3 +376,16 @@ def test_the_king_is_not_left_in_the_centre_by_a_line_that_castles_next(monkeypa
     monkeypatch.setattr(concepts, "castles_within", lambda *args, **kw: False)  # read one move early, it would be
     assert "your king stays in the centre" in tool.compare(fen, best, refutation, "black").facts
     tool.close()
+
+
+def test_a_pawn_race_is_read_with_a_pawn_of_slack():
+    """23...Rdc8? 24.Rxc8+ Rxc8 25.Ne7+ Kf8 26.Nxc8: pawns hang on both sides for the rest of the line, so no
+    position is settled; the one where at most a pawn can still be taken is read (the rook is gone by then)."""
+    fen = "r2r2k1/1p3ppn/8/3ppN2/p2PPP2/6P1/6KP/2R2R2 b - - 0 23"
+    moves = _uci(["Rdc8", "Rxc8+", "Rxc8", "Ne7+", "Kf8", "Nxc8", "b5", "dxe5", "a3", "Nb6"], fen)
+    n = concepts.comparison_ply(fen, moves)
+    assert n == 6
+    board = comparison_point(fen, moves)
+    assert not concepts.settled(board) and concepts.settled(board, concepts.PAWN_SLACK)
+    start = chess.Board(fen)
+    assert concepts.material(board, chess.BLACK) - concepts.material(start, chess.BLACK) == -5  # the rook is gone

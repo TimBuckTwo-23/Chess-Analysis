@@ -53,6 +53,7 @@ MATERIAL_TERMS = frozenset({"Material", "Imbalance"})
 COMPARE_PLIES = 6  # where the two lines are compared: this many plies from the position before your move ...
 QUIET_EXTRA = 6  # ... or up to this many plies later, at the first settled position
 CASTLE_SOON = 4  # a king that castles within this many plies after the comparison point is not "in the centre"
+PAWN_SLACK = 1  # when no position of a line is settled, one where at most a pawn can still be won will do
 PHASE_WEIGHTS = {chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4}
 MAX_PHASE = 24  # all the pieces of the start position
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
@@ -192,12 +193,12 @@ def see(board: chess.Board, move: chess.Move) -> int:
     return gain - _exchange(probe, move.to_square)
 
 
-def settled(board: chess.Board) -> bool:
-    """Not in check, and no capture wins material for the side to move (``see`` > 0): no exchange half done, no
-    piece left en prise, no fork waiting to be cashed in."""
+def settled(board: chess.Board, slack: int = 0) -> bool:
+    """Not in check, and no capture wins material for the side to move (``see`` > ``slack`` pawns): no exchange
+    half done, no piece left en prise, no fork waiting to be cashed in."""
     if board.is_check():
         return False
-    return not any(see(board, m) > 0 for m in board.generate_legal_captures())
+    return not any(see(board, m) > slack for m in board.generate_legal_captures())
 
 
 def _quiet(board: chess.Board, last: Optional[chess.Move] = None) -> bool:
@@ -207,8 +208,10 @@ def _quiet(board: chess.Board, last: Optional[chess.Move] = None) -> bool:
 
 def comparison_ply(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PLIES) -> Optional[int]:
     """How many moves of a line are played before its concepts are read: ``plies``, or the first settled position
-    up to ``QUIET_EXTRA`` plies later, or else the last settled one before it (never the start). None if there is
-    none: then the line has no comparison point."""
+    up to ``QUIET_EXTRA`` plies later, or else the last settled one before it (never the start). When pawns hang
+    on both sides for the whole stretch (a race), the same search allows a pawn still to be taken
+    (``PAWN_SLACK``): material is then read to within a pawn, pieces exactly. None if there is none: then the line
+    has no comparison point."""
     board = chess.Board(fen)
     boards: list[chess.Board] = []
     for uci in moves_uci[: plies + QUIET_EXTRA]:
@@ -223,9 +226,11 @@ def comparison_ply(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PLIE
     if not boards:
         return None
     target = min(plies, len(boards)) - 1
-    for i in list(range(target, len(boards))) + list(range(target - 1, -1, -1)):
-        if settled(boards[i]):
-            return i + 1
+    order = list(range(target, len(boards))) + list(range(target - 1, -1, -1))
+    for slack in (0, PAWN_SLACK):
+        for i in order:
+            if settled(boards[i], slack):
+                return i + 1
     return None
 
 

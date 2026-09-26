@@ -343,3 +343,22 @@ def test_the_verdict_of_the_deeper_search(kind, best_first, ref_cp, drop, want):
     best = line(fen, [best_first, "d4b5", "a7a6"] if best_first == "e6e5" else [best_first, "d4c6", "b7c6"], -39)
     ref = line(fen, ["e6e5", "d4b5", "a7a6", "b5d6"], ref_cp)
     assert explained(pos, best, ref).verdict == want
+
+
+def test_a_finished_trade_is_not_counted_from_before_its_last_capture():
+    """10.hxg3 took back the bishop that took on g3: the trade is over (Black can't take on g3), so after 10...Bg4
+    Black loses the c4 pawn, not "a bishop and a pawn"."""
+    fen = "r2q1rk1/ppp2ppp/2n1bn2/8/2pP4/P1N1PNP1/1P3PP1/R2QKB1R b KQ - 0 10"
+    previous = "r2q1rk1/ppp2ppp/2n1bn2/8/2pP4/P1N1PNb1/1P3PPP/R2QKB1R w KQ - 0 10"
+    best = line(fen, ["c6a5", "d1c2", "h7h6", "a1d1", "c7c6", "f1e2", "d8c7", "f3e5"], -23)
+    ref = line(fen, ["e6g4", "f1c4", "a8c8", "d1a4", "a7a6", "e1g1", "c6e7", "a4b4"], -236)
+    tool = explain._Concepts(None)
+    cmp = tool.compare(fen, best, ref, "black", previous)
+    tool.close()
+    assert explain.last_move(previous, fen)[1].uci() == "h2g3"
+    assert (cmp.material_lost, cmp.recapture) == (1, "") and "bishop" not in cmp.lost_words
+    game = make_game(moves_san=["hxg3", "Bg4"], color="black", initial_fen=previous)
+    pos = dataclasses.replace(position(fen, "e6g4", "black"), game_id=game.game_id, moves_before=["hxg3"])
+    ex = explained(pos, best, ref, AnalysisContext("t", [game]))
+    assert "11.Bxc4 takes the pawn on c4, which one white piece attacks and none of yours defends." in ex.text
+    assert "bishop" not in ex.text

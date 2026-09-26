@@ -400,6 +400,11 @@ def last_move(previous_fen: Optional[str], fen: str) -> Optional[tuple[chess.Boa
     return None
 
 
+def _can_take_back(board: chess.Board, square: chess.Square) -> bool:
+    """Whether the side to move can capture on ``square`` without losing material (``concepts.see`` >= 0)."""
+    return any(m.to_square == square and concepts.see(board, m) >= 0 for m in board.generate_legal_captures())
+
+
 def _line_board(fen: str, moves_uci: Sequence[str], n: int) -> chess.Board:
     board = chess.Board(fen)
     for uci in moves_uci[:n]:
@@ -446,11 +451,12 @@ class _Concepts:
             b_facts.king_central = False
         start = chess.Board(fen)
         base = concepts.material(start, me)
-        # Your opponent's last move took something: count from before it, so that taking back is no win and not
-        # taking back is a loss.
+        # Your opponent's last move took something you can take back (an exchange half done): count from before it,
+        # so that taking back is no win and not taking back is a loss. A capture you cannot answer on that square
+        # (10.hxg3 after your 9...Bxg3: the trade is over) leaves the count where it is.
         last = last_move(previous_fen, fen)
         taken: Optional[int] = None
-        if last is not None and (last[0].is_capture(last[1])):
+        if last is not None and last[0].is_capture(last[1]) and _can_take_back(start, last[1].to_square):
             before, move = last
             base = concepts.material(before, me)
             taken = chess.PAWN if before.is_en_passant(move) else before.piece_type_at(move.to_square)
