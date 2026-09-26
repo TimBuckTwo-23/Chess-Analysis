@@ -11,6 +11,11 @@ lucky seed. Detection rates by size, for one effect at a time, are in
 docs/METHODOLOGY.md (section 2): at 400-600 games the opening, quick-loss and colour
 effects are found much less often.
 
+The opening-habit claims (analysis/structure.py: castling, early queen moves, development,
+you against your opponents in the same games) get one 600-game world per effect: the tests
+are paired within each game, so realistic habit gaps are found at the size of an ordinary
+report. These runs name the module explicitly, whether or not pipeline.MODULES has it yet.
+
 POWER_RUNS=32 (optionally POWER_GAMES=600) re-measures those single-effect rates; it
 takes a few minutes per effect, so it only runs when asked for.
 """
@@ -20,6 +25,7 @@ from functools import lru_cache
 
 import pytest
 
+from chess_insights import pipeline
 from chess_insights.pipeline import run_analysis
 from null_world import null_games
 
@@ -121,4 +127,66 @@ def test_detection_rate(effect):
     )
     print(f"{effect}: detected in {hits}/{POWER_RUNS} worlds of {POWER_GAMES} games")
     if POWER_GAMES >= 1200 and effect != "colour":
+        assert hits / POWER_RUNS >= MIN_DETECTION
+
+
+# --------------------------------------------------------------------------- opening habits (analysis/structure.py)
+STRUCTURE = ("structure", "Development & king safety")
+STRUCTURE_MODULES = pipeline.MODULES if STRUCTURE in pipeline.MODULES else pipeline.MODULES + [STRUCTURE]
+STRUCTURE_GAMES = 600
+STRUCTURE_PLANTED = {  # the null world's players castle by move 10 in about 50% of games, 14% bring the queen
+    # out early, and they have 3.0 of 4 knights and bishops out by move 10
+    "late_castling": {"late_castling": 0.3},  # the player castles by move 10 in about 35% of games
+    "early_queen": {"early_queen": 0.2},  # ... brings the queen out early in about 30%
+    "slow_development": {"slow_development": 0.6},  # ... has about 0.45 fewer pieces out by move 10
+}
+STRUCTURE_EXPECT = {
+    "late_castling": ("structure", ("castled",)),
+    "early_queen": ("structure", ("early-queen",)),
+    "slow_development": ("structure", ("minors",)),
+}
+
+
+@lru_cache(maxsize=None)
+def structure_report_for(effect: str):
+    games = null_games(STRUCTURE_GAMES, seed=SEED, planted=STRUCTURE_PLANTED[effect])
+    return run_analysis(games, "nullplayer", options=OPTIONS, modules=STRUCTURE_MODULES)
+
+
+@pytest.mark.parametrize("effect", list(STRUCTURE_EXPECT))
+def test_planted_opening_habit_is_found_at_600_games(effect):
+    category, keywords = STRUCTURE_EXPECT[effect]
+    report = structure_report_for(effect)
+    hits = found(report, category, keywords)
+    assert hits, [(i.id, round(i.confidence, 2)) for i in report.strengths + report.weaknesses]
+    # each finding carries its formats, its chart (you vs your opponents by format) and a board from one of its games
+    assert all(i.confidence >= 0.5 and i.formats and i.chart and i.diagram and i.diagram.fen for i in hits)
+    assert not found(report, category, keywords, kind="strength")
+    # nothing else about the player's first moves
+    others = [i.id for i in report.strengths + report.weaknesses if i.category == "structure" and i not in hits]
+    assert not others, others
+
+
+STRUCTURE_POWER_GAMES = int(os.environ.get("POWER_GAMES", str(STRUCTURE_GAMES)))
+
+
+@pytest.mark.skipif(POWER_RUNS == 0, reason="set POWER_RUNS to measure detection rates over many seeds")
+@pytest.mark.parametrize("effect", list(STRUCTURE_EXPECT))
+def test_opening_habit_detection_rate(effect):
+    category, keywords = STRUCTURE_EXPECT[effect]
+    hits = sum(
+        bool(
+            found(
+                run_analysis(
+                    null_games(STRUCTURE_POWER_GAMES, seed=s, planted=STRUCTURE_PLANTED[effect]), "p",
+                    options=OPTIONS, modules=[STRUCTURE],
+                ),
+                category,
+                keywords,
+            )
+        )
+        for s in range(1000, 1000 + POWER_RUNS)
+    )
+    print(f"{effect}: detected in {hits}/{POWER_RUNS} worlds of {STRUCTURE_POWER_GAMES} games")
+    if STRUCTURE_POWER_GAMES >= STRUCTURE_GAMES:
         assert hits / POWER_RUNS >= MIN_DETECTION

@@ -102,6 +102,14 @@ STUDY_LIBRARY: dict[str, dict[str, object]] = {
             "In every position, scan checks, captures and threats for both sides before choosing a move.",
         ],
     },
+    "structure": {
+        "label": "Development & king safety",
+        "actions": [
+            "Read sections 6 and 7 of Capablanca's Chess Fundamentals (free on Project Gutenberg, #33870): "
+            "develop the pieces quickly, and in the opening move pieces in preference to pawns.",
+            "In your next games, check at move 10: are all your knights and bishops out, and is your king castled?",
+        ],
+    },
 }
 
 
@@ -221,6 +229,7 @@ def rank_insights(
 PLAN_GROUPS: dict[str, tuple[str, str, str, int]] = {
     "habits": ("habits", "When you play", "costs nothing: start today", 0),
     "time": ("time", "Your clock", "practise it in your next games", 1),
+    "structure": ("structure", "Your first ten moves", "practise it in your next games", 1),
     "positions": ("positions", "Your own positions", "10 minutes a day", 2),
     "openings": ("repertoire", "Your repertoire", "a few weeks of work", 3),
     "color": ("repertoire", "Your repertoire", "a few weeks of work", 3),
@@ -363,6 +372,8 @@ def target_for(ins: Insight) -> tuple[str, dict[str, Any]]:
             f"(now {ev['per100']:.2f}).",
             {"metric": f"{names} {verb.lower()}ed per 100 moves", "value": ev["per100"]},
         )
+    if i.startswith("structure.weakness.") and ev.get("target") and ev.get("metric"):
+        return str(ev["target"]), {"metric": str(ev["metric"]), "value": ev.get("you")}
     if i.startswith("mistakes.weakness") and ev.get("best"):
         best, played = _move_label(ev.get("fen"), ev["best"]), _move_label(ev.get("fen"), ev.get("move"))
         return (

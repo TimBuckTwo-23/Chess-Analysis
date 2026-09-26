@@ -40,6 +40,7 @@ MODULES: list[tuple[str, str]] = [
     ("time_mgmt", "Clock & time management"),
     ("endings", "How your games end"),
     ("habits", "Habits & tilt"),
+    ("structure", "Development & king safety"),
     ("engine_stats", "Engine review"),
     ("mistakes", "Positions you keep getting wrong"),
 ]
