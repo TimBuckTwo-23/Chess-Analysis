@@ -13,6 +13,7 @@ LLM can reword the report's facts but cannot add to them:
 
 The Anthropic SDK is an optional extra (``pip install "chess-insights[llm]"``), imported only when it is needed.
 With the LLM off, or no API key, nothing in the report changes; an API error leaves the templates and adds a note.
+With ``cfg.offline`` (``--offline``) nothing is sent to Claude: the templates stay and the notes say why.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ MAX_REJECTIONS_KEPT = 20  # rejected texts and their problems kept in coaching.l
 MAX_REJECTED_CHARS = 600  # of each rejected text
 MAX_ERROR_CHARS = 200  # of an unexpected error's message in the notes
 INSTALL_HINT = 'pip install "chess-insights[llm]"'
+OFFLINE_NOTE = ("AI coach skipped (--offline): nothing was sent to Claude, so the explanations keep their "
+                "built-in text.")
 
 SYSTEM_PROMPT = """\
 You write the coaching notes in a chess report for one club player, from a JSON packet of facts the report has \
@@ -232,10 +235,14 @@ def annotate(report: Report, cfg: CoachConfig, client: Any = None) -> None:
     """Replace template texts that pass the verifier; fill ``coaching.weekly_plan`` and ``coaching.llm``.
 
     ``client`` is for tests (anything with ``messages.create``); normally the SDK client is built from
-    ``cfg.anthropic_api_key`` or ANTHROPIC_API_KEY. Without credentials this changes nothing at all.
+    ``cfg.anthropic_api_key`` or ANTHROPIC_API_KEY. Without credentials this changes nothing at all. With
+    ``cfg.offline`` no request is made, whatever the credentials: the notes say the AI coach was skipped.
     """
     coaching = report.coaching
     if coaching is None:
+        return
+    if cfg.offline:
+        coaching.notes.append(OFFLINE_NOTE)
         return
     sdk = None
     if client is None:

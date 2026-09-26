@@ -127,6 +127,22 @@ def test_missing_sdk_leaves_templates_and_a_note(monkeypatch):
     assert report.coaching.llm == {} and report.coaching.weekly_plan == []
 
 
+def test_offline_sends_nothing_whatever_the_credentials(monkeypatch):
+    """--offline: no request to Claude even with a key, the SDK and a client at hand; one note says so."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "load_sdk", lambda: pytest.fail("--offline must not load the SDK"))
+    base = comparable(coaching_report())
+    for client in (None, FakeClient(reply(llm_reply(coaching_report())))):
+        report = coaching_report()
+        llm.annotate(report, CoachConfig(llm=True, offline=True, anthropic_api_key="sk-test"), client=client)
+        assert client is None or client.messages.calls == []
+        assert report.coaching.notes[-1] == llm.OFFLINE_NOTE and llm.OFFLINE_NOTE.startswith("AI coach skipped")
+        report.coaching.notes.pop()
+        assert comparable(report) == base  # templates, plan and counts untouched
+    report = finish_coaching(coaching_report(), CoachConfig(llm=True, offline=True))
+    assert report.coaching.notes.count(llm.OFFLINE_NOTE) == 1 and "sk-test" not in json.dumps(to_dict(report))
+
+
 # --------------------------------------------------------------------------- the request
 def test_request_uses_structured_output_and_the_configured_model():
     report = coaching_report()

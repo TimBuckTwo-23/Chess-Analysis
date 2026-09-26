@@ -68,6 +68,18 @@ def test_no_sdk_or_no_key_says_what_is_missing(monkeypatch, report_json):
     assert "too much clock on the opening in blitz" in out
 
 
+def test_offline_quotes_the_report_without_asking_claude(monkeypatch, report_json):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "load_sdk", lambda: pytest.fail("--offline must not load the SDK"))
+    client = FakeClient(reply({"answer": "Anything.", "claim_ids": [], "epds": []}))
+    out = ask.answer("Why do I lose with the Sicilian?", report_json, CoachConfig(offline=True), client=client)
+    assert client.messages.calls == []
+    assert out.startswith(ask.OFFLINE_REASON + " Here is what your report says that may help:")
+    assert "Sicilian Defense is costing you points" in out and "Anything." not in out
+    out = ask.answer("Should I buy a wooden board?", report_json, CoachConfig(offline=True))
+    assert out.startswith(ask.OFFLINE_REASON) and "Your ratings: rapid 1130, blitz 949, bullet 650." in out
+
+
 def test_api_error_falls_back(report_json):
     client = FakeClient(RuntimeError("connection reset"))
     out = ask.answer("Why do I lose with the Sicilian?", report_json, CoachConfig(), client=client)

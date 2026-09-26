@@ -5,7 +5,8 @@ The question goes to the Claude API with the coaching packet built from the repo
 if it passes the same checks as the report's explanations (every move in a packet line, every number in the
 packet, strengths and weaknesses only where the report claims them). Otherwise, and whenever no answer can be
 had (no API key, the llm extra not installed, an API error), the reply says so and quotes what the report itself
-says about the question, which is always safe.
+says about the question, which is always safe. With ``cfg.offline`` (``ask --offline``) nothing is sent to Claude:
+the reply is that quote from the report alone.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from .verify import claim_words, content_words, verify_answer
 
 MAX_FACTS = 4  # report facts quoted when there is no checked answer
 MAX_SENTENCES = 8
+OFFLINE_REASON = "Offline (--offline): nothing was sent to Claude."
 
 SYSTEM_PROMPT = """\
 You answer a chess player's question about their own games, from a JSON packet of the facts their report \
@@ -111,7 +113,7 @@ def _fallback(reason: str, question: str, packet: dict[str, Any]) -> str:
 
 def answer(question: str, report_json: dict[str, Any], cfg: CoachConfig, client: Optional[Any] = None) -> str:
     """A grounded answer to ``question`` (moves and numbers checked against the report), or an explanation of
-    why none can be given (no API key, the llm extra not installed, nothing relevant in the report).
+    why none can be given (offline, no API key, the llm extra not installed, nothing relevant in the report).
 
     ``client`` is for tests (anything with ``messages.create``).
     """
@@ -122,6 +124,8 @@ def answer(question: str, report_json: dict[str, Any], cfg: CoachConfig, client:
         return f"Your last report could not be read ({type(exc).__name__}); run chess-insights report again."
     if not question:
         return 'Ask a question about your report, e.g. chess-insights ask USERNAME "why do I lose with the Alapin?"'
+    if cfg.offline:  # whatever the credentials: nothing leaves this computer
+        return _fallback(OFFLINE_REASON, question, packet)
     sdk = None
     if client is None:
         sdk = llm.load_sdk()
