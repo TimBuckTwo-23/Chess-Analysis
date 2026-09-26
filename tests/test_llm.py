@@ -1,0 +1,355 @@
+"""The LLM coach and Maia-2 (C4), with a mocked API client and a fake predictor: no network, no anthropic package."""
+
+from __future__ import annotations
+
+import json
+import re
+from types import SimpleNamespace
+
+import pytest
+
+from chess_insights.coach import CoachConfig, finish_coaching, llm, maia
+from chess_insights.coach.config import DEFAULT_LLM_MODEL
+from chess_insights.coach.packet import build_packet
+from chess_insights.report.json_export import to_dict
+from test_packet import QGA_4E4, REPEATED_ID, SICILIAN_2NC6, SICILIAN_5E5, coaching_report, epd
+
+GOOD_SICILIAN = (
+    "After 5...e5 the knight goes 6.Ndb5 and 7.Nd6+, checking your king and taking the dark-squared bishop. "
+    "That line ends 1.5 pawns down for you, against 0.5 after 5...a6. "
+    "Before a pawn push, check which squares it stops guarding."
+)
+ILLEGAL_QGA = "4.e4 walks into 4...Qxd4, and then 5.Qxh7 is hopeless."
+INVENTED_EVAL = "After 2...Nc6, 3.d5 Nb8 leaves you 3.4 pawns worse."
+
+
+@pytest.fixture(autouse=True)
+def no_credentials(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def reply(data, stop_reason="end_turn"):
+    """A Messages API response: a (hidden) thinking block, then the JSON text."""
+    text = data if isinstance(data, str) else json.dumps(data)
+    return SimpleNamespace(
+        stop_reason=stop_reason,
+        content=[SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text=text)],
+    )
+
+
+class FakeMessages:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        out = self.responses.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+
+class FakeClient:
+    def __init__(self, *responses, **kwargs):
+        self.kwargs = kwargs
+        self.messages = FakeMessages(responses)
+
+
+def plan_titles(report):
+    return [item.title for item in report.study_plan]
+
+
+def llm_reply(report):
+    titles = plan_titles(report)
+    return {
+        "explanations": [
+            {"epd": epd(SICILIAN_5E5), "text": GOOD_SICILIAN, "claim_ids": [REPEATED_ID]},
+            {"epd": epd(QGA_4E4), "text": ILLEGAL_QGA, "claim_ids": []},
+            {"epd": epd(SICILIAN_2NC6), "text": INVENTED_EVAL, "claim_ids": []},
+            {"epd": "8/8/8/8/8/8/8/8 w - -", "text": "A position that is not in the report.", "claim_ids": []},
+        ],
+        "weekly_plan": [
+            {"item": titles[0], "minutes_per_week": 60, "recheck_date": "2026-10-24"},
+            {"item": "Memorise the Najdorf", "minutes_per_week": 30, "recheck_date": "2026-10-24"},
+        ],
+    }
+
+
+def comparable(report):
+    data = to_dict(report)
+    data.pop("generated_at", None)
+    return data
+
+
+# --------------------------------------------------------------------------- LLM off
+def test_report_is_identical_with_the_llm_off_or_without_a_key():
+    base = comparable(coaching_report())
+    off = finish_coaching(coaching_report(), CoachConfig(llm=False))
+    no_key = finish_coaching(coaching_report(), CoachConfig(llm=True))  # no ANTHROPIC_API_KEY anywhere
+    assert comparable(off) == base
+    assert comparable(no_key) == base
+
+
+def test_missing_sdk_leaves_templates_and_a_note(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "load_sdk", lambda: None)
+    report = coaching_report()
+    llm.annotate(report, CoachConfig(llm=True))
+    assert all(e.text_source == "template" for e in report.coaching.explanations)
+    assert any("chess-insights[llm]" in n for n in report.coaching.notes)
+    assert report.coaching.llm == {} and report.coaching.weekly_plan == []
+
+
+# --------------------------------------------------------------------------- the request
+def test_request_uses_structured_output_and_the_configured_model():
+    report = coaching_report()
+    client = FakeClient(reply({"explanations": [], "weekly_plan": []}))
+    llm.annotate(report, CoachConfig(llm=True, practice_minutes=20), client=client)
+    (call,) = client.messages.calls
+    assert call["model"] == DEFAULT_LLM_MODEL == "claude-opus-5-5"
+    assert call["max_tokens"] == llm.MAX_TOKENS
+    assert call["output_config"]["format"] == {"type": "json_schema", "schema": llm.OUTPUT_SCHEMA}
+    assert call["output_config"]["effort"] == llm.EFFORT
+    assert "thinking" not in call and "tool_choice" not in call  # adaptive thinking; no forced tool use
+    assert "centipawns" in call["system"] and "claim_ids" in call["system"]
+    (message,) = call["messages"]
+    assert message["role"] == "user"
+    assert "20 minutes a day" in message["content"] and "140 minutes a week" in message["content"]
+    sent = json.loads(re.search(r"<packet>\n(.*)\n</packet>", message["content"], re.S).group(1))
+    assert sent == json.loads(json.dumps(build_packet(report)))
+
+
+def test_client_is_built_with_the_key_timeout_and_retries(monkeypatch):
+    built = {}
+
+    class FakeAnthropic(FakeClient):
+        def __init__(self, **kwargs):
+            built.update(kwargs)
+            super().__init__(reply({"explanations": [], "weekly_plan": []}), **kwargs)
+
+    monkeypatch.setattr(llm, "load_sdk", lambda: SimpleNamespace(Anthropic=FakeAnthropic))
+    report = coaching_report()
+    llm.annotate(report, CoachConfig(llm=True, anthropic_api_key="sk-from-settings", llm_model="claude-test"))
+    assert built == {"api_key": "sk-from-settings", "timeout": llm.TIMEOUT_S, "max_retries": llm.MAX_RETRIES}
+    assert report.coaching.llm["model"] == "claude-test"
+
+
+def test_older_sdk_without_output_config_gets_it_as_a_body_field():
+    ok = reply({"explanations": [], "weekly_plan": []})
+    client = FakeClient(TypeError("create() got an unexpected keyword argument 'output_config'"), ok)
+    llm.annotate(coaching_report(), CoachConfig(llm=True), client=client)
+    first, second = client.messages.calls
+    assert "output_config" not in second and second["extra_body"]["output_config"]["format"]["type"] == "json_schema"
+
+
+# --------------------------------------------------------------------------- the verifier on the reply
+def test_verified_texts_replace_templates_and_the_rest_keep_them():
+    report = coaching_report()
+    templates = {e.epd: e.text for e in report.coaching.explanations}
+    claims_before = (to_dict(report)["strengths"], to_dict(report)["weaknesses"], to_dict(report)["study_plan"])
+    llm.annotate(report, CoachConfig(llm=True, practice_minutes=20), client=FakeClient(reply(llm_reply(report))))
+    by_epd = {e.epd: e for e in report.coaching.explanations}
+
+    assert by_epd[epd(SICILIAN_5E5)].text == GOOD_SICILIAN
+    assert by_epd[epd(SICILIAN_5E5)].text_source == "llm"
+    for fen in (QGA_4E4, SICILIAN_2NC6):  # an illegal move and an invented evaluation
+        assert by_epd[epd(fen)].text == templates[epd(fen)]
+        assert by_epd[epd(fen)].text_source == "template"
+
+    llm_info = report.coaching.llm
+    assert (llm_info["model"], llm_info["accepted"], llm_info["rejected"]) == ("claude-opus-5-5", 1, 3)
+    problems = {r["epd"]: " ".join(r["problems"]) for r in llm_info["rejections"]}
+    assert "5.Qxh7" in problems[epd(QGA_4E4)] and "3.4" in problems[epd(SICILIAN_2NC6)]
+    assert any("1 of 3 explanations rewritten" in n and "3 failed the fact check" in n for n in report.coaching.notes)
+
+    # the weekly plan keeps the study-plan item only
+    assert [p.item for p in report.coaching.weekly_plan] == [plan_titles(report)[0]]
+    assert report.coaching.weekly_plan[0].minutes_per_week == 60
+    assert llm_info["plan_dropped"] == 1
+
+    # the LLM never touches a claim or the study plan
+    assert (to_dict(report)["strengths"], to_dict(report)["weaknesses"], to_dict(report)["study_plan"]) == claims_before
+
+
+def test_a_second_text_for_the_same_position_is_ignored():
+    report = coaching_report()
+    data = {"explanations": [{"epd": epd(SICILIAN_5E5), "text": GOOD_SICILIAN, "claim_ids": []}] * 2, "weekly_plan": []}
+    llm.annotate(report, CoachConfig(llm=True), client=FakeClient(reply(data)))
+    assert (report.coaching.llm["accepted"], report.coaching.llm["rejected"]) == (1, 1)
+
+
+# --------------------------------------------------------------------------- failures keep the templates
+class FakeAPIStatusError(Exception):
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class FakeRateLimitError(FakeAPIStatusError):
+    pass
+
+
+class FakeAuthenticationError(FakeAPIStatusError):
+    pass
+
+
+class FakeAPIConnectionError(Exception):
+    pass
+
+
+class FakeAPITimeoutError(FakeAPIConnectionError):
+    pass
+
+
+FAKE_SDK_ERRORS = dict(
+    APIStatusError=FakeAPIStatusError,
+    RateLimitError=FakeRateLimitError,
+    AuthenticationError=FakeAuthenticationError,
+    APIConnectionError=FakeAPIConnectionError,
+    APITimeoutError=FakeAPITimeoutError,
+)
+
+
+@pytest.mark.parametrize(
+    "error, words",
+    [
+        (FakeRateLimitError("rate limited", 429), "rate-limiting this key after retrying (429)"),
+        (FakeAuthenticationError("invalid x-api-key", 401), "API key was rejected (401)"),
+        (FakeAPIStatusError("overloaded", 529), "API returned an error (529)"),
+        (FakeAPITimeoutError("timed out"), "timed out"),
+        (FakeAPIConnectionError("connection reset"), "could not be reached"),
+    ],
+)
+def test_api_errors_leave_the_templates(monkeypatch, error, words):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    sdk = SimpleNamespace(Anthropic=lambda **kw: FakeClient(error, **kw), **FAKE_SDK_ERRORS)
+    monkeypatch.setattr(llm, "load_sdk", lambda: sdk)
+    report = coaching_report()
+    before = comparable(coaching_report())
+    llm.annotate(report, CoachConfig(llm=True))
+    after = comparable(report)
+    note = after["coaching"]["notes"].pop()
+    assert words in note and "keep their template text" in note
+    assert after == before  # nothing else changed
+
+
+@pytest.mark.parametrize(
+    "response, words",
+    [
+        (reply({}, stop_reason="refusal"), "declined"),
+        (reply('{"explanations": [', stop_reason="max_tokens"), "cut off"),
+        (reply("not json"), "not valid JSON"),
+        (RuntimeError("socket closed"), "RuntimeError: socket closed"),
+    ],
+)
+def test_unusable_replies_leave_the_templates(response, words):
+    report = coaching_report()
+    llm.annotate(report, CoachConfig(llm=True), client=FakeClient(response))
+    assert all(e.text_source == "template" for e in report.coaching.explanations)
+    assert words in report.coaching.notes[-1]
+    assert report.coaching.llm == {} and report.coaching.weekly_plan == []
+
+
+def test_no_coaching_no_call():
+    report = coaching_report()
+    report.coaching = None
+    client = FakeClient()
+    llm.annotate(report, CoachConfig(llm=True), client=client)
+    assert client.messages.calls == []
+
+
+# --------------------------------------------------------------------------- Maia-2
+PROBS = {"a7a6": 0.40, "e6e5": 0.30, "g1f3": 0.10, "e2e4": 0.60, "c5d4": 0.80, "b8c6": 0.10}
+
+
+def fake_predictor(calls):
+    def predict(fen, rating, model_type):
+        calls.append((epd(fen), rating, model_type))
+        return dict(PROBS)
+
+    return predict
+
+
+def test_maia_adds_probabilities_and_ranks_by_drop_times_p_best():
+    report = coaching_report()
+    cfg = CoachConfig(maia=True)
+    calls = []
+    maia.annotate(report, cfg, predictor=fake_predictor(calls))
+    exps = report.coaching.explanations
+    # drop x P(best): 2...Nc6 18 x 0.8 = 14.4, 5...e5 21 x 0.4 = 8.4, 4.e4 15 x 0.1 = 1.5
+    assert [e.epd for e in exps] == [epd(SICILIAN_2NC6), epd(SICILIAN_5E5), epd(QGA_4E4)]
+    models = {e: (rating, model) for e, rating, model in calls}
+    assert models[epd(SICILIAN_2NC6)][1] == "blitz"  # bullet uses the blitz model
+    assert models[epd(SICILIAN_5E5)][1] == "blitz"
+    assert models[epd(QGA_4E4)][1] == "rapid"
+    sic = next(e for e in exps if e.epd == epd(SICILIAN_5E5))
+    assert sic.maia == {
+        "rating": maia.lichess_rating(949, "blitz", cfg)[0],
+        "chesscom_rating": 949,
+        "model": "blitz",
+        "p_best": 0.4,
+        "p_played": 0.3,
+    }
+    assert report.coaching.settings["maia"]["positions"] == 3
+
+
+def test_maia_rating_fallback_follows_the_chessgoals_blitz_table():
+    assert maia._interpolate(900, maia.FALLBACK_POINTS) == 1360
+    assert maia._interpolate(1000, maia.FALLBACK_POINTS) == 1425
+    assert maia._interpolate(949, maia.FALLBACK_POINTS) == 1392  # the plan's "about 1,390"
+    assert maia._interpolate(1100, [[1000, 1400], [1200, 1550]]) == 1475
+    cfg = CoachConfig(rating_map={"rapid": [[1000, 1400], [1200, 1550]]})
+    rating, source = maia.lichess_rating(1100, "rapid", cfg)
+    if source != "coach.rating_map":  # another part of the layer may provide the conversion
+        assert (rating, source) == (1475, "your rating map")
+
+
+def test_maia_reads_moves_from_the_side_to_moves_view():
+    report = coaching_report()
+    mirrored = {maia._mirror(k): v for k, v in PROBS.items()}
+    maia.annotate(report, CoachConfig(maia=True), predictor=lambda fen, r, m: dict(mirrored))
+    sic = next(e for e in report.coaching.explanations if e.epd == epd(SICILIAN_5E5))
+    assert (sic.maia["p_best"], sic.maia["p_played"]) == (0.4, 0.3)
+
+
+def test_maia_without_the_package_or_offline_leaves_a_note(monkeypatch):
+    monkeypatch.setattr(maia, "maia2_predictor", lambda: None)
+    report = coaching_report()
+    order = [e.epd for e in report.coaching.explanations]
+    maia.annotate(report, CoachConfig(maia=True))
+    assert any("maia2" in n for n in report.coaching.notes)
+    assert [e.epd for e in report.coaching.explanations] == order
+    offline = coaching_report()
+    maia.annotate(offline, CoachConfig(maia=True, offline=True), predictor=None)
+    assert any("--offline" in n for n in offline.coaching.notes)
+
+
+def test_maia_failures_stop_early_and_leave_the_order():
+    report = coaching_report()
+    order = [e.epd for e in report.coaching.explanations]
+    calls = []
+
+    def broken(fen, rating, model_type):
+        calls.append(fen)
+        raise RuntimeError("weights not found")
+
+    maia.annotate(report, CoachConfig(maia=True), predictor=broken)
+    assert [e.epd for e in report.coaching.explanations] == order
+    assert all(e.maia == {} for e in report.coaching.explanations)
+    assert any("weights not found" in n for n in report.coaching.notes)
+
+
+def test_finish_coaching_runs_maia_then_the_llm(monkeypatch):
+    calls = []
+    monkeypatch.setattr(maia, "maia2_predictor", lambda: fake_predictor(calls))
+    seen = {}
+
+    def fake_llm(report, cfg):
+        seen["order"] = [e.epd for e in report.coaching.explanations]
+
+    monkeypatch.setattr(llm, "annotate", fake_llm)
+    finish_coaching(coaching_report(), CoachConfig(maia=True, llm=True))
+    assert seen["order"][0] == epd(SICILIAN_2NC6)  # the LLM sees Maia's order
+    assert len(calls) == 3
