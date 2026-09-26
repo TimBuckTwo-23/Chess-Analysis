@@ -1,4 +1,4 @@
-"""Lichess cloud eval: up to five engine lines for positions other people have analysed on Lichess (no key).
+"""Lichess cloud eval: up to three engine lines for positions other people have analysed on Lichess (no key).
 
 ``https://lichess.org/api/cloud-eval?fen=...&multiPv=3``. A 404 means the position is not in the database (common
 past the opening). Evaluations in the answer are from White's side; the ``Line`` objects returned here are from

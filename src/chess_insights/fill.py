@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 
 import chess
 
+from .analysis.engine_stats import KEY as ENGINE_KEY
+from .analysis.mistakes import KEY as MISTAKES_KEY
 from .models import TIME_CLASSES, Chart, Diagram, Game, Insight, ModuleResult
 from .stats import MINUS, per100_games
 from .visuals import (
@@ -42,8 +44,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Sections whose findings come from the engine-analysed games only.
-ENGINE_MODULES = frozenset({"engine_stats", "mistakes"})
+# Sections whose findings come from the engine-analysed games only, by ModuleResult.key (the Engine review's key is
+# "engine", its module file engine_stats: both are accepted).
+ENGINE_MODULES = frozenset({ENGINE_KEY, "engine_stats", MISTAKES_KEY})
 
 YOU, OPPONENTS = "You", "Your opponents"
 

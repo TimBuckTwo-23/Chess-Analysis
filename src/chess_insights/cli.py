@@ -30,11 +30,11 @@ from .dataset import describe_filters, filter_games
 from .coach.config import (
     DEFAULT_COACH_DEPTH,
     DEFAULT_COACH_MAX,
-    DEFAULT_DRILL_RATING,
     DEFAULT_LLM_MODEL,
     DEFAULT_PRACTICE_MINUTES,
     CoachConfig,
 )
+from .coach.puzzles_db import MAX_RATING as PUZZLE_MAX_RATING, MIN_RATING as PUZZLE_MIN_RATING
 from .engine import ENGINE_SAMPLES
 from .fetch import (
     DEFAULT_CACHE_DIR,
@@ -234,14 +234,33 @@ _RATING_RANGE_RE = re.compile(r"^\s*(\d{3,4})\s*[-:]\s*(\d{3,4})\s*$")
 
 
 def _drill_rating(text: str) -> tuple[int, int]:
-    """--drill-rating: a puzzle rating window such as 1200-1600."""
+    """--drill-rating: a puzzle rating window such as 1200-1600 that overlaps the puzzle collection's ratings
+    (800-2200); :func:`_prepare_engine` cuts it to them and says so."""
     m = _RATING_RANGE_RE.match(text)
     if not m:
         raise argparse.ArgumentTypeError(f"expected a rating range such as 1200-1600, got {text!r}")
     low, high = int(m.group(1)), int(m.group(2))
     if not 400 <= low < high <= 3500:
         raise argparse.ArgumentTypeError(f"expected two ratings from 400 to 3500, the lower first, got {text!r}")
+    if high <= PUZZLE_MIN_RATING or low >= PUZZLE_MAX_RATING:
+        raise argparse.ArgumentTypeError(
+            f"the drill puzzles are rated {PUZZLE_MIN_RATING} to {PUZZLE_MAX_RATING}, so {text.strip()} would find "
+            f"none; choose a range inside {PUZZLE_MIN_RATING}-{PUZZLE_MAX_RATING}, e.g. 1200-1600 (or leave "
+            "--drill-rating out: the range then follows your rating)"
+        )
     return low, high
+
+
+def _clip_drill_rating(args: argparse.Namespace) -> None:
+    """Cut --drill-rating to the puzzle collection's ratings, with a note when that changes it."""
+    given = getattr(args, "drill_rating", None)
+    if not given:
+        return
+    low, high = max(given[0], PUZZLE_MIN_RATING), min(given[1], PUZZLE_MAX_RATING)
+    if (low, high) != tuple(given) and getattr(args, "coach", False):
+        _say(f"note: the drill puzzles are rated {PUZZLE_MIN_RATING} to {PUZZLE_MAX_RATING}; the drills use "
+             f"{low}-{high} (from --drill-rating {given[0]}-{given[1]}).")
+    args.drill_rating = (low, high)
 
 
 def _rules(text: str) -> Optional[list[str]]:
@@ -278,7 +297,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("username", help="your chess.com username (or profile URL)")
     add_source_args(r)
     r.add_argument("--offline", action="store_true",
-                   help="use the local cache only (no chess.com requests; with --coach, no Lichess or Wikibooks either)")
+                   help="use the local cache only: no chess.com requests; with --coach, no Lichess, Wikibooks or "
+                   "Maia downloads, and --coach-llm sends nothing to Claude")
     r.add_argument("--pgn", nargs="+", help="analyse PGN file(s) or folder(s) instead of the chess.com API")
     r.add_argument("--json", nargs="+", dest="json_files", help="analyse chess.com JSON archive file(s) or folder(s)")
     add_analysis_args(r)
@@ -301,7 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("question", help='your question in quotes, e.g. "why do I lose with the Alapin?"')
     a.add_argument("--out", default=None, help="the report's path stem, as given to `report --out` (default reports/<username>)")
     a.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help=f"cache folder (default {DEFAULT_CACHE_DIR})")
-    a.add_argument("--offline", action="store_true", help="no Lichess or Wikibooks requests")
+    a.add_argument("--offline", action="store_true",
+                   help="send nothing to Claude: quote what the report itself says about the question")
     a.add_argument("--llm-model", default=None, help="Claude model (default: the coaching layer's)")
     return p
 
@@ -354,14 +375,16 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
     c.add_argument("--puzzle-db", default=None, metavar="PATH",
                    help="the filtered Lichess puzzle file for drills, or the folder `chess-insights puzzles-db "
                    "--cache-dir` kept it in (default: the one in the cache folder)")
-    c.add_argument("--drill-rating", type=_drill_rating, metavar="LO-HI", default=DEFAULT_DRILL_RATING,
-                   help=f"puzzle rating window for drills, e.g. 1300-1700 (default {DEFAULT_DRILL_RATING[0]}-"
-                   f"{DEFAULT_DRILL_RATING[1]})")
+    c.add_argument("--drill-rating", type=_drill_rating, metavar="LO-HI", default=None,
+                   help=f"puzzle rating window for drills, e.g. 1300-1700, inside {PUZZLE_MIN_RATING}-"
+                   f"{PUZZLE_MAX_RATING} (default: your level, about 200 either side of your Lichess-equivalent "
+                   "rating in your most-played rated format)")
     c.add_argument("--practice-minutes", type=_positive_int, metavar="MIN", default=DEFAULT_PRACTICE_MINUTES,
                    help=f"minutes of practice a day the plan is sized for (default {DEFAULT_PRACTICE_MINUTES})")
     c.add_argument("--coach-llm", action="store_true",
                    help="let Claude rewrite the explanations and draft a weekly plan, every move and number checked "
-                   "(needs ANTHROPIC_API_KEY and the Anthropic SDK: pip install \"chess-insights[llm]\")")
+                   "(needs ANTHROPIC_API_KEY and the Anthropic SDK: pip install \"chess-insights[llm]\"; not with "
+                   "--offline)")
     c.add_argument("--llm-model", default=DEFAULT_LLM_MODEL, metavar="MODEL", help=f"Claude model for --coach-llm (default {DEFAULT_LLM_MODEL})")
     c.add_argument("--maia", action="store_true",
                    help="how findable the better move was at your level (needs pip install maia2)")
@@ -531,7 +554,12 @@ def _prepare_engine(args: argparse.Namespace) -> None:
     elif getattr(args, "coach_llm", False) and not getattr(args, "coach", False):
         _say("note: --coach-llm works with --coach; no LLM coaching.")
     if getattr(args, "coach", False) and args.engine and getattr(args, "coach_llm", False):
-        _check_llm()
+        if getattr(args, "offline", False):
+            _say("note: --offline sends nothing to Claude, so --coach-llm is skipped; the explanations use the "
+                 "built-in wording.")
+        else:
+            _check_llm()
+    _clip_drill_rating(args)
     if not args.engine:
         return
     args.stockfish_path = resolve_stockfish_arg(args.stockfish)
@@ -710,15 +738,16 @@ def analyse_and_write(games: list[Game], username: str, args: argparse.Namespace
     except OSError as exc:
         raise UserError(f"could not write the report to {out}: {exc}", EXIT_NO_GAMES) from None
     print_summary(report)
-    for p in paths + _drill_files(report.coaching):
+    for p in paths + _drill_files(report.coaching, out):
         _say(f"wrote {_absolute(p)}")
     return report
 
 
-def _drill_files(coaching: Optional[Coaching]) -> list[Path]:
-    """The puzzle packs the coaching wrote next to the report."""
-    files = [Path(d.file) for d in (coaching.drills if coaching else []) if d.file]
-    return [f for f in files if f.exists()]
+def _drill_files(coaching: Optional[Coaching], out: Path) -> list[Path]:
+    """The puzzle packs the coaching wrote next to the report (``Drill.file`` is a name in the report's folder)."""
+    folder = _stem(out).parent
+    files = [folder / Path(d.file).name for d in (coaching.drills if coaching else []) if d.file]
+    return [f for f in files if f.is_file()]
 
 
 def _stem(out: Path) -> Path:
@@ -776,7 +805,9 @@ def coach_config(
         return None
     user = safe_file_stem(username.lower())
     stem = _stem(out)
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+    offline = bool(getattr(args, "offline", False))
+    # --offline: the AI coach only leaves its note in the report (coach.llm.annotate); the key is not passed on
+    key = None if offline else os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
     previous_path = expand_path(args.previous) if getattr(args, "previous", None) else stem.parent / f"{stem.name}.json"
     previous = None
     if previous_path.is_file():
@@ -792,13 +823,13 @@ def coach_config(
         cache_dir=cache_dir / user / "coach" if cache_dir else None,
         sources_cache=cache_dir / "sources" if cache_dir else None,
         profile=not args.no_motif_profile,
-        offline=bool(getattr(args, "offline", False)),
+        offline=offline,
         lichess_token=(args.lichess_token or os.environ.get("LICHESS_TOKEN", "").strip() or None),
         puzzle_db=_puzzle_db(args, cache_dir),
-        drill_rating=tuple(args.drill_rating),  # type: ignore[arg-type]
+        drill_rating=tuple(args.drill_rating) if args.drill_rating else None,  # type: ignore[arg-type]
         out_stem=stem,
         practice_minutes=args.practice_minutes,
-        llm=bool(args.coach_llm and key),
+        llm=bool(args.coach_llm and (key or offline)),
         llm_model=args.llm_model,
         anthropic_api_key=key if args.coach_llm else None,
         maia=args.maia,
@@ -821,6 +852,7 @@ def _puzzle_path(out: Path) -> Path:
 def write_puzzles(games: list[Game], evals: dict, out: Path, coaching: Optional[Coaching] = None) -> Path:
     """The --puzzles PGN; with the coaching, each puzzle gets the engine's line, its motifs and the explanation."""
     from .analysis.mistakes import LICHESS_STUDY_CHAPTERS, build_puzzles, puzzles_to_pgn
+    from .report import _clean_text, _write_atomic
 
     path = _puzzle_path(out)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -833,7 +865,8 @@ def write_puzzles(games: list[Game], evals: dict, out: Path, coaching: Optional[
             text = puzzles_pgn(puzzles, coaching)
         except Exception as exc:  # noqa: BLE001 — the plain puzzle file is still worth writing
             logging.getLogger(__name__).warning("puzzle file without the coaching's lines: %s", exc)
-    path.write_text(text if text is not None else puzzles_to_pgn(puzzles), encoding="utf-8")
+    text = text if text is not None else puzzles_to_pgn(puzzles)
+    _write_atomic(path, _clean_text(text) if text else b"")  # never a truncated file, like the report files
     note = "import into a Lichess study or any chess GUI"
     if len(puzzles) > LICHESS_STUDY_CHAPTERS:
         note += (
@@ -859,7 +892,7 @@ def describe_engine_sample(
     n = sum(counts.values())
     if not n:
         return (f"{engine} at depth {depth}: none of the selected games could be analysed (the engine needs "
-                "games of standard chess or Chess960 with at least 10 moves).")
+                "games of standard chess or Chess960 with at least 10 plies (five moves each)).")
     mix = f"all {next(iter(counts))}" if len(counts) == 1 else ", ".join(f"{k} {tc}" for tc, k in counts.items())
     if sample == "balanced":
         which = "most recent in each" if len(counts) > 1 else "the most recent; no other format to balance with"
@@ -992,7 +1025,9 @@ def cmd_demo(args: argparse.Namespace) -> int:
 def print_trait_check(report: Report, traits: list[dict]) -> None:
     """Planted traits found (in the report's lists, or only in a section), missed or not testable; then the
     claims that match no planted trait."""
-    engine_ran = any(m.key == "engine_stats" and m.stats.get("games") for m in report.modules)
+    from .analysis.engine_stats import KEY as ENGINE_KEY
+
+    engine_ran = any(m.key in (ENGINE_KEY, "engine_stats") and m.stats.get("games") for m in report.modules)
     listed = {id(i) for i in list(report.strengths or []) + list(report.weaknesses or [])}
     hits = check_planted_traits(report, traits)
     print("Planted traits vs. what the analysis found:")
@@ -1097,7 +1132,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         raise UserError(f"no question can be answered without the report: run `chess-insights report {name}` again.",
                         EXIT_NO_GAMES)
     cache_dir = expand_path(args.cache_dir) if args.cache_dir else None
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip() or None
+    key = None if args.offline else os.environ.get("ANTHROPIC_API_KEY", "").strip() or None  # --offline: no Claude
     cfg = CoachConfig(
         cache_dir=cache_dir / safe_file_stem(name.lower()) / "coach" if cache_dir else None,
         sources_cache=cache_dir / "sources" if cache_dir else None,

@@ -433,6 +433,15 @@ def test_trait_check_says_where_each_trait_was_found(capsys):
     assert "2/3 planted traits recovered (1 not tested)." in out
     assert "match no planted trait" in out and "- (weakness) The Ruy Lopez costs you" in out
 
+    # the Engine review's key is engine_stats.KEY ("engine"): when it analysed games, engine traits are tested
+    from chess_insights.analysis import engine_stats
+
+    modules[-1] = ModuleResult(key=engine_stats.KEY, title="Engine", summary="", stats={"games": 90})
+    cli.print_trait_check(report, traits)
+    out = capsys.readouterr().out
+    assert "not tested" not in out and "[missed] (weakness) Endgame" in out
+    assert "2/4 planted traits recovered." in out
+
 
 def test_demo_rejects_a_non_positive_game_count(run):
     code, _, stderr = run("demo", "--games", "0")
@@ -764,7 +773,12 @@ def test_engine_note_names_the_formats_analysed():
     assert cli.describe_engine_sample("Stockfish 16", 12, games, slow, time_classes=["rapid", "blitz"]) == (
         "Stockfish 16 at depth 12 on the 6 most recent blitz and rapid games: 3 blitz, 3 rapid."
     )
-    assert "none of the selected games" in cli.describe_engine_sample("Stockfish 16", 12, games, {})
+    none = cli.describe_engine_sample("Stockfish 16", 12, games, {})
+    assert "none of the selected games" in none
+    # engine.MIN_PLIES counts half-moves: 10 plies are five moves each, not ten moves
+    from chess_insights import engine
+
+    assert engine.MIN_PLIES == 10 and "at least 10 plies (five moves each)" in none and "10 moves" not in none
     assert cli.describe_engine_sample("Stockfish 16", 12, games, bullet_only, "balanced") == (
         "Stockfish 16 at depth 12 on 4 games: all bullet (the most recent; no other format to balance with)."
     )
@@ -815,8 +829,10 @@ def test_coach_llm_with_a_key_and_offline(chesscom, run, tmp_path, monkeypatch, 
     assert first.previous is None  # nothing at the output path yet
     assert (first.depth, first.max_positions, first.profile) == (20, 150, True)  # the defaults
     assert first.search_seconds is None  # deep.py's own caps
-    assert first.drill_rating == (1200, 1600) and first.practice_minutes == 20
-    assert second.llm is True and second.anthropic_api_key == "sk-ant-secret-456" and second.offline is True
+    assert first.drill_rating is None and first.practice_minutes == 20  # None: the drills follow your rating
+    # --offline sends nothing to Claude: the key is not passed on, and the AI coach only leaves its note in the report
+    assert second.llm is True and second.anthropic_api_key is None and second.offline is True
+    assert "--offline sends nothing to Claude" in stderr and "needs ANTHROPIC_API_KEY" not in stderr
     assert second.lichess_token == "lip_given"
     assert second.previous is not None and second.previous["username"].lower() == "testerbob"
     assert "sk-ant-secret-456" not in stdout + stderr and "lip_given" not in stdout + stderr
@@ -848,10 +864,105 @@ def test_the_default_puzzle_db_is_the_subset_in_the_cache(chesscom, run, tmp_pat
     assert code == 0 and fake_coaching[0].puzzle_db == subset
 
 
-@pytest.mark.parametrize("text", ["1600-1200", "12-16", "abc", "1200"])
+@pytest.mark.parametrize("text", ["1600-1200", "12-16", "abc", "1200", "2300-2600", "400-700", "2200-2500"])
 def test_bad_drill_rating_is_a_usage_error(run, text):
     code, _, stderr = run("report", "someone", "--drill-rating", text)
     assert code == 2 and "--drill-rating" in stderr
+
+
+def test_a_drill_rating_the_puzzles_cannot_satisfy_says_what_they_hold(run):
+    """The puzzle collection keeps puzzles rated 800-2200: a window outside it would silently give no packs."""
+    code, _, stderr = run("report", "someone", "--drill-rating", "2300-2600")
+    assert code == 2 and "rated 800 to 2200" in stderr and "leave --drill-rating out" in stderr
+
+
+def test_drill_rating_is_cut_to_the_puzzle_collection_and_defaults_to_your_level(
+        chesscom, run, tmp_path, fake_engine, fake_coaching):
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--drill-rating", "2000-2600",
+                          "--out", str(tmp_path / "d"), "--formats", "json")
+    assert code == 0, stderr
+    assert fake_coaching[-1].drill_rating == (2000, 2200)
+    assert "note: the drill puzzles are rated 800 to 2200; the drills use 2000-2200 (from --drill-rating 2000-2600)" \
+        in stderr
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--drill-rating", "1300-1700",
+                          "--out", str(tmp_path / "d"), "--formats", "json")
+    assert code == 0 and fake_coaching[-1].drill_rating == (1300, 1700) and "drills use" not in stderr
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--out", str(tmp_path / "d"), "--formats",
+                          "json")
+    assert code == 0 and fake_coaching[-1].drill_rating is None  # your level (coach.drills.drill_window)
+    assert "puzzle rating window" in cli.build_parser()._subparsers._group_actions[0].choices["report"].format_help()
+
+
+def test_offline_report_skips_the_ai_coach_with_a_note(chesscom, run, tmp_path, monkeypatch, fake_engine):
+    """--offline --coach-llm with a key and the SDK: nothing goes to Claude, and the report says why (the real
+    finish_coaching; only the coaching's first stage is faked)."""
+    from chess_insights import coach
+    from chess_insights.coach import llm
+    from chess_insights.models import Coaching
+
+    monkeypatch.setattr(coach, "build_coaching", lambda ctx, modules, cfg: Coaching())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-offline")
+    monkeypatch.setattr(cli, "llm_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm, "load_sdk", lambda: pytest.fail("--offline must not load the SDK"))
+    monkeypatch.setattr(llm, "make_client", lambda *a: pytest.fail("--offline must not build a client"))
+    out = tmp_path / "off"
+    assert run("fetch", "testerbob")[0] == 0  # the games --offline reads
+    code, stdout, stderr = run("report", "testerbob", "--offline", "--engine", "--coach", "--coach-llm",
+                               "--out", str(out), "--formats", "json")
+    assert code == 0, stderr
+    notes = report_json(out)["coaching"]["notes"]
+    assert llm.OFFLINE_NOTE in notes
+    assert "sk-ant-secret-offline" not in stdout + stderr + out.with_suffix(".json").read_text(encoding="utf-8")
+    help_text = cli.build_parser()._subparsers._group_actions[0].choices["report"].format_help()
+    assert "sends nothing to Claude" in " ".join(help_text.split())
+
+
+def test_drill_files_are_listed_from_the_report_folder(chesscom, run, tmp_path, monkeypatch, fake_engine):
+    """Drill.file is a name next to the report: the console lists the packs actually written, whatever the working
+    folder."""
+    from chess_insights import coach
+    from chess_insights.models import Coaching, Drill
+
+    folder = tmp_path / "reports"
+    folder.mkdir()
+    (folder / "me-drill-fork.pgn").write_text("[Event \"fork\"]\n", encoding="utf-8")
+    drills = [Drill(theme="fork", title="1 fork puzzle", link="", file="me-drill-fork.pgn"),
+              Drill(theme="pin", title="1 pin puzzle", link="", file="me-drill-pin.pgn"),  # named, not written
+              Drill(theme="skewer", title="1 skewer puzzle", link="", file="")]
+    monkeypatch.setattr(coach, "build_coaching", lambda ctx, modules, cfg: Coaching(drills=drills))
+    monkeypatch.setattr(coach, "finish_coaching", lambda report, cfg: report)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--out", str(folder / "me"),
+                          "--formats", "json")
+    assert code == 0, stderr
+    wrote = [line for line in stderr.splitlines() if line.startswith("wrote ")]
+    assert f"wrote {(folder / 'me-drill-fork.pgn').resolve()}" in wrote
+    assert not any("drill-pin" in line or "drill-skewer" in line for line in wrote)
+    assert cli._drill_files(Coaching(drills=drills), folder / "me.html") == [folder / "me-drill-fork.pgn"]
+    assert cli._drill_files(None, folder / "me") == []
+
+
+def test_a_failed_puzzle_file_write_leaves_the_earlier_file_whole(tmp_path, monkeypatch):
+    """The puzzle PGN is written like the report files (temporary file, then rename): an interrupted or failed
+    write never leaves a truncated file for the study plan to point at."""
+    from chess_insights.coach import puzzles
+    from chess_insights.models import Coaching
+
+    monkeypatch.setattr(puzzles, "puzzles_pgn", lambda events, coaching: "[Event \"new\"]\n")
+    path = cli.write_puzzles([], {}, tmp_path / "me", Coaching())
+    assert path.read_text(encoding="utf-8") == "[Event \"new\"]\n"
+    path.write_text("[Event \"last week\"]\n", encoding="utf-8")
+
+    def refuse(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    with pytest.raises(OSError):
+        cli.write_puzzles([], {}, tmp_path / "me", Coaching())
+    assert path.read_text(encoding="utf-8") == "[Event \"last week\"]\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["me-puzzles.pgn"]  # no temporary file left behind
 
 
 def test_puzzle_export_uses_the_coachings_lines(tmp_path, monkeypatch):
@@ -919,14 +1030,36 @@ def test_ask_answers_from_the_last_report(run, tmp_path, monkeypatch):
 
     monkeypatch.setattr(ask, "answer", fake_answer)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
-    code, stdout, _ = run("ask", "testerbob", "why do I lose?", "--offline")
+    code, stdout, _ = run("ask", "testerbob", "why do I lose?")
     assert code == 0 and stdout.strip() == "Because of 5...e5."
     assert seen["question"] == "why do I lose?" and seen["report"] == {"username": "TesterBob"}
-    assert seen["cfg"].llm is True and seen["cfg"].offline is True and "sk-ant-secret" not in stdout
+    assert seen["cfg"].llm is True and seen["cfg"].anthropic_api_key == "sk-ant-secret" and not seen["cfg"].offline
+    assert "sk-ant-secret" not in stdout
+    code, stdout, _ = run("ask", "testerbob", "why do I lose?", "--offline")  # --offline: the key stays here
+    assert code == 0 and seen["cfg"].offline is True and seen["cfg"].llm is False
+    assert seen["cfg"].anthropic_api_key is None and "sk-ant-secret" not in stdout
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / "elsewhere" / "me.json").write_text('{"username": "x"}', encoding="utf-8")
     code, _, _ = run("ask", "testerbob", "and now?", "--out", str(tmp_path / "elsewhere" / "me"))
     assert code == 0 and seen["report"] == {"username": "x"}
+
+
+def test_ask_offline_quotes_the_report_and_sends_nothing(run, tmp_path, monkeypatch):
+    """`ask --offline` answers from the report's own words, with a key set and the SDK there: no request at all."""
+    from chess_insights.coach import llm
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "reports").mkdir()
+    report = {"username": "TesterBob", "summary_lines": ["You score best in rapid."], "study_plan": [
+        {"title": "Stop losing on time in bullet", "why": "you lose on time often", "actions": [], "target": ""}]}
+    (tmp_path / "reports" / "testerbob.json").write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setattr(llm, "load_sdk", lambda: pytest.fail("--offline must not load the SDK"))
+    monkeypatch.setattr(llm, "make_client", lambda *a: pytest.fail("--offline must not build a client"))
+    code, stdout, stderr = run("ask", "testerbob", "why do I lose on time in bullet?", "--offline")
+    assert code == 0, stderr
+    assert stdout.startswith("Offline (--offline): nothing was sent to Claude.")
+    assert "Stop losing on time in bullet" in stdout and "sk-ant-secret" not in stdout + stderr
 
 
 def test_format_views_are_listed_in_the_summary(capsys):
