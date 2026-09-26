@@ -11,7 +11,8 @@
         ├─ deep.profile_lines         short lines for every error, both sides (motif profile, puzzle export)
         ├─ puzzles.fill_puzzle_lines  your errors' best lines and motif themes for the --puzzles PGN
         ├─ profile, drills            motif profile (you vs opponents), puzzle packs, review schedule (C2)
-        └─ finish_coaching            after ranking: progress vs the last report, Maia, the LLM coach (C4)
+        └─ finish_coaching            after ranking: progress vs the last report (the games since it against the
+                                      earlier ones), Maia, the LLM coach (C4)
 
 Rules: never create or change an Insight here (the one exception, motif claims, goes through the claim rule in
 ``profile.motif_claims`` and is added to the Engine review section); every step may fail on its own and leaves
@@ -23,9 +24,9 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
-from ..models import Coaching, ModuleResult, Report
+from ..models import Coaching, Game, ModuleResult, Report
 from .config import CoachConfig
 
 if TYPE_CHECKING:
@@ -95,15 +96,21 @@ def build_coaching(ctx: "AnalysisContext", modules: list[ModuleResult], cfg: Opt
     return coaching
 
 
-def finish_coaching(report: Report, cfg: Optional[CoachConfig] = None) -> Report:
-    """After ranking: progress against the previous report, Maia move probabilities, the LLM coach. Never raises."""
+def finish_coaching(
+    report: Report, cfg: Optional[CoachConfig] = None, games: Optional[Sequence[Game]] = None
+) -> Report:
+    """After ranking: progress against the previous report, Maia move probabilities, the LLM coach. Never raises.
+
+    ``games``: the report's games. Progress needs them to compare the games since the previous report with the
+    earlier ones; without them it shows the numbers side by side and judges nothing.
+    """
     from . import llm, maia, progress
 
     cfg = cfg or CoachConfig()
     coaching = report.coaching
     if coaching is None:
         return report
-    _step(coaching, "Progress", lambda: progress.annotate(report, cfg))
+    _step(coaching, "Progress", lambda: progress.annotate(report, cfg, games))
     if cfg.maia:
         _step(coaching, "Maia", lambda: maia.annotate(report, cfg))
     if cfg.llm:
