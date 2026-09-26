@@ -113,3 +113,30 @@ def test_line_helpers():
     assert boards.fen_from_analysis_url(url) == SICILIAN
     assert boards.fen_from_analysis_url("https://evil.example/analysis/" + SICILIAN.replace(" ", "_")) == ""
     assert boards.epd(SICILIAN) == "r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/2N5/PPP2PPP/R1BQKB1R b KQkq -"
+
+
+def test_one_square_arrow_keeps_a_visible_shaft():
+    svg = boards.board_svg(SICILIAN, orientation="black", arrows=[Arrow("e6", "e5", "played")])
+    x1, y1, x2, y2 = map(float, re.search(r'<line x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)"/>', svg).groups())
+    assert x1 == x2 and abs(y2 - y1) >= 15  # python-chess's full-size head would leave 0.15 of a square
+    # a long arrow keeps python-chess's head (0.75 of a square long)
+    long = boards.board_svg(chess.STARTING_FEN, arrows=[Arrow("d1", "h5", "played")])
+    tip, *_ = re.search(r'<polygon points="([^"]+)"', long).group(1).split()
+    lx, ly = map(float, re.search(r'<line [^>]*x2="([\d.]+)" y2="([\d.]+)"', long).groups())
+    tx, ty = map(float, tip.split(","))
+    assert abs(((tx - lx) ** 2 + (ty - ly) ** 2) ** 0.5 - 0.75 * boards.SQ) < 0.2
+
+
+def test_promotion_arrows_never_name_a_piece_they_do_not_know():
+    board = chess.Board("3r4/4P1k1/8/8/8/8/5K2/8 w - - 0 1")
+    assert boards.arrows_text(board, [Arrow("e7", "e8", "played")]) == "Your move e8 (red)"  # e8=N or e8=Q?
+    assert boards.arrows_text(board, [Arrow("e7", "d8", "best")]) == "Better exd8 (green)"
+
+
+def test_chess960_castling_arrow_is_named_as_castling():
+    fen = "4k3/8/8/8/8/8/8/1R2K1R1 w GB - 0 1"  # Shredder castling letters: read as Chess960
+    board = boards.parse_board(fen)
+    assert board is not None and board.chess960
+    assert boards.arrows_text(board, [Arrow("e1", "g1", "played"), Arrow("e1", "c1", "best")]) == (
+        "Your move O-O (red), better O-O-O (green)")
+    assert boards.board_svg(fen, arrows=[Arrow("e1", "g1", "played")]).count('class="a a-played"') == 1

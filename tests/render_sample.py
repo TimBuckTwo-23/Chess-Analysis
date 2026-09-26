@@ -162,8 +162,12 @@ def sample_coaching(extra: int = 12) -> Coaching:
     rook = Explanation(
         epd=" ".join(ROOK_END.split()[:4]), fen=ROOK_END, played="60.Kc4", best="60.Ra6+", best_line=None,
         refutation=None, text="With a rook against a bare king this is a win; drive the king to the edge first.",
-        tablebase={"category": "win", "best": "Ra6+", "dtm": 21, "played_category": "win"}, kind="error", drop=9.0,
-        time_class="blitz", color="white", maia={"rating": 1400, "p_best": 0.31, "p_played": 0.22},
+        # the shapes coach/sources/tablebase.py and coach/maia.py write: a move's "played_category" is Lichess's,
+        # for the side to move after it (the opponent); "played_result" is yours. Maia's "rating" is a Lichess one.
+        tablebase={"category": "win", "result": "win", "dtz": 21, "dtm": 21, "best": "Ra6+", "best_uci": "a1a6",
+                   "best_result": "win", "played": "Kc4", "played_result": "win", "played_category": "loss"},
+        kind="error", drop=9.0, time_class="blitz", color="white",
+        maia={"rating": 1400, "chesscom_rating": 949, "model": "blitz", "p_best": 0.31, "p_played": 0.22},
         diagram=visuals.position_diagram("Rook ending", ROOK_END, played="Kc4", best="Ra6+", time_class="blitz"),
         sources=[Source("Lichess tablebase", "https://tablebase.lichess.org", "2026-09-26")],
     )

@@ -128,11 +128,14 @@ def sprite_svg() -> str:
 
 # --------------------------------------------------------------------------- one board
 def parse_board(fen: Any) -> Optional[chess.Board]:
-    """The position for a FEN (standard first, then Chess960); None when python-chess cannot read it."""
+    """The position for a FEN (standard first, then Chess960; Chess960 first for Shredder castling letters such
+    as "HFhf"); None when python-chess cannot read it."""
     if not isinstance(fen, str) or not fen.strip():
         return None
     text = " ".join(fen.split())
-    for chess960 in (False, True):
+    fields = text.split(" ")
+    shredder = len(fields) > 2 and bool(re.search(r"[A-Ha-h]", fields[2]))
+    for chess960 in ((True, False) if shredder else (False, True)):
         try:
             return chess.Board(text, chess960=chess960)
         except ValueError:
@@ -163,17 +166,22 @@ def _rect(cls: str, x: int, y: int) -> str:
 
 
 def _arrow_svg(start: int, end: int, kind: str, flipped: bool) -> str:
-    """An arrow drawn like python-chess's: a shaft and a triangular head (a ring when start == end)."""
+    """An arrow drawn like python-chess's: a shaft and a triangular head (a ring when start == end).
+
+    A one-square move gets a shorter head, so its shaft still shows between the two squares (python-chess's
+    full-size head covers all of it, and the arrow reads as a lone triangle on a small board).
+    """
     x0, y0 = (v + SQ / 2 for v in _xy(start, flipped))
     x1, y1 = (v + SQ / 2 for v in _xy(end, flipped))
     if start == end:
         return f'<g class="a a-{kind}"><circle cx="{_n(x1)}" cy="{_n(y1)}" r="{_n(SQ * 0.45)}"/></g>'
-    head, margin = 0.75 * SQ, 0.1 * SQ
     dx, dy = x1 - x0, y1 - y0
     length = math.hypot(dx, dy)
+    head, margin = min(0.75 * SQ, 0.5 * length), 0.1 * SQ
+    width = max(head, 0.6 * SQ)
     sx, sy = x1 - dx * (head + margin) / length, y1 - dy * (head + margin) / length
     tx, ty = x1 - dx * margin / length, y1 - dy * margin / length
-    wx, wy = dy * 0.5 * head / length, dx * 0.5 * head / length
+    wx, wy = dy * 0.5 * width / length, dx * 0.5 * width / length
     points = f"{_n(tx)},{_n(ty)} {_n(sx + wx)},{_n(sy - wy)} {_n(sx - wx)},{_n(sy + wy)}"
     return (
         f'<g class="a a-{kind}"><line x1="{_n(x0)}" y1="{_n(y0)}" x2="{_n(sx)}" y2="{_n(sy)}"/>'
@@ -280,8 +288,26 @@ def _clean_arrows(arrows: Iterable[Arrow]) -> list[tuple[Arrow, int, int]]:
 
 
 # --------------------------------------------------------------------------- the board in words
+def _find_move(board: chess.Board, start: int, end: int) -> Optional[chess.Move]:
+    """The legal move an arrow start -> end stands for; castling arrows point at the king's destination (in
+    Chess960 too, where python-chess encodes castling as king-takes-rook)."""
+    try:
+        return board.find_move(start, end)
+    except (ValueError, AssertionError):
+        pass
+    for move in board.legal_moves:
+        if move.from_square == start and board.is_castling(move):
+            dest = chess.square(2 if board.is_queenside_castling(move) else 6, chess.square_rank(start))
+            if dest == end:
+                return move
+    return None
+
+
 def arrow_move_text(board: chess.Board, arrow: Arrow) -> str:
-    """The arrow as a move in SAN ("Nf3", for either side), or "g1 to f3" when it is not a legal move."""
+    """The arrow as a move in SAN ("Nf3", for either side), or "g1 to f3" when it is not a legal move.
+
+    An arrow does not say which piece a pawn promotes to, so a promotion is named by its squares only ("e8",
+    "exd8"), never as a queen it may not have been."""
     start, end = _square(arrow.start), _square(arrow.end)
     if start is None or end is None:
         return ""
@@ -292,10 +318,11 @@ def arrow_move_text(board: chess.Board, arrow: Arrow) -> str:
         if b.turn != turn:
             b.turn = turn
             b.ep_square = None
-        try:
-            return b.san(b.find_move(start, end))
-        except (ValueError, AssertionError):
+        move = _find_move(b, start, end)
+        if move is None:
             continue
+        san = b.san(move)
+        return re.sub(r"=[QRBN][+#]?$", "", san) if move.promotion else san
     return f"{chess.square_name(start)} to {chess.square_name(end)}"
 
 

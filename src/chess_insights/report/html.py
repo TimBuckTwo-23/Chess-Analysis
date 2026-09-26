@@ -40,7 +40,9 @@ from ..models import (
     Coaching,
     Diagram,
     Drill,
+    DrillPuzzle,
     Explanation,
+    Frame,
     Insight,
     Kpi,
     Line,
@@ -581,25 +583,32 @@ EXPLANATION_KINDS = {"error": "Your mistake", "repeated": "Repeated mistake", "c
 
 
 def pawns_text(cp: Any, mate: Any = None) -> str:
-    """An engine verdict from your side: "−1.52 for you", "mate in 3 for you" / "mate in 2 against you"."""
-    m = to_number(mate)
+    """An engine verdict from your side: "−1.52 for you", "mate in 3 for you" / "mate in 2 against you".
+
+    Mate 0 is a line that ends in checkmate; the engine gives it no sign, so the (mate-sized) centipawns say
+    who delivered it."""
+    m, x = to_number(mate), to_number(cp)
     if m is not None and m != 0:
         n = int(abs(m))
         return f"mate in {n} for you" if m > 0 else f"mate in {n} against you"
-    x = to_number(cp)
+    if m == 0:
+        return "checkmate for you" if (x or 0) > 0 else "checkmate against you" if (x or 0) < 0 else "checkmate"
     if x is None:
         return ""
     return f"{format_value(x / 100.0, 'signed_float2')} for you"
 
 
 def line_text(line: Any, limit: int = 16) -> str:
-    """A coaching Line in numbered SAN with its verdict: "5...e5 6.Ndb5 a6 7.Nd6+ (−1.52 for you)"."""
+    """A coaching Line in numbered SAN with its verdict: "5...e5 6.Ndb5 a6 7.Nd6+ (−1.52 for you)". The verdict
+    is the engine's at the end of the whole line, so a line cut short here ends in "…" before it."""
     if not isinstance(line, Line):
         return ""
     moves = boards.numbered_moves(line.fen, line.moves_uci or [], line.moves_san or [], limit=limit)
     verdict = pawns_text(line.cp_end, line.mate_end)
     if not moves:
         return ""
+    if len(moves.split()) < len(list(line.moves_uci or []) or list(line.moves_san or [])):
+        moves += " …"
     return f"{moves} ({verdict})" if verdict else moves
 
 
@@ -1693,6 +1702,7 @@ class PageIndex:
     report_formats: dict[str, int] = field(default_factory=dict)  # games per format in the view
     why_by_insight: dict[str, str] = field(default_factory=dict)  # insight id -> its first explanation's id
     why_by_epd: dict[str, str] = field(default_factory=dict)  # position (EPD) -> its first explanation's id
+    why_kind: dict[str, str] = field(default_factory=dict)  # explanation id -> its kind ("error", "choice" ...)
     username: str = ""
 
     def id(self, name: str) -> str:
@@ -1736,6 +1746,7 @@ def page_index(report: Report, anchors: Sequence[str], prefix: str = "", coachin
             idx.section_by_id.setdefault(text_or_empty(ins.id), title)
     for k, exp in enumerate(_explanations(coaching), 1):
         anchor = f"{prefix}why-{k}"
+        idx.why_kind[anchor] = text_or_empty(exp.kind)
         if text_or_empty(exp.insight_id):
             idx.why_by_insight.setdefault(text_or_empty(exp.insight_id), anchor)
         key = boards.epd(exp.epd or exp.fen)
@@ -1798,7 +1809,10 @@ def _insight_html(
     if not why and isinstance(getattr(ins, "diagram", None), Diagram):
         why = page.why_by_epd.get(boards.epd(ins.diagram.fen))
     if why:
-        parts.append(f'<p class="why-line"><a class="why-link" href="#{_esc(why)}">Why this goes wrong</a></p>')
+        # a choice point (or a strength's position) is not a mistake: its link says what it opens
+        text = "Why this goes wrong" if kind == "weakness" and page.why_kind.get(why) != "choice" else (
+            "The engine's lines for this position")
+        parts.append(f'<p class="why-line"><a class="why-link" href="#{_esc(why)}">{_esc(text)}</a></p>')
     plan_no = page.plan_by_id.get(text_or_empty(ins.id))
     steps = [text_or_empty(s) for s in (ins.study or []) if text_or_empty(s)]
     if plan_no:
@@ -2124,6 +2138,8 @@ def _strips_html(strips: Iterable[Any], orientation: str) -> str:
             continue
         frames = []
         for f in s.frames or []:
+            if not isinstance(f, Frame):
+                continue
             svg = boards.board_svg(f.fen, orientation=orientation, arrows=f.arrows or [], marks=f.marks or [],
                                    last_move=f.last_move, mini=True,
                                    label=f"After {text_or_empty(f.move)}" if text_or_empty(f.move) else "")
@@ -2159,7 +2175,8 @@ def _position_html(
         links.append(_link(analysis, "Analyse on Lichess"))
     why = page.why_by_epd.get(boards.epd(d.fen)) if variant == "module" else None
     if why:
-        links.append(f'<a class="why-link" href="#{_esc(why)}">Why it goes wrong</a>')
+        text = "The engine's lines" if page.why_kind.get(why) == "choice" else "Why it goes wrong"
+        links.append(f'<a class="why-link" href="#{_esc(why)}">{_esc(text)}</a>')
     tc = text_or_empty(getattr(d, "time_class", ""))
     show_tc = tc and tc != page.view_tc and variant == "module"  # a card and an explanation name the format already
     chip = f'<span class="fmt-chip">{_esc(format_name(tc))} game</span>' if show_tc else ""
@@ -2237,16 +2254,51 @@ WHY_OPEN = 10  # explanations shown open; the rest fold away under one toggle
 REVIEW_OPEN = 8  # upcoming review items shown before "Show more"
 DRILL_BOARDS = 3  # puzzle boards previewed per drill
 _LICHESS_GROUPS = (0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2500)
+# The tablebase's categories, for the side to move: in an explained position that is you. Lichess also sends
+# "syzygy-win" / "syzygy-loss" for some positions; "unknown" says nothing and is left out.
 TABLEBASE_WORDS = {
-    "win": "a win",
-    "loss": "a loss",
+    "win": "a win for you",
+    "syzygy-win": "a win for you",
+    "loss": "a loss for you",
+    "syzygy-loss": "a loss for you",
     "draw": "a draw",
-    "cursed-win": "a win, but the 50-move rule makes it a draw",
-    "blessed-loss": "a loss, but the 50-move rule saves it",
-    "maybe-win": "probably a win",
-    "maybe-loss": "probably a loss",
-    "unknown": "not known",
+    "cursed-win": "a win for you on the board, but a draw under the 50-move rule",
+    "blessed-loss": "a loss for you on the board, but the 50-move rule saves a draw",
+    "maybe-win": "probably a win for you",
+    "maybe-loss": "probably a loss for you",
 }
+# A move's category in the tablebase is for the side to move after it (your opponent): turned round for you.
+TABLEBASE_FLIP = {
+    "win": "loss", "loss": "win", "syzygy-win": "syzygy-loss", "syzygy-loss": "syzygy-win", "draw": "draw",
+    "cursed-win": "blessed-loss", "blessed-loss": "cursed-win", "maybe-win": "maybe-loss", "maybe-loss": "maybe-win",
+}
+RESULT_WORDS = {"win": "a win for you", "draw": "a draw", "loss": "a loss for you"}
+
+
+def tablebase_text(tb: Any) -> str:
+    """``Explanation.tablebase`` in words, from your side: "with perfect play this position is a win for you; the
+    tablebase move is Ra6+; after your move it is a draw".
+
+    ``category`` is the verdict for the side to move in the explained position (you). What your move left is
+    ``played_result`` (win / draw / loss for you) or, failing that, ``played_category``: Lichess's category for
+    the side to move after it, your opponent, so it is turned round. DTZ and DTM are left out (their units, plies
+    or moves, depend on the source).
+    """
+    if not isinstance(tb, dict) or not tb:
+        return ""
+    bits = []
+    category = text_or_empty(tb.get("category")).lower()
+    if category in TABLEBASE_WORDS:
+        bits.append(f"with perfect play this position is {TABLEBASE_WORDS[category]}")
+    best = text_or_empty(tb.get("best"))
+    if best:
+        bits.append(f"the tablebase move is {best}")
+    played = RESULT_WORDS.get(text_or_empty(tb.get("played_result")).lower())
+    if played is None:
+        played = TABLEBASE_WORDS.get(TABLEBASE_FLIP.get(text_or_empty(tb.get("played_category")).lower(), ""))
+    if played:
+        bits.append(f"after your move it is {played}")
+    return "; ".join(bits)
 
 
 def _chip_links(themes: Iterable[Any], label: str) -> str:
@@ -2324,9 +2376,9 @@ def _opening_html(op: Any, exp: Explanation) -> str:
     name = " ".join(x for x in (text_or_empty(op.eco), text_or_empty(op.name)) if x)
     ranks = []
     if to_number(op.played_rank_masters):
-        ranks.append(f"the masters' choice number {int(op.played_rank_masters)}")
+        ranks.append(f"the masters' choice number {int(to_number(op.played_rank_masters))}")
     if to_number(op.played_rank_peers):
-        ranks.append(f"number {int(op.played_rank_peers)} among {peer_label(op.peer_groups or [])}")
+        ranks.append(f"number {int(to_number(op.played_rank_peers))} among {peer_label(op.peer_groups or [])}")
     rank = f"<p>Your move {_esc(played)} is {_esc(' and '.join(ranks))}.</p>" if ranks and played else ""
     parts = []
     tables = _move_table("Masters", op.masters or [], played) + _move_table(peer_label(op.peer_groups or []), op.peers or [], played)
@@ -2356,40 +2408,37 @@ def _opening_html(op: Any, exp: Explanation) -> str:
 
 
 def _tablebase_html(tb: Any) -> str:
-    if not isinstance(tb, dict) or not tb:
+    text = tablebase_text(tb)
+    if not text:
         return ""
-    bits = []
-    category = text_or_empty(tb.get("category"))
-    if category:
-        bits.append(f"with perfect play this position is {TABLEBASE_WORDS.get(category, category)} for you")
-    best = text_or_empty(tb.get("best"))
-    if best:
-        bits.append(f"the tablebase move is {best}")
-    for key in ("played_category", "after"):
-        after = text_or_empty(tb.get(key))
-        if after:
-            bits.append(f"after your move it is {TABLEBASE_WORDS.get(after, after)}")
-            break
-    if not bits:
-        return ""
-    return f'<p class="tb"><span class="mini-label">Endgame tablebase</span> {_esc("; ".join(bits))}.</p>'
+    return f'<p class="tb"><span class="mini-label">Endgame tablebase</span> {_esc(text[:1].upper() + text[1:])}.</p>'
 
 
-def _maia_html(maia: Any, exp: Explanation) -> str:
+def maia_text(maia: Any, exp: Explanation) -> str:
+    """``Explanation.maia`` in words: how often players at your level find the better move and play yours.
+
+    Maia-2 is trained on Lichess games, so its ``rating`` is a Lichess rating; ``chesscom_rating`` (your chess.com
+    rating it was converted from) is named next to it when present."""
     if not isinstance(maia, dict) or not maia:
         return ""
-    rating = to_number(maia.get("rating"))
-    who = f"players rated about {int(rating)}" if rating else "players at your level"
+    rating, chesscom = to_number(maia.get("rating")), to_number(maia.get("chesscom_rating"))
+    who = f"Lichess players rated about {int(rating)}" if rating else "players at your level"
+    if rating and chesscom:
+        who += f" (about {int(chesscom)} on chess.com)"
     bits = []
     p_best, p_played = to_number(maia.get("p_best")), to_number(maia.get("p_played"))
     if p_best is not None and text_or_empty(exp.best):
-        bits.append(f"find {exp.best} {format_value(p_best, 'pct')} of the time")
+        bits.append(f"find {text_or_empty(exp.best)} {format_value(p_best, 'pct')} of the time")
     if p_played is not None and text_or_empty(exp.played):
-        bits.append(f"play {exp.played} {format_value(p_played, 'pct')} of the time")
+        bits.append(f"play {text_or_empty(exp.played)} {format_value(p_played, 'pct')} of the time")
     if not bits:
         return ""
-    return (f'<p class="maia"><span class="mini-label">How findable</span> In the Maia-2 model of human play, '
-            f"{_esc(who)} {_esc(' and '.join(bits))}.</p>")
+    return f"In the Maia-2 model of human play, {who} {' and '.join(bits)}."
+
+
+def _maia_html(maia: Any, exp: Explanation) -> str:
+    text = maia_text(maia, exp)
+    return f'<p class="maia"><span class="mini-label">How findable</span> {_esc(text)}</p>' if text else ""
 
 
 def _sources_html(sources: Iterable[Any]) -> str:
@@ -2553,19 +2602,31 @@ def _why_section_html(coaching: Any, page: PageIndex) -> str:
     if profile:
         blocks.append('<div class="coach-block"><h3 class="sub-head">Patterns in the mistakes</h3>'
                       f'<div class="charts">{"".join(profile)}</div></div>')
-    for table, heading in ((coaching.theory_exit, "Where you leave opening theory"),
-                           (coaching.endgames, "Endgames checked with the tablebase")):
-        if isinstance(table, Table):
-            blocks.append(f'<div class="coach-block"><h3 class="sub-head">{_esc(heading)}</h3>{_table_html(table, show_title=False)}</div>')
+    # tablebase slips as boards: drawn when the coaching carries them (``endgame_diagrams``, not in every version
+    # of the contract; without it the endgame boards come in the Engine review section)
+    endgame_boards = "".join(
+        _position_html(d, page.id(f"why-eg{i}-"), page, "module")
+        for i, d in enumerate(getattr(coaching, "endgame_diagrams", None) or [], 1)
+        if isinstance(d, Diagram)
+    )
+    for table, heading, extra in ((coaching.theory_exit, "Where you leave opening theory", ""),
+                                  (coaching.endgames, "Endgames checked with the tablebase", endgame_boards)):
+        body = (_table_html(table, show_title=False) if isinstance(table, Table) else "") + (
+            f'<div class="boards">{extra}</div>' if extra else "")
+        if body:
+            blocks.append(f'<div class="coach-block"><h3 class="sub-head">{_esc(heading)}</h3>{body}</div>')
     notes = _notes_html(coaching.notes, coaching.llm)
     if not blocks and not notes:
         return ""
     n = len(exps)
-    summary = (
-        f"The engine's lines for {n} position{'s' if n != 1 else ''} from your games: what your move allowed, "
-        "what was better, and the pattern to practise. On the boards, red is your move and green the better one."
-        if exps else "What the coach found in your games."
-    )
+    if exps:
+        summary = (f"The engine's lines for {n} position{'s' if n != 1 else ''} from your games: what your move "
+                   "allowed, what was better, and the pattern to practise. On the boards, red is your move and "
+                   "green the better one.")
+    elif blocks:
+        summary = "What the coach found in your games."
+    else:
+        summary = "No positions were explained this time; the notes below say why."
     return _section_open(page, "why", "Why these moves go wrong", summary) + "".join(blocks) + notes + "</section>"
 
 
@@ -2620,11 +2681,11 @@ def _drill_html(drill: Drill) -> str:
     if meta:
         parts.append(f'<p class="drill-meta">{" · ".join(meta)}</p>')
     frames = []
-    for p in (drill.puzzles or [])[:DRILL_BOARDS]:
+    for p in [p for p in drill.puzzles or [] if isinstance(p, DrillPuzzle)][:DRILL_BOARDS]:
         board = boards.parse_board(p.fen)
         if board is None:
             continue
-        first = p.solution_uci[0] if p.solution_uci else ""
+        first = str(p.solution_uci[0]) if isinstance(p.solution_uci, (list, tuple)) and p.solution_uci else ""
         arrow = None
         if first:
             arrow = move_arrow(board, first, "best")
@@ -2678,12 +2739,12 @@ def _practice_section_html(coaching: Any, page: PageIndex) -> str:
           "Puzzles for the patterns you miss most, at your level. The green arrow is the first move of the solution.")
     plan = [p for p in coaching.weekly_plan or [] if text_or_empty(getattr(p, "item", ""))]
     if plan:
-        with_notes = any(text_or_empty(getattr(p, "note", "")) for p in plan)
-        table = Table(
+        table = Table(  # the note goes with its item: three columns fit a phone
             title="",
-            columns=["What", "Minutes a week", "Check again"] + (["Note"] if with_notes else []),
-            rows=[[p.item, p.minutes_per_week, p.recheck_date or None] + ([p.note] if with_notes else []) for p in plan],
-            formats=["text", "int", "text"] + (["text"] if with_notes else []),
+            columns=["What", "Minutes a week", "Check again"],
+            rows=[[text_or_empty(p.item) + (f": {text_or_empty(p.note)}" if text_or_empty(getattr(p, "note", "")) else ""),
+                   p.minutes_per_week, _short_date(p.recheck_date) or None] for p in plan],
+            formats=["text", "int", "text"],
         )
         block("Your week", _table_html(table, show_title=False))
     block("Coming up for review", _review_html(coaching.review or [], page, limit=REVIEW_OPEN),
@@ -2857,33 +2918,54 @@ def _view_key(tc: Any) -> str:
 
 
 def format_views(report: Report) -> list[tuple[str, Report]]:
-    """The per-format reports to show as views: (time class, report), in format order."""
+    """The per-format reports to show as views: (time class, report), in format order.
+
+    One view per page id (a second report whose key reads the same is dropped); a view whose report forgot its
+    ``time_class`` gets it from its key. A lone view of the only format the report has would repeat the main
+    report, so there are no views then.
+    """
     reports = getattr(report, "format_reports", None) or {}
     if not isinstance(reports, dict):
         return []
     order = {tc: i for i, tc in enumerate(FORMAT_ORDER)}
-    views = [(text_or_empty(tc).lower(), r) for tc, r in reports.items() if isinstance(r, Report) and text_or_empty(tc)]
-    return sorted(views, key=lambda v: (order.get(v[0], len(order)), v[0]))
+    views: list[tuple[str, Report]] = []
+    keys = {"all"}  # the main view's id
+    for tc, r in reports.items():
+        key = text_or_empty(tc).lower()
+        if not key or not isinstance(r, Report) or _view_key(key) in keys:
+            continue
+        keys.add(_view_key(key))
+        if text_or_empty(getattr(r, "time_class", "")).lower() != key:
+            r = replace(r, time_class=key)
+        views.append((key, r))
+    views.sort(key=lambda v: (order.get(v[0], len(order)), v[0]))
+    if len(views) == 1 and list(clean_formats(getattr(report, "formats", None))) == [views[0][0]]:
+        return []
+    return views
 
 
 def view_coaching(sub: Report, main: Report, tc: str) -> Optional[Coaching]:
-    """A format view's coaching: its own when the pipeline ran it per format, else the main report's first
-    ``WHY_OPEN`` explanations of that format's games (the rest stay in the All formats view)."""
-    if isinstance(getattr(sub, "coaching", None), Coaching):
-        return sub.coaching
-    main_coaching = getattr(main, "coaching", None)
-    if not isinstance(main_coaching, Coaching):
-        return None
-    exps = [e for e in _explanations(main_coaching) if text_or_empty(e.time_class).lower() == tc]
-    if not exps:
-        return None
-    # the cards repeat the main view's, so only the first ones: every board adds to the page's weight
-    notes = []
+    """A format view's coaching: its own when the pipeline gives it one, else the main report's explanations of
+    that format's games. Either way at most ``WHY_OPEN`` explanations: the cards repeat the All formats view's and
+    every board adds to the page's weight, so a note points there for the rest. The AI coach's counts are for
+    the whole report and stay in the All formats view."""
+    own = getattr(sub, "coaching", None)
+    if isinstance(own, Coaching):
+        base, exps = own, _explanations(own)
+    else:
+        main_coaching = getattr(main, "coaching", None)
+        if not isinstance(main_coaching, Coaching):
+            return None
+        exps = [e for e in _explanations(main_coaching) if text_or_empty(e.time_class).lower() == tc]
+        if not exps:
+            return None
+        base = Coaching()
+    notes = [n for n in base.notes or [] if text_or_empty(n)]
     if len(exps) > WHY_OPEN:
         rest = len(exps) - WHY_OPEN
         notes.append(f"{rest} more explanation{'s' if rest != 1 else ''} of {format_name(tc).lower()} positions "
                      "are in the All formats view.")
-    return Coaching(explanations=exps[:WHY_OPEN], notes=notes)
+    return replace(base, explanations=exps[:WHY_OPEN], notes=notes, llm={})
 
 
 def _view_head_html(report: Report, *, main: bool) -> str:
@@ -3225,7 +3307,7 @@ details.study[open] summary{margin-bottom:8px}
 .frame-move{font:600 13px/1.25 var(--font-mono);color:var(--ink)}
 .frame-cap{font-size:12px;line-height:1.35;color:var(--ink-2);overflow-wrap:anywhere}
 .why-list{display:grid;gap:16px;min-width:0}
-.why{display:grid;gap:16px;padding:16px;align-content:start}
+.why{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;padding:16px;align-content:start}
 .why-head{display:grid;gap:2px}
 .why-title{font:600 19px/1.3 var(--font-mono);overflow-wrap:anywhere}
 .why-best{font:500 15px var(--font-sans);color:var(--good);margin-left:8px;white-space:nowrap}
@@ -3244,7 +3326,7 @@ details.study[open] summary{margin-bottom:8px}
 .ci a.motif:hover{border-color:var(--accent);color:var(--accent)}
 .facts{padding-left:1.1em;display:grid;gap:4px;font-size:14px;color:var(--ink-2)}
 .lines{list-style:none;display:grid;gap:2px}
-.opening-facts,.concepts,.coach-block{display:grid;gap:10px;min-width:0}
+.opening-facts,.concepts,.coach-block{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;min-width:0}
 .of-tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px 20px;align-items:start}
 .of-tables .table-wrap{--wrap-bg:var(--surface)}
 .wiki{margin:0;padding:6px 12px;border-left:3px solid var(--axis);color:var(--ink-2);font-size:14px}
@@ -3358,15 +3440,22 @@ _SCRIPT = """<script>
       });
     })(boxes[b]);
   }
-  function reveal(id) {  // a link into a folded part of the page opens it
+  function reveal(id) {  // a link into a folded part of the page (or another format's view) opens it
     var el = id ? document.getElementById(id) : null;
-    for (var p = el && el.parentElement; p; p = p.parentElement) if (p.tagName === "DETAILS") p.open = true;
+    for (var p = el && el.parentElement; p; p = p.parentElement) {
+      if (p.tagName === "DETAILS") p.open = true;
+      var m = p.className && /(?:^| )fmt-view--([a-z0-9-]+)/.exec(p.className), r = m && document.getElementById("fmt-" + m[1]);
+      if (r && !r.checked) r.checked = true;
+    }
+    return el;
   }
   document.addEventListener("click", function (e) {
     var a = e.target && e.target.closest ? e.target.closest('a[href^="#"]') : null;
     if (a) { try { reveal(decodeURIComponent(a.getAttribute("href").slice(1))); } catch (err) {} }
   });
-  if (location.hash) { try { reveal(decodeURIComponent(location.hash.slice(1))); } catch (err) {} }
+  if (location.hash) {  // a shared link into a view other than "All formats"
+    try { var t = reveal(decodeURIComponent(location.hash.slice(1))); if (t) t.scrollIntoView(); } catch (err) {}
+  }
   document.addEventListener("pointermove", track);
   document.addEventListener("pointerdown", track);
   window.addEventListener("scroll", function () { tip.hidden = true; }, { passive: true });

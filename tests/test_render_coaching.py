@@ -162,7 +162,9 @@ def test_coaching_section_cards(page):
     third = re.search(r'<article class="card why" id="why-3">.*?</article>', why, re.S).group(0)
     assert 'class="a a-played"' in third and third.count('class="cb cb--mini"') == 6
     tb = re.search(r'<article class="card why" id="why-4">.*?</article>', why, re.S).group(0)
-    assert "a win for you" in tb and "Ra6+" in tb and "players rated about 1400 find 60.Ra6+ 31%" in tb
+    assert ("With perfect play this position is a win for you; the tablebase move is Ra6+; after your move it is "
+            "a win for you.") in tb  # "played_category": "loss" is the opponent's
+    assert "Lichess players rated about 1400 (about 949 on chess.com) find 60.Ra6+ 31% of the time" in tb
     # the first ten are open, the rest fold away
     more = re.search(r'<details class="more why-more"><summary>Show 6 more explanations</summary>.*?</details>', why, re.S)
     assert more and 'id="why-11"' in more.group(0) and 'id="why-10"' not in more.group(0)
@@ -181,7 +183,8 @@ def test_practice_section(page):
     assert "30 fork puzzles" in drill and "bigmuffeater-drill-fork.pgn" in drill
     assert 'href="https://lichess.org/training/fork"' in drill and 'href="https://lichess.org/training/01243"' in drill
     assert drill.count('class="a a-best"') == 2  # the first solution move of each puzzle, green
-    assert ">Your week<" in practice and ">10 minutes on six days<" in practice
+    assert ">Your week<" in practice and "fork.pgn): 10 minutes on six days<" in practice
+    assert ">10 Oct" in practice  # (with the year when it is not this one)
     # checkboxes of the review list are remembered like the study plan's
     assert ".review input[type=checkbox][data-k]" in page
 
@@ -201,9 +204,18 @@ def test_format_view_repeats_at_most_ten_explanations(report):
     blitz = view_coaching(rep.format_reports["blitz"], rep, "blitz")
     assert len(blitz.explanations) == 10 and "3 more explanations of blitz positions" in blitz.notes[0]
     assert view_coaching(rep.format_reports["rapid"], rep, "rapid") is None  # none of rapid games
-    own = Coaching(notes=["own"])
+    # the pipeline's own per-format coaching wins (as pipeline.view_coaching builds it: every explanation of the
+    # format, the notes and the AI coach's counts), but is capped the same way, and the counts (for the whole
+    # report) stay in the All formats view
+    own = Coaching(explanations=[copy.deepcopy(rep.coaching.explanations[0]) for _ in range(12)], notes=["own"],
+                   llm={"model": "m", "accepted": 12, "rejected": 2})
     rep.format_reports["rapid"].coaching = own
-    assert view_coaching(rep.format_reports["rapid"], rep, "rapid") is own  # the pipeline's own wins
+    rapid = view_coaching(rep.format_reports["rapid"], rep, "rapid")
+    assert rapid.explanations == own.explanations[:10] and rapid.llm == {}
+    assert rapid.notes == ["own", "2 more explanations of rapid positions are in the All formats view."]
+    assert len(own.explanations) == 12 and own.llm  # the report's own data is left alone
+    html = _view(render_html(rep), "rapid")
+    assert html.count('<article class="card why"') == 10 and "explanations reworded" not in html
 
 
 def test_absent_coaching_renders_nothing():
@@ -304,3 +316,125 @@ def test_nan_in_coaching_is_null():
     assert data["coaching"]["explanations"][0]["drop"] is None and data["coaching"]["settings"]["x"] is None
     html = render_html(rep)
     assert "nan" not in re.sub(r"<[^>]+>", "", html).lower().split()
+
+
+# --------------------------------------------------------------------------- wording of engine and database facts
+def test_tablebase_facts_are_from_your_side():
+    from chess_insights.report.html import tablebase_text
+
+    # the shape coach/sources/tablebase.py writes; a move's "played_category" is the opponent's (Lichess API)
+    kept = {"category": "win", "result": "win", "best": "Ra6+", "played": "Kc4", "played_category": "loss"}
+    assert tablebase_text(kept) == ("with perfect play this position is a win for you; the tablebase move is Ra6+; "
+                                    "after your move it is a win for you")
+    assert tablebase_text({"category": "win", "played_category": "draw"}).endswith("after your move it is a draw")
+    assert tablebase_text({"category": "draw", "played_category": "win"}).endswith("it is a loss for you")
+    assert "a loss for you on the board, but the 50-move rule saves a draw" in tablebase_text(
+        {"category": "draw", "played_category": "cursed-win"})
+    # "played_result" (your side already) wins over the raw category
+    assert tablebase_text({"played_result": "draw", "played_category": "win"}) == "after your move it is a draw"
+    for junk in (None, "win", {}, {"category": "unknown"}, {"category": 3, "played_category": None}):
+        assert tablebase_text(junk) == ""
+
+
+def test_maia_names_the_lichess_rating():
+    from chess_insights.report.html import maia_text
+
+    exp = Explanation("e", SICILIAN, "5...e5", "5...a6", None, None)
+    text = maia_text({"rating": 1390, "chesscom_rating": 949, "p_best": 0.31, "p_played": 0.2}, exp)
+    assert text == ("In the Maia-2 model of human play, Lichess players rated about 1390 (about 949 on chess.com) "
+                    "find 5...a6 31% of the time and play 5...e5 20% of the time.")
+    assert maia_text({"p_best": 0.31}, exp).startswith("In the Maia-2 model of human play, players at your level")
+    assert maia_text({"rating": 1390}, exp) == "" and maia_text(None, exp) == ""
+
+
+def test_line_verdicts_checkmate_and_cut_lines():
+    from chess_insights.models import Line
+    from chess_insights.report.html import line_text, pawns_text
+
+    assert pawns_text(-152) == "−1.52 for you" and pawns_text(None, 3) == "mate in 3 for you"
+    assert pawns_text(-1000, -2) == "mate in 2 against you"
+    # mate 0: the line ends in checkmate; the engine's mate-sized centipawns say who gave it
+    assert pawns_text(1000, 0) == "checkmate for you" and pawns_text(-1000, 0) == "checkmate against you"
+    fools = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    assert line_text(Line(fools, ["f2f3", "e7e5", "g2g4", "d8h4"], cp_end=-1000, mate_end=0)) == (
+        "1.f3 e5 2.g4 Qh4# (checkmate against you)")
+    # a line cut short (or stopped at an illegal move) says so before the verdict of its end
+    ref = Line(SICILIAN, ["e6e5", "d4b5", "a7a6", "b5d6", "f8d6", "d1d6"], cp_end=-152)
+    assert line_text(ref, limit=3) == "5...e5 6.Ndb5 a6 … (−1.52 for you)"
+    assert line_text(Line(SICILIAN, ["e6e5", "e2e4"], cp_end=-152)) == "5...e5 … (−1.52 for you)"
+
+
+def test_why_links_name_a_choice_point_as_one():
+    rep = sample_report(views=False)
+    for exp in rep.coaching.explanations:
+        exp.kind = "choice"
+    main = render_html(rep)
+    card = re.search(r'<article class="card insight[^>]*id="f-positions-repeated-sicilian-5e5".*?</article>', main, re.S)
+    assert "The engine&#x27;s lines for this position" in card.group(0) and "Why this goes wrong" not in card.group(0)
+    assert "Why it goes wrong" not in main and ">The engine&#x27;s lines</a>" in main
+
+
+# --------------------------------------------------------------------------- views and odd coaching data
+def test_format_views_one_per_id_and_never_a_copy_of_the_main_report():
+    from chess_insights.report.html import format_views
+
+    rep = sample_report(views=False, coaching=False)
+    blitz = sample_report(views=False, coaching=False, time_class="blitz")
+    blitz.time_class = ""  # a view that forgot its format gets it from its key
+    rep.format_reports = {"Blitz": blitz, "blitz": blitz, "all": blitz, "bullet": "not a report"}
+    views = format_views(rep)
+    assert [tc for tc, _ in views] == ["blitz"] and views[0][1].time_class == "blitz" and blitz.time_class == ""
+    html = render_html(rep)
+    check_html(html)
+    assert html.count('<input class="fmt-radio"') == 2 and "Blitz only: 949 games" in html
+    # the only format of a one-format report: no views (the view would repeat the report)
+    one = sample_report(views=False, coaching=False, time_class="blitz")
+    one.time_class = ""
+    one.format_reports = {"blitz": sample_report(views=False, coaching=False, time_class="blitz")}
+    assert format_views(one) == [] and '<input class="fmt-radio"' not in render_html(one)
+
+
+def test_a_link_into_another_view_opens_that_view(page):
+    script = re.search(r"<script>(.*?)</script>", page, re.S).group(1)
+    assert "fmt-view--" in script and "r.checked = true" in script and "scrollIntoView" in script
+
+
+def test_malformed_coaching_data_never_crashes():
+    from chess_insights.models import Line, MoveStat, OpeningFacts, PlanEntry, ProgressItem, Table
+
+    bad = Explanation(epd=None, fen="garbage", played=None, best=None, best_line=None, refutation=None,
+                      motifs=[None], concepts=[None], facts=[None, ""], text=None, sources=[None], kind=None,
+                      drop=float("nan"), time_class=None, game_url=None, games=None, repeats=None, opening="x",
+                      tablebase="str", maia=None, diagram="x", chart="y", drill_themes=None)
+    odd = Explanation("", SICILIAN, "5...e5", "5...a6", Line(SICILIAN, ["zz"]), Line("bad", ["e6e5"], cp_end=-100),
+                      tablebase={"category": None, "played_category": 5}, maia={"rating": "x", "p_best": float("nan")},
+                      opening=OpeningFacts(masters=[None, MoveStat("")], played_rank_masters=float("nan")),
+                      diagram=Diagram("t", SICILIAN, arrows=[None, Arrow(None, None)],
+                                      strips=[Strip("s", [None, Frame("bad"), Frame(SICILIAN, None)]), None]))
+    rep = empty_report()
+    rep.coaching = Coaching(
+        explanations=[bad, odd, None],
+        drills=[Drill("fork", None, None, None, None, [DrillPuzzle("1", "bad", [], [], None), None,
+                                                      DrillPuzzle("2", SICILIAN, None, [], "x")]), None],
+        review=[ReviewItem("a", "own", None, "bad", None, "garbage"), None],
+        weekly_plan=[PlanEntry("x", None), PlanEntry(None, 3)],
+        progress=[ProgressItem("a", "m", None, float("nan"), "")],
+        motif_profile=Table("t", ["a"], [[None]]), motif_chart=Chart("pie", "c", [], []), llm={"accepted": "x"},
+    )
+    html = render_html(rep)
+    check_html(html)
+    assert html.count(SPRITE) == 1 and '<svg class="cb' in html  # the readable positions still get boards
+    assert "5...e5" in render_markdown(rep)
+    json.loads(to_json(rep))
+
+
+def test_endgame_boards_are_drawn_when_the_coaching_carries_them():
+    from chess_insights import visuals
+
+    rep = sample_report(views=False)
+    rep.coaching.endgame_diagrams = [visuals.position_diagram(  # not in every version of the contract
+        "Rook ending: Kc4", "8/8/4k3/8/8/3K4/8/R7 w - - 0 60", played="Kc4", best="Ra6+", time_class="blitz")]
+    html = render_html(rep)
+    check_html(html)
+    block = re.search(r'Endgames checked with the tablebase</h3>.*?</div></div>', html, re.S).group(0)
+    assert "Rook ending: Kc4" in block and 'class="a a-best"' in block

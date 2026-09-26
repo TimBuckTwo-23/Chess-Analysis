@@ -16,6 +16,7 @@ from ..models import (
     Coaching,
     Diagram,
     Drill,
+    DrillPuzzle,
     Explanation,
     Insight,
     Kpi,
@@ -32,7 +33,6 @@ from ..models import (
 from . import boards
 from .html import (
     EXPLANATION_KINDS,
-    TABLEBASE_WORDS,
     WHY_OPEN,
     clean_formats,
     format_chip_text,
@@ -40,8 +40,10 @@ from .html import (
     format_name,
     format_views,
     line_text,
+    maia_text,
     motif_words,
     peer_label,
+    tablebase_text,
     training_url,
     view_coaching,
     view_scope_text,
@@ -241,7 +243,7 @@ def _position_lines(d: Diagram, labels: Optional[dict[str, str]] = None, *, inde
         out.append(f"{indent}  - Arrows: {md_text(arrows)}")
     for strip in (getattr(d, "strips", None) or []) if strips else []:
         if isinstance(strip, Strip):
-            moves = boards.compact_labels([f.move for f in strip.frames or []])
+            moves = boards.compact_labels([getattr(f, "move", "") for f in strip.frames or []])
             if moves:
                 out.append(f"{indent}  - {md_text(strip.title) or 'Line'}: {md_code(moves)}")
     return out
@@ -560,10 +562,10 @@ def _opening_lines(op: Any, played: str) -> list[str]:
     if op.peers:
         out.append(f"  - {md_text(peer_label(op.peer_groups or []))}: {_moves_text(op.peers, played)}")
     ranks = []
-    if op.played_rank_masters:
-        ranks.append(f"the masters' choice number {int(op.played_rank_masters)}")
-    if op.played_rank_peers:
-        ranks.append(f"number {int(op.played_rank_peers)} among {peer_label(op.peer_groups or [])}")
+    if to_number(op.played_rank_masters):
+        ranks.append(f"the masters' choice number {int(to_number(op.played_rank_masters))}")
+    if to_number(op.played_rank_peers):
+        ranks.append(f"number {int(to_number(op.played_rank_peers))} among {peer_label(op.peer_groups or [])}")
     if ranks and played:
         out.append(f"  - Your move {md_text(played)} is {md_text(' and '.join(ranks))}.")
     for line in (op.cloud_lines or [])[:3]:
@@ -602,7 +604,7 @@ def _explanation(e: Explanation, k: int, labels: Optional[dict[str, str]], view_
         lines += [md_text(e.text) + (" _(Wording by the AI coach, checked against the engine lines.)_"
                                      if text_or_empty(e.text_source) == "llm" else ""), ""]
     items = []
-    for line, label in ((e.refutation, f"What {played or 'your move'} allows"), (e.best_line, f"Better: {best}" if best else "Better")):
+    for line, label in ((e.refutation, f"What {played or 'your move'} allows"), (e.best_line, f"Better {best}" if best else "Better")):
         t = line_text(line)
         if t:
             items.append(f"- {md_text(label)}: {md_code(t)}")
@@ -626,25 +628,12 @@ def _explanation(e: Explanation, k: int, labels: Optional[dict[str, str]], view_
         if concepts:
             items.append(f"- Where the lines end (pawns, from your side): {md_text(', '.join(concepts))}")
     items += _opening_lines(e.opening, re.sub(r"^\d+\.(?:\.\.)?\s*", "", played))
-    tb = e.tablebase if isinstance(e.tablebase, dict) else {}
-    if text_or_empty(tb.get("category")) or text_or_empty(tb.get("best")):
-        cat = text_or_empty(tb.get("category"))
-        bits = [f"with perfect play this position is {TABLEBASE_WORDS.get(cat, cat)} for you"] if cat else []
-        if text_or_empty(tb.get("best")):
-            bits.append(f"the tablebase move is {text_or_empty(tb.get('best'))}")
-        items.append(f"- Endgame tablebase: {md_text('; '.join(bits))}.")
-    maia = e.maia if isinstance(e.maia, dict) else {}
-    p_best, p_played = to_number(maia.get("p_best")), to_number(maia.get("p_played"))
-    if p_best is not None or p_played is not None:
-        rating = to_number(maia.get("rating"))
-        who = f"players rated about {int(rating)}" if rating else "players at your level"
-        bits = []
-        if p_best is not None and best:
-            bits.append(f"find {best} {format_value(p_best, 'pct')} of the time")
-        if p_played is not None and played:
-            bits.append(f"play {played} {format_value(p_played, 'pct')} of the time")
-        if bits:
-            items.append(f"- How findable: in the Maia-2 model of human play, {md_text(who)} {md_text(' and '.join(bits))}.")
+    tb = tablebase_text(e.tablebase)
+    if tb:
+        items.append(f"- Endgame tablebase: {md_text(tb)}.")
+    maia = maia_text(e.maia, e)
+    if maia:
+        items.append(f"- How findable: {md_text(maia)}")
     sources = _sources_line(list(e.sources or []) + list(getattr(e.opening, "sources", None) or []))
     if sources:
         items.append(f"- Sources: {sources}")
@@ -723,7 +712,7 @@ def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = ""
             if safe_url(d.link):
                 bits.append(md_link(d.link, "practise on Lichess"))
             practice.append(f"- **{md_text(d.title) or md_text(motif_words(d.theme))}** — " + " · ".join(bits))
-            for p in (d.puzzles or [])[:3]:
+            for p in [p for p in d.puzzles or [] if isinstance(p, DrillPuzzle)][:3]:
                 name = md_link(p.url, f"puzzle {p.puzzle_id}") if safe_url(p.url) else md_text(f"puzzle {p.puzzle_id}")
                 practice.append(f"  - {name} (rated {p.rating}): {md_code(p.fen)}")
         practice.append("")
