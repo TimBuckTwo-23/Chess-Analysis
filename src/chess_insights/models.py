@@ -73,6 +73,7 @@ CATEGORIES = (
     "conversion",  # winning won positions, saving lost ones
     "tactics",  # missed tactical shots / missed mates
     "positions",  # the same wrong move in the same position, game after game
+    "structure",  # castling, development, early queen moves: your habits against your opponents' in the same games
 )
 
 
@@ -242,6 +243,15 @@ class Insight:
     evidence: dict[str, Any] = field(default_factory=dict)  # n, score, expected, ...
     study: list[str] = field(default_factory=list)  # concrete actions
     example_games: list[str] = field(default_factory=list)  # chess.com URLs, most instructive first, <=5
+    # Which formats the finding is about: games (or engine-analysed games) behind it per time class, e.g.
+    # {"bullet": 210, "blitz": 88}. Every finding carries it, so the report can say "blitz and rapid" or
+    # "bullet only"; pipeline.fill_formats sets it from the module's games when a module leaves it empty.
+    formats: dict[str, int] = field(default_factory=dict)
+    # Every finding carries a picture: a small chart of the numbers behind it (you vs the benchmark, split by
+    # format where the data allows) and/or the position it is about. pipeline.fill_visuals adds a chart from
+    # ``evidence`` when a module sets neither.
+    chart: Optional["Chart"] = None
+    diagram: Optional["Diagram"] = None
 
     @property
     def priority(self) -> float:
@@ -292,15 +302,60 @@ class Kpi:
     hint: str = ""
 
 
+# Board annotations. Renderers draw every board themselves from the FEN (one shared piece sprite per
+# page), so a Diagram is plain data: position, arrows, marked squares and optional move strips.
+ARROW_KINDS = ("played", "best", "threat", "line", "neutral")  # red, green, orange, blue, grey
+MARK_KINDS = ("focus", "target", "attacker", "weak", "check")
+
+
+@dataclass
+class Arrow:
+    start: str  # square name, e.g. "e2"
+    end: str  # e.g. "e4" (castling: the king's destination)
+    kind: str = "neutral"  # one of ARROW_KINDS
+
+
+@dataclass
+class Mark:
+    square: str  # e.g. "d6"
+    kind: str = "focus"  # one of MARK_KINDS
+
+
+@dataclass
+class Frame:
+    """One small board in a strip: the position after ``move``."""
+
+    fen: str
+    move: str = ""  # the move that led here, numbered: "6.Ndb5" / "6...a6"
+    last_move: str = ""  # its UCI ("b5d6"), highlighted on the board
+    caption: str = ""  # e.g. "+1.5 for White" or "Fork: d6 hits king and b7"
+    arrows: list[Arrow] = field(default_factory=list)
+    marks: list[Mark] = field(default_factory=list)
+
+
+@dataclass
+class Strip:
+    """A line of play shown as a row of small boards ("What happens after 5...e5")."""
+
+    title: str
+    frames: list[Frame] = field(default_factory=list)
+
+
 @dataclass
 class Diagram:
-    """A chess position to show in the report (e.g. a position you keep getting wrong)."""
+    """A chess position to show in the report (a position you keep getting wrong, a choice point, a missed shot)."""
 
     title: str
     fen: str
-    svg: str  # rendered by chess.svg from ``fen`` in our own code — trusted markup, never user text
+    svg: str = ""  # legacy: a pre-rendered board. Renderers draw from ``fen`` + annotations; leave empty
     caption: str = ""
     link: str = ""  # chess.com game URL
+    orientation: Color = "white"  # the analysed player's side at the bottom
+    arrows: list[Arrow] = field(default_factory=list)  # played move red, better move green, ...
+    marks: list[Mark] = field(default_factory=list)
+    last_move: str = ""  # UCI of the move that led to ``fen`` (highlighted)
+    strips: list[Strip] = field(default_factory=list)  # optional lines of play after the position
+    time_class: str = ""  # format of the game the position comes from ("" = several / not a game)
 
 
 @dataclass
@@ -347,3 +402,234 @@ class Report:
     summary_lines: list[str] = field(default_factory=list)  # the headline as short lines: ratings, first steps, a strength
     game_labels: dict[str, str] = field(default_factory=dict)  # game URL -> "Loss · 5+0 · vs 1512 · 12 Aug"
     demo: bool = False  # a synthetic demo player: games, opponents and links are made up (links are not shown)
+    time_class: str = ""  # "" = every format in ``filters``; "blitz" etc. for one format's view
+    formats: dict[str, int] = field(default_factory=dict)  # games per time class in this report
+    engine_formats: dict[str, int] = field(default_factory=dict)  # engine-analysed games per time class
+    # The same analysis run separately on each format with enough games ("bullet", "blitz", "rapid", "daily"
+    # order). Each is a full Report with its own claims (tested on that format's games only), its
+    # ``time_class`` set, and no format_reports of its own.
+    format_reports: dict[str, "Report"] = field(default_factory=dict)
+    coaching: Optional["Coaching"] = None  # explanations, drills, schedule (coach/); None when not run
+
+
+# ---------------------------------------------------------------------------
+# Coaching layer (chess_insights/coach). Explanation and practice material only: it never creates a
+# claim. Every Explanation points at a position (EPD) or an insight id that already exists.
+# ---------------------------------------------------------------------------
+@dataclass
+class Line:
+    """A sequence of moves from ``fen``, with the engine's verdict at its end.
+
+    ``cp_end`` / ``mate_end`` are from the point of view of the side to move at ``fen`` (the side whose
+    choice it was), so a refutation of your move shows up negative for you.
+    """
+
+    fen: str
+    moves_uci: list[str] = field(default_factory=list)
+    moves_san: list[str] = field(default_factory=list)
+    cp_end: Optional[int] = None
+    mate_end: Optional[int] = None
+    fen_end: str = ""
+    depth: Optional[int] = None
+
+
+@dataclass
+class Motif:
+    """A tactical pattern found along a line, named with Lichess's puzzle-theme names."""
+
+    theme: str  # "fork", "pin", "skewer", "discoveredAttack", "hangingPiece", "backRankMate", "mateIn2" ...
+    line: str  # "refutation" (what your move allowed) | "best" (what you missed)
+    ply: int = 0  # index into the line's moves where the pattern appears
+    squares: list[str] = field(default_factory=list)  # squares involved, the active piece first (for the board)
+    side: str = ""  # "you" | "opponent": who carries out the pattern
+
+
+@dataclass
+class ConceptDelta:
+    """How a positional term differs between the ends of the refutation and the best line, from your side.
+
+    Negative = the refutation line ends worse for you on this term. Pawns (100 cp = 1.0).
+    """
+
+    term: str  # Stockfish 16 classical term ("Mobility", "King safety", ...) or a python-chess fact key
+    value: float  # phase-blended difference, pawns
+    mg: Optional[float] = None
+    eg: Optional[float] = None
+    label: str = ""  # plain words: "piece activity", "king safety", "pawn structure"
+    source: str = "stockfish16"  # "stockfish16" | "python-chess"
+
+
+@dataclass
+class Source:
+    """Where an external fact came from, shown with the fact."""
+
+    name: str  # "Lichess opening explorer (masters)", "Wikibooks, CC BY-SA 4.0", "Stockfish 16, depth 20"
+    url: str = ""
+    retrieved: str = ""  # ISO date
+    license: str = ""
+
+
+@dataclass
+class MoveStat:
+    """One move's share and score in an opening database (from the side to move's point of view)."""
+
+    san: str
+    uci: str = ""
+    games: int = 0
+    share: float = 0.0  # of all games in the position
+    score: Optional[float] = None  # 0..1 for the side to move
+    avg_rating: Optional[int] = None
+
+
+@dataclass
+class OpeningFacts:
+    """What the databases say about a position (C3). Every list may be empty when a source is unavailable."""
+
+    eco: str = ""
+    name: str = ""  # chess-openings name of the position (or the nearest named one before it)
+    masters: list[MoveStat] = field(default_factory=list)
+    peers: list[MoveStat] = field(default_factory=list)  # players one or two rating groups above you
+    peer_groups: list[int] = field(default_factory=list)  # Lichess rating groups used for ``peers``
+    played_rank_masters: Optional[int] = None  # 1-based rank of your move among the masters' moves
+    played_rank_peers: Optional[int] = None
+    master_game: str = ""  # a master game URL from the position
+    cloud_lines: list[Line] = field(default_factory=list)
+    wiki_text: str = ""
+    wiki_url: str = ""
+    sources: list[Source] = field(default_factory=list)
+
+
+@dataclass
+class CriticalPosition:
+    """A position worth explaining: one of your errors, a repeated mistake or a choice point in a main line."""
+
+    game_id: str
+    url: str
+    ply: int  # index of your move in Game.moves_san
+    fen: str  # the position before your move
+    played_uci: str
+    played_san: str
+    move_label: str  # "5...e5"
+    best_san: Optional[str]
+    drop: float  # win-% points your move lost (engine)
+    time_class: str
+    color: Color  # your colour
+    kind: str = "error"  # "error" | "repeated" | "choice"
+    repeats: int = 1  # games in which you played it here
+    games: list[str] = field(default_factory=list)  # URLs of those games, most recent first
+    insight_id: Optional[str] = None
+    opening_family: str = ""
+    moves_before: list[str] = field(default_factory=list)  # SAN from the start (for the caption and sources)
+
+    @property
+    def epd(self) -> str:
+        return " ".join(self.fen.split()[:4])
+
+
+@dataclass
+class Explanation:
+    """Why a move was wrong (or what the better choice is), from the engine's lines."""
+
+    epd: str
+    fen: str
+    played: str  # "5...e5"
+    best: Optional[str]  # "5...a6"
+    best_line: Optional[Line]
+    refutation: Optional[Line]  # the engine's line after your move
+    motifs: list[Motif] = field(default_factory=list)
+    concepts: list[ConceptDelta] = field(default_factory=list)
+    facts: list[str] = field(default_factory=list)  # board facts in words ("you lose the bishop pair")
+    text: str = ""  # two or three plain sentences (templates, or a verified LLM rewrite)
+    text_source: str = "template"  # "template" | "llm"
+    sources: list[Source] = field(default_factory=list)
+    insight_id: Optional[str] = None
+    kind: str = "error"  # as CriticalPosition.kind
+    drop: float = 0.0
+    time_class: str = ""
+    color: Color = "white"
+    game_url: str = ""
+    games: list[str] = field(default_factory=list)
+    repeats: int = 1
+    opening: Optional[OpeningFacts] = None
+    tablebase: dict[str, Any] = field(default_factory=dict)  # {"category": "win", "best": "Kd6", ...} when <= 7 pieces
+    maia: dict[str, Any] = field(default_factory=dict)  # {"rating": 1400, "p_best": 0.31, "p_played": 0.22}
+    diagram: Optional[Diagram] = None  # the board with arrows and the two lines as strips
+    chart: Optional[Chart] = None  # concept differences as bars
+    drill_themes: list[str] = field(default_factory=list)  # Lichess training themes to practise this
+
+
+@dataclass
+class DrillPuzzle:
+    puzzle_id: str  # Lichess PuzzleId
+    fen: str  # the puzzle position (after the opponent's first move)
+    solution_uci: list[str]
+    solution_san: list[str]
+    rating: int
+    themes: list[str] = field(default_factory=list)
+    url: str = ""  # https://lichess.org/training/<PuzzleId>
+    opening_tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Drill:
+    """A pack of practice puzzles for one theme (or for your openings)."""
+
+    theme: str  # Lichess theme name, or "openings"
+    title: str  # "30 fork puzzles"
+    link: str  # https://lichess.org/training/<theme>
+    file: str = ""  # PGN written next to the report ("" when not written)
+    rating_range: tuple[int, int] = (1200, 1600)
+    puzzles: list[DrillPuzzle] = field(default_factory=list)
+    reason: str = ""  # "you missed 23 forks in 300 games (opponents: 15)"
+
+
+@dataclass
+class ReviewItem:
+    """A puzzle scheduled for spaced repetition (1, 3, 7 and 21 days after the report)."""
+
+    item_id: str  # "own:<game_id>:<ply>" or "lichess:<PuzzleId>"
+    kind: str  # "own" | "drill"
+    title: str
+    fen: str
+    url: str
+    due: str  # ISO date
+    step: int = 0  # 0..3 -> 1, 3, 7, 21 days
+
+
+@dataclass
+class PlanEntry:
+    """One line of the weekly plan (C4): minutes per week and when to check again."""
+
+    item: str
+    minutes_per_week: int
+    recheck_date: str = ""  # ISO date
+    note: str = ""
+
+
+@dataclass
+class ProgressItem:
+    """A study-plan target next to the previous report's number."""
+
+    title: str
+    metric: str
+    before: Optional[float]
+    now: Optional[float]
+    text: str  # "clock used by move 15: 50% -> 38%"
+    improved: Optional[bool] = None
+
+
+@dataclass
+class Coaching:
+    explanations: list[Explanation] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)  # what was skipped and why (no Stockfish 16, offline, ...)
+    settings: dict[str, Any] = field(default_factory=dict)  # engine, depth, positions, ...
+    motif_profile: Optional[Table] = None  # motif, you missed, they missed, you allowed, they allowed (per 100 moves)
+    motif_chart: Optional[Chart] = None
+    drills: list[Drill] = field(default_factory=list)
+    review: list[ReviewItem] = field(default_factory=list)  # scheduled by this report
+    review_due: list[ReviewItem] = field(default_factory=list)  # due now, from earlier reports
+    theory_exit: Optional[Table] = None  # where you leave named opening theory, per line (C3)
+    endgames: Optional[Table] = None  # tablebase-checked endings (C3)
+    weekly_plan: list[PlanEntry] = field(default_factory=list)  # C4
+    progress: list[ProgressItem] = field(default_factory=list)  # C4
+    llm: dict[str, Any] = field(default_factory=dict)  # {"model", "accepted", "rejected"} when the LLM ran

@@ -14,16 +14,22 @@ dependencies = [
     "pandas>=2.0",
     "requests>=2.31",
     "tzdata; sys_platform == 'win32'",  # zoneinfo has no system time-zone database on Windows
+    "zstandard>=0.22",  # reads the Lichess puzzle database (chess-insights puzzles-db)
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+llm = ["anthropic>=0.40"]  # --coach-llm and `chess-insights ask`
+maia = ["maia2"]  # --maia: human move probabilities by rating (MIT; pulls in PyTorch)
 
 [project.scripts]
 chess-insights = "chess_insights.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+chess_insights = ["data/*.tsv", "data/*.json", "data/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
