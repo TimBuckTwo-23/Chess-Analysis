@@ -54,8 +54,8 @@ Requires Python 3.10+.
 **Get the code:**
 
 ```bash
-git clone https://github.com/TimBuckTwo-23/chess-insights
-cd chess-insights
+git clone https://github.com/TimBuckTwo-23/Chess-Analysis
+cd Chess-Analysis
 ```
 
 **Install and run:**
