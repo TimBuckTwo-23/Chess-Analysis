@@ -40,16 +40,36 @@ their clocks / how they end):
     touches) models this: the planted gap between affected and other games stays the
     same, the affected games' shortfall against the rating shrinks by ``share``.
 
-Without ``planted`` every random draw happens exactly as it always did, so a
-seed gives the same games, results, openings, clocks and lengths as before; the
-planted effects use their own random stream. The one deliberate change to the
-null world is its schedule: sessions start mostly in the evening and late at
-night (UTC), like a real club player's, so that about a third of all games are
+``"late_castling": 0.5``
+    share of games in which the player puts castling off until moves 11-16 (when they
+    meant to castle earlier); the opponents' habits are unchanged.
+``"early_queen": 0.3``
+    share of games in which the player also moves the queen (not capturing) on one of
+    moves 2-8.
+``"slow_development": 0.5``
+    share of games in which the player gets the knights and bishops out much later (all
+    four by moves 24-40 instead of 7-20); the kingside pieces still come out in time for
+    castling, so only development changes.
+
+Opening habits (castling, development, early queen and pawn moves) are the same for
+both players: after the opening line, each side's first 16 moves come from a simple
+policy whose habits are drawn from one distribution for the player and the opponent
+alike, independent of the result (:func:`_structured_moves`), and random legal moves
+follow. The structure effects above change only the player's habits.
+
+Without ``planted`` every draw of the main random stream happens exactly as it always
+did, so a seed gives the same results, openings (and their opening lines), clocks,
+lengths, ratings and schedules as before; only the moves after the opening line differ
+from older versions (they come from their own per-game stream, and have exactly as many
+plies). The planted effects use their own random streams. The one other deliberate
+change to the null world is its schedule: sessions start mostly in the evening and late
+at night (UTC), like a real club player's, so that about a third of all games are
 late-night games and a late-night effect is measurable.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -96,8 +116,12 @@ PLANT_KEYS = frozenset(
         "colour",
         "baseline",
         "play_on",
+        "late_castling",
+        "early_queen",
+        "slow_development",
     }
 )
+STRUCTURE_KEYS = ("late_castling", "early_queen", "slow_development")
 
 
 def _random_moves(rng: random.Random, start: list[str], target_plies: int) -> list[str]:
@@ -118,6 +142,218 @@ def _random_moves(rng: random.Random, start: list[str], target_plies: int) -> li
             break
         moves.append(board.san_and_push(rng.choice(legal)))
     return moves
+
+
+# Opening habits, drawn per game for each side from the SAME distribution (player and opponent alike). A
+# side's habits are targets, met whatever the opening line did first: when it castles, by which move all four
+# knights and bishops are out, and how many of its first 10 moves are pawn moves. So the opening lines, which
+# differ between the player's colours, don't give either side a head start.
+STRUCTURED_PLIES = 32  # the habit policy plays each side's first 16 moves; random legal moves after that
+P_CASTLE = 0.8  # the side means to castle in the opening ...
+CASTLE_AT = (5, 13)  # ... on this own move (uniform), or as soon after it as castling is legal
+LATE_CASTLE_AT = (11, 16)  # planted late castling
+P_EARLY_QUEEN = 0.15  # the side moves its queen (not capturing) on one of these own moves
+EARLY_QUEEN_MOVES = (2, 8)
+QUEEN_FREE_FROM = 9  # otherwise the queen stays at home until this move (unless nothing else is legal)
+DEVELOPED_BY = (7, 20)  # own move by which all four knights and bishops are out (uniform), developed evenly
+SLOW_DEVELOPED_BY = (24, 40)  # planted slow development
+PAWN_MOVES = (2, 6)  # pawn moves among the first 10 moves (uniform), spread evenly
+STRUCTURE_TRIES = 20  # attempts at a game that lasts as many plies as the original one
+_HOME_FILES = {chess.KNIGHT: (1, 6), chess.BISHOP: (2, 5)}  # b/g knights, c/f bishops
+
+
+def _draw_habits(srng: random.Random) -> dict[str, Any]:
+    """One side's opening habits (the same draws, in the same order, for both players)."""
+    return {
+        "castle_at": srng.randint(*CASTLE_AT) if srng.random() < P_CASTLE else None,
+        "queen_at": srng.randint(*EARLY_QUEEN_MOVES) if srng.random() < P_EARLY_QUEEN else None,
+        "developed_by": srng.randint(*DEVELOPED_BY),
+        "pawn_moves": srng.randint(*PAWN_MOVES),
+    }
+
+
+def _plant_structure(prng: random.Random, habits: dict[str, Any], planted: dict[str, Any]) -> None:
+    """Apply the planted structure effects to the player's habits (the same draws whatever they decide)."""
+    if "late_castling" in planted:
+        late, move = prng.random() < planted["late_castling"], prng.randint(*LATE_CASTLE_AT)
+        if late and habits["castle_at"] is not None:
+            habits["castle_at"] = max(habits["castle_at"], move)
+    if "early_queen" in planted:
+        early, move = prng.random() < planted["early_queen"], prng.randint(*EARLY_QUEEN_MOVES)
+        if early and habits["queen_at"] is None:
+            habits["queen_at"] = move
+    if "slow_development" in planted:
+        slow, move = prng.random() < planted["slow_development"], prng.randint(*SLOW_DEVELOPED_BY)
+        if slow:
+            habits["developed_by"] = move
+
+
+def _at_home(board: chess.Board, square: int, color: chess.Color) -> bool:
+    """A knight or bishop of ``color`` still on one of its starting squares."""
+    piece = board.piece_at(square)
+    return (
+        piece is not None
+        and piece.color == color
+        and piece.piece_type in _HOME_FILES
+        and chess.square_rank(square) == (0 if color == chess.WHITE else 7)
+        and chess.square_file(square) in _HOME_FILES[piece.piece_type]
+    )
+
+
+def _pick(srng: random.Random, groups: dict[str, list[chess.Move]], weights: dict[str, float]) -> Optional[chess.Move]:
+    """A move from one of the non-empty groups, chosen by weight."""
+    kinds = [k for k in weights if groups.get(k) and weights[k] > 0]
+    if not kinds:
+        return None
+    kind = srng.choices(kinds, weights=[weights[k] for k in kinds])[0]
+    return srng.choice(groups[kind])
+
+
+def _habit_move(
+    srng: random.Random, board: chess.Board, habits: dict[str, Any], state: dict[str, Any]
+) -> Optional[chess.Move]:
+    """The next move of a side playing by ``habits`` in the opening (None when it has no legal move).
+
+    Castling and the early queen move happen on their move (or as soon after as they are legal). Otherwise
+    the side develops a knight or bishop when it is behind its development schedule, makes a pawn move when
+    it is behind its pawn schedule, and moves an already developed piece (a rook once castled, the queen
+    after move 8) when it is on schedule for both; when a group has no legal move it falls back on the
+    others. A side that means to castle develops its kingside pieces first, and frees its king's bishop
+    (e- or g-pawn) before its castling move.
+    """
+    legal = list(board.legal_moves)
+    if not legal:
+        return None
+    number = board.fullmove_number
+    color = board.turn
+    castle_at = habits["castle_at"]
+    if castle_at is not None and number >= castle_at and not state["castled"]:
+        castles = sorted(board.generate_castling_moves(), key=lambda m: not board.is_kingside_castling(m))
+        if castles:
+            state["castled"] = True
+            return castles[0]
+    if habits["queen_at"] is not None and not state["queen"] and number >= habits["queen_at"]:
+        quiet = [m for m in legal if board.piece_type_at(m.from_square) == chess.QUEEN and not board.is_capture(m)]
+        if quiet:
+            state["queen"] = True
+            return srng.choice(quiet)
+    wants_castle = castle_at is not None and not state["castled"]
+    home_rank = 0 if color == chess.WHITE else 7
+    kingside = [chess.square(f, home_rank) for f in (5, 6)]  # f-bishop, g-knight
+    groups: dict[str, list[chess.Move]] = {"prepare": [], "develop": [], "pawn": [], "free": [], "other": []}
+    bishop_blocked = _at_home(board, kingside[0], color)
+    for m in legal:
+        piece = board.piece_type_at(m.from_square)
+        if piece == chess.PAWN:
+            groups["pawn"].append(m)
+            if chess.square_file(m.from_square) in (4, 6):  # e- or g-pawn: frees the king's bishop
+                groups["free"].append(m)
+        elif piece in (chess.KNIGHT, chess.BISHOP):
+            if _at_home(board, m.from_square, color):
+                groups["develop"].append(m)
+                if m.from_square in kingside:
+                    groups["prepare"].append(m)
+                    bishop_blocked = bishop_blocked and m.from_square != kingside[0]
+            else:
+                groups["other"].append(m)
+        elif (piece == chess.ROOK and not wants_castle) or (piece == chess.QUEEN and number >= QUEEN_FREE_FROM):
+            groups["other"].append(m)  # the king (and castling) only as planned, or when nothing else is legal
+    if not bishop_blocked:
+        groups["free"] = []
+    # castling soon, and the kingside not ready: develop the king's knight and bishop, free the bishop
+    if wants_castle and number >= castle_at - 3:
+        move = _pick(srng, groups, {"prepare": 2.0, "free": 1.0})
+        if move is not None:
+            return move
+    developed = 4 - sum(_at_home(board, sq, color) for sq in (chess.square(f, home_rank) for f in (1, 2, 5, 6)))
+    dev_need = min(4, math.floor(4 * number / habits["developed_by"] + 0.5)) - developed
+    pawn_need = math.floor(habits["pawn_moves"] * min(number, 10) / 10 + 0.5) - state["pawns"]
+    if dev_need > 0 or pawn_need > 0:
+        weights = {"develop": max(dev_need, 0), "pawn": max(pawn_need, 0)}
+    else:
+        weights = {"other": 1.0}
+    if wants_castle and dev_need > 0:
+        weights["prepare"] = 2.0 * dev_need  # kingside pieces first
+    move = _pick(srng, groups, weights)
+    if move is None:  # the wanted group has no legal move: whatever keeps closest to the schedules
+        move = _pick(srng, groups, {"other": 1.0}) or _pick(
+            srng, groups, {"develop": max(dev_need, 0) + 0.5, "pawn": max(pawn_need, 0) + 0.5}
+        )
+    return move if move is not None else srng.choice(legal)
+
+
+def _random_legal(srng: random.Random, board: chess.Board) -> Optional[chess.Move]:
+    """A uniformly random legal move (None if there is none): a random pseudo-legal move, redrawn while illegal.
+
+    The same distribution as ``srng.choice(list(board.legal_moves))``, without generating every legal move.
+    """
+    candidates = list(board.generate_pseudo_legal_moves())
+    while candidates:
+        k = srng.randrange(len(candidates))
+        if board.is_legal(candidates[k]):
+            return candidates[k]
+        candidates[k] = candidates[-1]
+        candidates.pop()
+    return None
+
+
+def _game_ended(board: chess.Board) -> bool:
+    """The end-of-game rule of _random_moves (checkmate and stalemate aside)."""
+    return (
+        board.is_insufficient_material()
+        or board.is_seventyfive_moves()
+        or (board.halfmove_clock >= 16 and board.is_fivefold_repetition())  # 16 quiet plies at least
+    )
+
+
+def _structured_moves(
+    srng: random.Random, line: list[str], plies: int, habits: dict[chess.Color, dict[str, Any]]
+) -> Optional[list[str]]:
+    """``plies`` moves: the opening line, each side's first moves by its habits, then random legal moves.
+
+    None when no attempt lasts that long without the game ending (the caller keeps its original moves).
+    """
+    for _ in range(STRUCTURE_TRIES):
+        board = chess.Board()
+        moves = []
+        for san in line[:plies]:
+            moves.append(board.san_and_push(board.parse_san(san)))
+        state = {c: {"castled": False, "queen": False, "pawns": 0} for c in (chess.WHITE, chess.BLACK)}
+        for ply, san in enumerate(moves):  # the opening line's pawn moves count toward the pawn schedule
+            if san[0].islower():
+                state[chess.WHITE if ply % 2 == 0 else chess.BLACK]["pawns"] += 1
+        while len(moves) < plies and not _game_ended(board):
+            if len(moves) < STRUCTURED_PLIES:
+                move = _habit_move(srng, board, habits[board.turn], state[board.turn])
+                if move is not None and board.piece_type_at(move.from_square) == chess.PAWN:
+                    state[board.turn]["pawns"] += 1
+            else:
+                move = _random_legal(srng, board)
+            if move is None:
+                break
+            moves.append(board.san_and_push(move))
+        if len(moves) == plies:
+            return moves
+    return None
+
+
+def _continue(srng: random.Random, moves: list[str], plies: int) -> Optional[list[str]]:
+    """``moves`` followed by random legal moves up to ``plies`` plies (as _play_on stops: only without a legal
+    move); None when no attempt gets that far."""
+    board = chess.Board()
+    for san in moves:
+        board.push_san(san)
+    for _ in range(STRUCTURE_TRIES):
+        trial = board.copy()
+        out = list(moves)
+        while len(out) < plies:
+            move = _random_legal(srng, trial)
+            if move is None:
+                break
+            out.append(trial.san_and_push(move))
+        if len(out) == plies:
+            return out
+    return None
 
 
 def _clocks(rng: random.Random, plies: int, base: int, inc: int, flag_side: int | None) -> list[float]:
@@ -261,7 +497,14 @@ def null_games(
         )
         if quick_loss:
             plies = prng.randint(16, 44)
-        moves = _random_moves(rng, line, plies)
+        random_moves = _random_moves(rng, line, plies)  # the main stream's draws, exactly as before
+        # the moves themselves: both sides play the opening by habits from the same distribution (own streams)
+        srng_game = random.Random(f"structure-{seed}-{i}")
+        habits = {chess.WHITE: _draw_habits(srng_game), chess.BLACK: _draw_habits(srng_game)}
+        if any(k in planted for k in STRUCTURE_KEYS):
+            mine = habits[chess.WHITE if color == "white" else chess.BLACK]
+            _plant_structure(random.Random(f"structure-planted-{seed}-{i}"), mine, planted)
+        moves = _structured_moves(srng_game, line, len(random_moves), habits) or random_moves
         if outcome == "draw":
             my_code = opp_code = rng.choice(["agreed", "repetition", "insufficient", "stalemate"])
             termination = {"agreed": "agreement"}.get(my_code, my_code)
@@ -286,7 +529,11 @@ def null_games(
             _force_low_clock(prng, clocks, 0 if color == "white" else 1, base)
         if "play_on" in planted and outcome == "loss" and termination == "resignation":
             if prng.random() < planted["play_on"]:  # the game is labelled a mate, as the player plays on to the end
-                _play_on(prng, moves, clocks, base, inc)
+                # the extension of the original moves draws from the planted stream and adds the clocks exactly as
+                # before; the game's own moves are then extended by as many plies
+                extended = list(random_moves)
+                _play_on(prng, extended, clocks, base, inc)
+                moves = (moves is not random_moves and _continue(srng_game, moves, len(extended))) or extended
                 termination, my_code = "checkmate", "checkmated"
 
         # schedule: sessions of quick re-queues, independent of results

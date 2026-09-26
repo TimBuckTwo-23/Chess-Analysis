@@ -1,0 +1,712 @@
+"""Development & king safety: your first ten moves against your opponent's in the same game.
+
+Four habits, measured for both players in every standard game:
+
+* castled by move 10 (each side's own tenth move);
+* moved the queen in the first 8 moves other than to capture (recapturing with the queen is often forced);
+* knights and bishops that had left their starting squares by move 10, of 4;
+* pawn moves among the first 10 moves.
+
+Every habit is compared with your opponent's in the same game, so the opening, the format, the clock, the
+rating gap and the result are the same for both sides. Games are the unit of the tests (a paired test on the
+per-game difference, :func:`paired_share_test`), with White and Black games weighted equally because White
+moves first. The four tests are one family: Benjamini-Hochberg adjusted, judged at ``stats.STRICT_ALPHA``
+under the project-wide rule (``stats.significance``), and a finding also needs a gap big enough to matter
+(``Thresholds``). Findings are associations ("you castle later than your opponents"), never causes: an
+opening you choose, or opponents who attack early, shows up here as well.
+
+A game counts for a habit only when both players made the moves it looks at (20 plies for the habits
+measured by move 10, 16 for the queen), so a game that ended on move 7 is not "not castled" for either side;
+this also leaves out games under 4 plies. Chess960 and games from a set-up position are left out: their
+pieces don't start on the usual squares.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+from dataclasses import dataclass, field
+from typing import Any, Optional, Sequence
+
+import chess
+
+from ..context import AnalysisContext
+from ..models import Chart, Diagram, Game, Insight, Kpi, Mark, ModuleResult, Table
+from ..stats import (
+    STRICT_ALPHA,
+    MeanTest,
+    bh_adjust,
+    clamp,
+    normal_cdf,
+    pct,
+    shrink_effect,
+    significance,
+)
+from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, comparison_chart, format_counts, position_diagram
+from .results import MAX_EXAMPLES
+
+KEY = "structure"
+TITLE = "Development & king safety"
+
+MIN_PLIES = 4  # shorter games are aborted starts, not skill (the window rule below leaves them out anyway)
+MINOR_HOMES = {
+    chess.WHITE: (chess.B1, chess.G1, chess.C1, chess.F1),
+    chess.BLACK: (chess.B8, chess.G8, chess.C8, chess.F8),
+}
+COLOURS = {"white": chess.WHITE, "black": chess.BLACK}
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """Move windows, minimum sample sizes and effect sizes; override with ``ctx.options["structure.<name>"]``."""
+
+    castle_by: int = 10  # "castled by move N"
+    queen_by: int = 8  # "queen moved (not capturing) in the first N moves"
+    develop_by: int = 10  # "knights and bishops out by move N"
+    pawn_window: int = 10  # "pawn moves among the first N moves"
+    min_games: int = 30  # games in which both players reached the window, before a habit is judged
+    min_castle_gap: float = 0.10  # share of games (10 points)
+    min_queen_gap: float = 0.08  # share of games
+    min_minor_gap: float = 0.30  # knights and bishops out, per game
+    min_pawn_gap: float = 0.50  # pawn moves, per game
+    alpha: float = STRICT_ALPHA  # an exploratory family (stats policy)
+    min_confidence: float = 0.5  # insights.MIN_CONFIDENCE
+
+    @classmethod
+    def from_ctx(cls, ctx: AnalysisContext) -> "Thresholds":
+        return cls(**{f.name: ctx.opt(f"{KEY}.{f.name}", f.default) for f in dataclasses.fields(cls)})
+
+
+# --------------------------------------------------------------------------- reading the first moves
+@dataclass
+class Side:
+    """One player's first moves in one game."""
+
+    castle_move: Optional[int] = None  # own move number on which the side castled (within the moves read)
+    queen_ply: Optional[int] = None  # ply index of the side's first queen move that is not a capture
+    queen_move: Optional[int] = None  # ... and its own move number
+    minors: list[int] = field(default_factory=list)  # minors[k - 1]: knights and bishops moved by own move k
+    pawns: list[int] = field(default_factory=list)  # pawns[k - 1]: pawn moves among own moves 1..k
+
+    def minors_by(self, move: int) -> int:
+        """Knights and bishops that had left their starting squares by the end of own move ``move``."""
+        return self.minors[min(move, len(self.minors)) - 1] if self.minors and move > 0 else 0
+
+    def pawns_by(self, move: int) -> int:
+        return self.pawns[min(move, len(self.pawns)) - 1] if self.pawns and move > 0 else 0
+
+
+@dataclass
+class Opening:
+    """The first moves of one standard game, for both players."""
+
+    game: Game
+    me: Side
+    opp: Side
+    ucis: list[str]  # the plies read, UCI
+
+    @property
+    def plies(self) -> int:
+        return self.game.plies
+
+    @property
+    def my_color(self) -> chess.Color:
+        return COLOURS[self.game.color]
+
+    def board_after(self, ply: int) -> chess.Board:
+        """The position after ply index ``ply`` (the start position for -1)."""
+        board = chess.Board()
+        for uci in self.ucis[: ply + 1]:
+            board.push(chess.Move.from_uci(uci))
+        return board
+
+
+def is_standard_start(g: Game) -> bool:
+    """Standard chess from the usual start position (a set-up FEN equal to the start counts as the start)."""
+    if (g.rules or "chess") != "chess":
+        return False
+    if not g.initial_fen:
+        return True
+    return g.initial_fen.split()[:4] == chess.STARTING_FEN.split()[:4]
+
+
+def read_opening(g: Game, max_plies: int) -> Optional[Opening]:
+    """Both players' first ``max_plies`` plies of a standard game; None when a move can't be read."""
+    board = chess.Board()
+    sides = {chess.WHITE: Side(), chess.BLACK: Side()}
+    origin = {sq: sq for color in MINOR_HOMES for sq in MINOR_HOMES[color]}  # where each knight and bishop is now
+    moved = {chess.WHITE: 0, chess.BLACK: 0}
+    pawns = {chess.WHITE: 0, chess.BLACK: 0}
+    ucis = []
+    for ply, san in enumerate(g.moves_san[:max_plies]):
+        color = board.turn
+        number = ply // 2 + 1  # own move number (White moves first from the standard start)
+        try:
+            move = board.parse_san(san)
+        except ValueError:
+            return None
+        side = sides[color]
+        piece = board.piece_type_at(move.from_square)
+        if board.is_castling(move) and side.castle_move is None:
+            side.castle_move = number
+        if piece == chess.QUEEN and not board.is_capture(move) and side.queen_ply is None:
+            side.queen_ply, side.queen_move = ply, number
+        if piece == chess.PAWN:
+            pawns[color] += 1
+        if move.to_square in origin and board.piece_at(move.to_square) is not None:
+            del origin[move.to_square]  # a knight or bishop captured, at home or after moving
+        if move.from_square in origin:
+            if origin.pop(move.from_square) == move.from_square:  # its first move
+                moved[color] += 1
+            origin[move.to_square] = -1  # tracked as "already moved"
+        side.minors.append(moved[color])
+        side.pawns.append(pawns[color])
+        ucis.append(move.uci())
+        board.push(move)
+    me = COLOURS[g.color]
+    return Opening(game=g, me=sides[me], opp=sides[not me], ucis=ucis)
+
+
+def pieces_at_home(board: chess.Board, color: chess.Color) -> list[int]:
+    """Starting squares still holding their own knight or bishop."""
+    rank = 0 if color == chess.WHITE else 7
+    homes = ((1, chess.KNIGHT), (2, chess.BISHOP), (5, chess.BISHOP), (6, chess.KNIGHT))  # (file, piece)
+    return [
+        chess.square(file, rank)
+        for file, kind in homes
+        if board.piece_at(chess.square(file, rank)) == chess.Piece(kind, color)
+    ]
+
+
+# --------------------------------------------------------------------------- habits
+@dataclass(frozen=True)
+class Habit:
+    """One habit: how to count it per side, its window and which direction is the good one."""
+
+    key: str
+    label: str  # "Castled by move 10"
+    by: int  # own moves both players must have made for a game to count
+    scale: int  # the count's maximum: 1 for yes / no, 4 minor pieces, 10 moves
+    good: int  # +1: more is better (castling, development); -1: less is better
+    min_gap: float  # in the habit's own units (share of games, pieces, pawn moves)
+    full: float  # a gap this big (own units) is severity 1
+    strength: bool = True  # whether doing better than your opponents is claimed as a strength
+
+    def count(self, s: Side) -> int:
+        if self.key == "castled":
+            return int(s.castle_move is not None and s.castle_move <= self.by)
+        if self.key == "early_queen":
+            return int(s.queen_move is not None and s.queen_move <= self.by)
+        if self.key == "minors":
+            return s.minors_by(self.by)
+        return s.pawns_by(self.by)
+
+    @property
+    def binary(self) -> bool:
+        return self.scale == 1
+
+    @property
+    def unit(self) -> int:
+        """Own units per share: 1 for a yes / no habit (a share of games), else the count's maximum."""
+        return 1 if self.binary else self.scale
+
+    @property
+    def value_format(self) -> str:
+        return "pct" if self.binary else "float1"
+
+    def number(self, x: Optional[float]) -> str:
+        """A per-game average: '38%' for a yes / no habit, '2.9' for a count."""
+        if x is None:
+            return "n/a"
+        return pct(x) if self.binary else f"{x:.1f}"
+
+    def value_text(self, x: Optional[float]) -> str:
+        """'38%' / '2.9 of 4' / '3.4 of 10'."""
+        return self.number(x) if self.binary or x is None else f"{self.number(x)} of {self.scale}"
+
+
+def habits(th: Thresholds) -> tuple[Habit, ...]:
+    return (
+        Habit("castled", f"Castled by move {th.castle_by}", th.castle_by, 1, +1, th.min_castle_gap, full=0.40),
+        Habit("early_queen", f"Queen out early (moves 1–{th.queen_by})", th.queen_by, 1, -1, th.min_queen_gap,
+              full=0.30),
+        Habit("minors", f"Knights and bishops out by move {th.develop_by}", th.develop_by, 4, +1, th.min_minor_gap,
+              full=1.0),
+        Habit("pawns", f"Pawn moves in moves 1–{th.pawn_window}", th.pawn_window, th.pawn_window, -1,
+              th.min_pawn_gap, full=2.0, strength=False),
+    )
+
+
+def paired_share_test(pairs: Sequence[tuple[int, int, str]], scale: int) -> MeanTest:
+    """Test of your share minus your opponent's, with games as the unit and White and Black weighted equally.
+
+    ``pairs`` holds (your count, your opponent's count, your colour) per game; a share is count / ``scale``
+    (1 for a yes / no habit, 4 for minor pieces, 10 for pawn moves among ten moves). Each game gives one
+    difference, so whatever the game brings to both sides (opening, clock, result) cancels. White moves first,
+    which changes how soon either side castles or develops, so the differences are averaged within each colour
+    first and the two colours count equally: a player with more White games is not judged on a colour mix.
+    Within a colour, the variance never drops below that of two independent binomial shares (as in
+    ``engine_stats.clustered_share_test``). The result's ``mean`` is the balanced difference in shares.
+    """
+    strata: dict[str, list[tuple[float, float]]] = {}
+    for mine, theirs, color in pairs:
+        strata.setdefault(color, []).append((mine / scale, theirs / scale))
+    used = [xs for _, xs in sorted(strata.items()) if len(xs) >= 2]
+    n = len(pairs)
+    if not used:
+        return MeanTest(n, 0.0, float("inf"), 0.0, 1.0)
+    k = len(used)
+    mean = variance = 0.0
+    for xs in used:
+        m = len(xs)
+        diffs = [a - b for a, b in xs]
+        d = sum(diffs) / m
+        s2 = sum((x - d) ** 2 for x in diffs) / (m - 1)
+        p = sum(a + b for a, b in xs) / (2 * m)
+        floor = 2.0 * p * (1.0 - p) / scale
+        mean += d / k
+        variance += max(s2, floor) / m / k**2
+    if variance <= 0.0:
+        return MeanTest(n, mean, float("inf"), 0.0, 1.0)
+    se = math.sqrt(variance)
+    z = mean / se
+    return MeanTest(n, mean, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
+
+
+@dataclass
+class HabitResult:
+    habit: Habit
+    games: list[Opening]  # games in which both players reached the window
+    test: MeanTest
+    p_adjusted: float = 1.0
+
+    @property
+    def n(self) -> int:
+        return len(self.games)
+
+    def average(self, mine: bool, games: Optional[Sequence[Opening]] = None) -> Optional[float]:
+        """Your (or your opponents') average count per game: a share of games for a yes / no habit."""
+        gs = self.games if games is None else games
+        if not gs:
+            return None
+        return sum(self.habit.count(o.me if mine else o.opp) for o in gs) / len(gs)
+
+    @property
+    def gap(self) -> float:
+        """Colour-balanced gap, you minus your opponents, in the habit's own units (share, pieces, moves)."""
+        return self.test.mean * self.habit.unit
+
+    def by_format(self) -> list[tuple[str, list[Opening]]]:
+        """(time class, games) for every format with games, in the report's order."""
+        counts = format_counts(o.game for o in self.games)
+        return [(tc, [o for o in self.games if o.game.time_class == tc]) for tc in counts]
+
+    def format_stats(self) -> dict[str, dict[str, Any]]:
+        return {tc: {"n": len(gs), "you": self.average(True, gs), "opponents": self.average(False, gs)}
+                for tc, gs in self.by_format()}
+
+
+# --------------------------------------------------------------------------- charts
+_UNIT_NOTE = {
+    "castled": "share of games",
+    "early_queen": "share of games (a queen move that is not a capture)",
+    "minors": "of your 4 knights and bishops, per game",
+    "pawns": "per game",
+}
+
+
+def habit_chart(r: HabitResult) -> Chart:
+    """You vs your opponents on one habit, split by format (formats with too few games get no bar of their own)."""
+    h = r.habit
+    rows = [(FORMAT_NAMES.get(tc, tc), gs) for tc, gs in r.by_format() if len(gs) >= MIN_FORMAT_GAMES]
+    if len(rows) != 1 or len(rows[0][1]) != r.n:
+        rows.append(("All games", r.games))
+    you = [r.average(True, gs) for _, gs in rows]
+    them = [r.average(False, gs) for _, gs in rows]
+    table = Table(
+        title=f"{h.label}: you vs your opponents",
+        columns=["Format", "Games", "You", "Opponents"],
+        rows=[[label, len(gs), a, b] for (label, gs), a, b in zip(rows, you, them, strict=True)],
+        formats=["text", "int", h.value_format, h.value_format],
+        note=f"Games in which both players made at least {h.by} moves; you and your opponent in the same games.",
+    )
+    return comparison_chart(
+        f"{h.label}: you vs your opponents",
+        [label for label, _ in rows],
+        [("You", you), ("Opponents", them)],
+        value_format=h.value_format,
+        note=f"{h.label}, {_UNIT_NOTE[h.key]}. Formats with fewer than {MIN_FORMAT_GAMES} games have no bar of "
+        "their own.",
+        kind="bar",
+        table=table,
+    )
+
+
+def overview_chart(results: Sequence[HabitResult], th: Thresholds) -> Optional[Chart]:
+    """Every habit as a share (you vs your opponents, all games), with the numbers by format underneath."""
+    shown = [r for r in results if r.n]
+    if not shown:
+        return None
+    rows = []
+    for r in shown:
+        formats = [(FORMAT_NAMES.get(tc, tc), gs) for tc, gs in r.by_format()]
+        if len(formats) > 1:
+            formats.append(("All games", r.games))
+        for label, gs in formats:
+            rows.append([r.habit.label, label, len(gs), r.habit.value_text(r.average(True, gs)),
+                         r.habit.value_text(r.average(False, gs))])
+    table = Table(
+        title="Your first moves against your opponents', by format",
+        columns=["Habit", "Format", "Games", "You", "Opponents"],
+        rows=rows,
+        formats=["text", "text", "int", "text", "text"],
+        key_columns=[0, 1, 3, 4],
+        note="You and your opponent in the same games; a game counts once both players made the moves the habit "
+        "looks at. Standard chess only.",
+    )
+    return comparison_chart(
+        "Your first moves against your opponents'",
+        [r.habit.label for r in shown],
+        [("You", [r.average(True) / r.habit.scale for r in shown]),
+         ("Opponents", [r.average(False) / r.habit.scale for r in shown])],
+        value_format="pct",
+        note=f"Castling and the queen: share of games. Knights and bishops: share of the four out by move "
+        f"{th.develop_by}. Pawn moves: share of the first {th.pawn_window} moves.",
+        kind="hbar",
+        table=table,
+    )
+
+
+# --------------------------------------------------------------------------- findings
+_TEXT = {  # (habit, kind) -> (title, study actions)
+    ("castled", "weakness"): (
+        "You castle later than your opponents",
+        [
+            "Know the move by which you normally castle in each of your openings, and aim to castle by move 8–10 "
+            "unless there is a concrete reason to wait.",
+            "Replay the linked games at move 10: what kept your king in the centre (a bishop or knight still at "
+            "home, an early queen or pawn move)?",
+            "While your king is still in the centre, check your opponent's checks and captures along the e-file "
+            "and the diagonals to it before every move.",
+        ],
+    ),
+    ("castled", "strength"): (
+        "You castle earlier than your opponents",
+        [
+            "Keep castling early: it lets you play the middlegame without worrying about your king.",
+            "Use the time it buys you: when your opponent's king is still in the centre, look for moves that open "
+            "the centre (a d- or e-pawn break).",
+        ],
+    ),
+    ("early_queen", "weakness"): (
+        "You bring your queen out early more often than your opponents",
+        [
+            "Before moving your queen in the first moves, ask whether a knight or bishop could do the job: an "
+            "early queen gets chased and your opponent develops with tempo.",
+            "Replay the linked games at your early queen move and count how many of your opponent's next moves "
+            "attacked it.",
+        ],
+    ),
+    ("early_queen", "strength"): (
+        "You bring your queen out early less often than your opponents",
+        [
+            "Keep developing knights and bishops before the queen.",
+            "When your opponent's queen comes out early, look for developing moves that attack it: each one "
+            "gains you a move.",
+        ],
+    ),
+    ("minors", "weakness"): (
+        "You develop your knights and bishops more slowly than your opponents",
+        [
+            "Aim to have all four knights and bishops out by move 10: before each opening move, ask which piece "
+            "is not in the game yet.",
+            "Replay the linked games at move 10 and compare your pieces still at home with your opponent's.",
+            "Knights before bishops, and no piece moved twice before the others are out unless it wins something "
+            "(Capablanca's rules for the opening).",
+        ],
+    ),
+    ("minors", "strength"): (
+        "You develop your knights and bishops faster than your opponents",
+        [
+            "Keep developing quickly, and use the lead: open the centre before your opponent catches up.",
+            "When you are ahead in development, look for pawn breaks that open lines toward the uncastled king.",
+        ],
+    ),
+    ("pawns", "weakness"): (
+        "You make more pawn moves early on than your opponents",
+        [
+            "In your first 10 moves, make only the pawn moves that free your pieces or fight for the centre; use "
+            "the rest to bring out pieces and castle.",
+            "Replay the linked games and mark each early pawn move: which of them could have been a piece move?",
+        ],
+    ),
+}
+
+
+def _detail(r: HabitResult) -> str:
+    h = r.habit
+    mine, theirs = h.number(r.average(True)), h.number(r.average(False))
+    games = f"{r.n} game{'s' if r.n != 1 else ''} in which both of you made at least {h.by} moves"
+    if h.key == "castled":
+        text = f"By move {h.by} you had castled in {mine} of games, your opponents in {theirs} of the same games ({games})."
+    elif h.key == "early_queen":
+        text = (
+            f"You moved your queen in the first {h.by} moves, other than to capture, in {mine} of games; your "
+            f"opponents in {theirs} of the same games ({games})."
+        )
+    elif h.key == "minors":
+        text = (
+            f"By move {h.by} you had on average {mine} of your 4 knights and bishops off their starting squares, "
+            f"your opponents {theirs} in the same games ({games})."
+        )
+    else:
+        text = (
+            f"On average {mine} of your first {h.by} moves were pawn moves, against your opponents' {theirs} in the "
+            f"same games ({games})."
+        )
+    split = [
+        f"{FORMAT_NAMES.get(tc, tc).lower()} {h.number(r.average(True, gs))} vs {h.number(r.average(False, gs))}"
+        for tc, gs in r.by_format()
+        if len(gs) >= MIN_FORMAT_GAMES
+    ]
+    if len(split) > 1:
+        text += " By format, you vs them: " + ", ".join(split) + "."
+    return text
+
+
+def _target(r: HabitResult) -> tuple[str, str]:
+    """(target sentence, metric) for the study plan: your opponents' number, with today's."""
+    h = r.habit
+    mine, theirs = h.number(r.average(True)), h.number(r.average(False))
+    if h.key == "castled":
+        return (f"Castle by move {h.by} in at least {theirs} of your games, like your opponents (now {mine}).",
+                f"share of games castled by move {h.by}")
+    if h.key == "early_queen":
+        return (f"Move your queen in the first {h.by} moves (other than to capture) in at most {theirs} of your "
+                f"games, like your opponents (now {mine}).", f"share of games with an early queen move (moves 1–{h.by})")
+    if h.key == "minors":
+        return (f"Have {theirs} of your knights and bishops out by move {h.by} on average, like your opponents "
+                f"(now {mine}).", f"knights and bishops out by move {h.by}, per game")
+    return (f"Make at most {theirs} pawn moves in your first {h.by} moves on average, like your opponents "
+            f"(now {mine}).", f"pawn moves in the first {h.by} moves, per game")
+
+
+def _examples(r: HabitResult, kind: str) -> list[Opening]:
+    """Games that show the finding: you did it and your opponent didn't (by the most), losses first for a
+    weakness and wins first for a strength, then the most recent."""
+    h = r.habit
+    sign = 1 if (kind == "weakness") == (h.good < 0) else -1  # +1: you did more of it than your opponent
+
+    def edge(o: Opening) -> int:
+        return sign * (h.count(o.me) - h.count(o.opp))
+
+    wanted = "loss" if kind == "weakness" else "win"
+    picked = [o for o in r.games if edge(o) > 0 and o.game.url]
+    picked.sort(key=lambda o: (o.game.outcome != wanted, -edge(o), -o.game.end_time.timestamp()))
+    return picked[:MAX_EXAMPLES]
+
+
+def _move_text(board: chess.Board, move: chess.Move) -> str:
+    san = board.san(move)
+    return f"{board.fullmove_number}.{san}" if board.turn == chess.WHITE else f"{board.fullmove_number}...{san}"
+
+
+def habit_diagram(r: HabitResult, o: Opening) -> Optional[Diagram]:
+    """The board that shows a weakness in one of its example games (your move red, pieces at home marked)."""
+    h, g = r.habit, o.game
+    color = o.my_color
+    game = f"{g.outcome.capitalize()}, {g.time_class}"
+    if h.key == "early_queen":
+        ply = o.me.queen_ply
+        if ply is None:
+            return None
+        board = o.board_after(ply - 1)
+        move = chess.Move.from_uci(o.ucis[ply])
+        home = pieces_at_home(board, color)
+        still = f", with {len(home)} of your knights and bishops still at home" if home else ""
+        return position_diagram(
+            f"Your queen comes out on move {o.me.queen_move}",
+            board.fen(),
+            orientation=g.color,
+            played=move.uci(),
+            caption=f"{game}: you played {_move_text(board, move)}{still}.",
+            link=g.url,
+            time_class=g.time_class,
+            last_move=o.ucis[ply - 1] if ply > 0 else "",
+            marks=[Mark(chess.square_name(sq), "weak") for sq in home],
+        )
+    last = 2 * h.by - 1
+    board = o.board_after(last)
+    king = board.king(color)
+    if h.key == "castled":
+        theirs = (f"your opponent castled on move {o.opp.castle_move}" if o.opp.castle_move
+                  else "your opponent hadn't castled either")
+        where = f" (king on {chess.square_name(king)})" if king is not None else ""
+        marks = [Mark(chess.square_name(king), "weak")] if king is not None else []
+        title = f"Move {h.by}: you haven't castled yet"
+        caption = f"{game}: after move {h.by} you hadn't castled{where}; {theirs}."
+    elif h.key == "minors":
+        home = pieces_at_home(board, color)
+        marks = [Mark(chess.square_name(sq), "weak") for sq in home]
+        title = f"Move {h.by}: pieces still at home"
+        caption = (
+            f"{game}: after move {h.by} you had {o.me.minors_by(h.by)} of 4 knights and bishops out; your opponent "
+            f"{o.opp.minors_by(h.by)}."
+        )
+    else:
+        marks = []
+        title = f"Move {h.by}: many pawn moves"
+        caption = (
+            f"{game}: {o.me.pawns_by(h.by)} of your first {h.by} moves were pawn moves; your opponent's "
+            f"{o.opp.pawns_by(h.by)}."
+        )
+    return position_diagram(
+        title, board.fen(), orientation=g.color, caption=caption, link=g.url, time_class=g.time_class,
+        last_move=o.ucis[last] if last < len(o.ucis) else "", marks=marks,
+    )
+
+
+def habit_insight(r: HabitResult, th: Thresholds) -> Optional[Insight]:
+    """A strength or weakness when the gap passes the claim rule and is big enough to matter."""
+    h = r.habit
+    if r.n < th.min_games:
+        return None
+    significant, confidence = significance(r.test, th.min_games, r.p_adjusted, alpha=th.alpha)
+    if not significant or confidence < th.min_confidence or abs(r.gap) < h.min_gap:
+        return None
+    kind = "strength" if (r.gap > 0) == (h.good > 0) else "weakness"
+    if kind == "strength" and not h.strength:
+        return None
+    title, study = _TEXT[(h.key, kind)]
+    # severity from the gap pulled toward 0 by its noise (winner's curse), in the habit's own units
+    shrunk = shrink_effect(r.test.mean, r.test.se, prior_sd=h.full / h.unit / 2.0) * h.unit
+    examples = _examples(r, kind)
+    target, metric = _target(r)
+    return Insight(
+        id=f"{KEY}.{kind}.{h.key.replace('_', '-')}",
+        kind=kind,
+        category="structure",
+        title=title,
+        detail=_detail(r),
+        severity=clamp(abs(shrunk) / h.full),
+        confidence=confidence,
+        evidence={
+            "habit": h.key,
+            "n": r.n,
+            "you": r.average(True),
+            "opponents": r.average(False),
+            "gap": r.gap,
+            "p_value": r.test.p_value,
+            "p_adjusted": r.p_adjusted,
+            "by_format": r.format_stats(),
+            "metric": metric,
+            "target": target,
+        },
+        study=study,
+        example_games=[o.game.url for o in examples],
+        formats=format_counts(o.game for o in r.games),
+        chart=habit_chart(r),
+        diagram=habit_diagram(r, examples[0]) if kind == "weakness" and examples else None,
+    )
+
+
+# --------------------------------------------------------------------------- module entry point
+def _summary(by: dict[str, HabitResult], insights: Sequence[Insight], skipped: int, th: Thresholds) -> str:
+    main = by["castled"]
+    if not main.n:
+        note = " (Chess960 and games from a set-up position are left out)" if skipped else ""
+        return f"Not enough data: none of your standard games reached move {th.castle_by}{note}."
+
+    def both(key: str) -> tuple[str, str]:
+        r = by[key]
+        return r.habit.number(r.average(True)), r.habit.number(r.average(False))
+
+    castle, queen, minors, pawns = both("castled"), both("early_queen"), both("minors"), both("pawns")
+    text = (
+        f"In the {main.n} standard games that reached move {th.castle_by}, you had castled by then in {castle[0]} "
+        f"(your opponents in the same games: {castle[1]}), had {minors[0]} of your 4 knights and bishops out "
+        f"({minors[1]}), moved your queen early in {queen[0]} ({queen[1]}) and made {pawns[0]} pawn moves in your "
+        f"first {th.pawn_window} ({pawns[1]})."
+    )
+    if main.n < th.min_games:
+        return (f"Not enough data yet: only {main.n} games reached move {th.castle_by}, so treat these numbers as a "
+                f"snapshot. {text}")
+    ranked = sorted(insights, key=lambda i: -i.priority)
+    if ranked:
+        return f"{text} Key finding: {ranked[0].title}."
+    return f"{text} None of the gaps is big and clear enough to call a strength or weakness."
+
+
+def _kpis(by: dict[str, HabitResult], th: Thresholds) -> list[Kpi]:
+    rows = (
+        ("castled", f"Castled by move {th.castle_by}", ""),
+        ("minors", "Knights and bishops out", f"of 4 by move {th.develop_by}; "),
+        ("early_queen", "Queen out early", f"moves 1–{th.queen_by}, not capturing; "),
+        ("pawns", "Early pawn moves", f"in moves 1–{th.pawn_window}; "),
+    )
+    kpis = []
+    for key, label, prefix in rows:
+        r = by[key]
+        theirs = r.average(False)
+        hint = prefix + (f"opponents {r.habit.number(theirs)}" if theirs is not None else "")
+        kpis.append(Kpi(label, r.average(True), r.habit.value_format, hint=hint.rstrip("; ")))
+    return kpis
+
+
+def analyze(ctx: AnalysisContext) -> ModuleResult:
+    """Castling, early queen moves, development and early pawn moves: you against your opponents in the same games."""
+    th = Thresholds.from_ctx(ctx)
+    hs = habits(th)
+    window = 2 * max(h.by for h in hs)
+    standard = [g for g in ctx.games if is_standard_start(g)]
+    skipped = len(ctx.games) - len(standard)
+    openings: list[Opening] = []
+    unreadable = 0
+    for g in standard:
+        if g.plies < MIN_PLIES:
+            continue
+        o = read_opening(g, window)
+        if o is None:
+            unreadable += 1
+        else:
+            openings.append(o)
+
+    results = []
+    for h in hs:
+        games = [o for o in openings if o.plies >= 2 * h.by]
+        pairs = [(h.count(o.me), h.count(o.opp), o.game.color) for o in games]
+        results.append(HabitResult(h, games, paired_share_test(pairs, h.scale)))
+    judged = [r for r in results if r.n >= th.min_games]
+    for r, p in zip(judged, bh_adjust([r.test.p_value for r in judged]), strict=True):
+        r.p_adjusted = p
+    insights = [i for i in (habit_insight(r, th) for r in results) if i]
+    by = {r.habit.key: r for r in results}
+    overview = overview_chart(results, th)
+
+    return ModuleResult(
+        key=KEY,
+        title=TITLE,
+        summary=_summary(by, insights, skipped, th),
+        kpis=_kpis(by, th) if by["castled"].n else [],
+        charts=[overview] if overview else [],
+        insights=insights,
+        stats={
+            "n": len(ctx.games),
+            "n_standard": len(standard),
+            "skipped_variant_or_setup": skipped,
+            "unreadable": unreadable,
+            "habits": {
+                r.habit.key: {
+                    "label": r.habit.label,
+                    "n": r.n,
+                    "you": r.average(True),
+                    "opponents": r.average(False),
+                    "gap": r.gap if r.n else None,
+                    "p_value": r.test.p_value,
+                    "p_adjusted": r.p_adjusted,
+                    "by_format": r.format_stats(),
+                }
+                for r in results
+            },
+        },
+    )
