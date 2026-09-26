@@ -1,0 +1,104 @@
+{
+  "about": "Short notes on positional ideas, in the report's own words, each pointing to where a public-domain book explains the idea. The books are on Project Gutenberg; only chapter and section titles are cited.",
+  "books": {
+    "capablanca": {
+      "title": "Chess Fundamentals",
+      "author": "José Raúl Capablanca",
+      "year": 1921,
+      "ebook": 33870,
+      "url": "https://www.gutenberg.org/ebooks/33870",
+      "license": "Public domain in the USA"
+    },
+    "lasker": {
+      "title": "Chess Strategy",
+      "author": "Edward Lasker",
+      "year": 1915,
+      "ebook": 5614,
+      "url": "https://www.gutenberg.org/ebooks/5614",
+      "license": "Public domain in the USA"
+    }
+  },
+  "concepts": {
+    "king_safety": {
+      "label": "king safety",
+      "text": "Your king is safest behind pawns that haven't moved: each pawn you push in front of it stops guarding squares the enemy pieces can then use for a direct attack, and the pushed pawn itself becomes a target. Castle early, and move those pawns only for a concrete reason, not to stop a pin that isn't there yet.",
+      "aliases": ["King safety", "king_safety", "king exposed", "king in the centre", "king in the center", "king_in_centre", "king_in_center", "castling", "castling rights", "castling_rights", "castling rights lost", "castling_lost", "uncastled"],
+      "cites": [
+        {"book": "lasker", "chapter": "Chapter VI, The Middle Game", "section": "Breaking up the King's Side"}
+      ]
+    },
+    "development": {
+      "label": "development",
+      "text": "Get your knights and bishops into play quickly, and in the opening move pieces rather than pawns: every extra pawn or queen move is a tempo your opponent spends bringing out another piece. Bring a knight out before the bishop on the same side, and combine developing with a threat when you can.",
+      "aliases": ["development", "undeveloped", "undeveloped pieces", "minor pieces developed", "tempo", "tempi"],
+      "cites": [
+        {"book": "capablanca", "chapter": "Chapter I, First Principles", "section": "6. General Strategy of the Opening"},
+        {"book": "lasker", "chapter": "Chapter IV, The Opening", "section": "Development of the Pieces"}
+      ]
+    },
+    "pawn_structure": {
+      "label": "pawn structure",
+      "text": "Pawns can't move back, so your pawn structure outlasts almost everything else in the game: an isolated or backward pawn, or doubled pawns that can't protect each other, stay targets long after the moves that made them. Before a pawn move, ask which squares it will stop guarding and whether another pawn can still defend it.",
+      "aliases": ["Pawns", "pawn structure", "pawn_structure", "pawns", "isolated", "isolated pawn", "isolated pawns", "isolated_pawns", "doubled", "doubled pawn", "doubled pawns", "doubled_pawns", "backward", "backward pawn", "backward pawns", "backward_pawns", "pawn islands"],
+      "cites": [
+        {"book": "lasker", "chapter": "Chapter IV, The Opening", "section": "Pawn Skeleton"},
+        {"book": "lasker", "chapter": "Chapter VI, The Middle Game", "section": "Doubled Pawns"},
+        {"book": "capablanca", "chapter": "Chapter VI, Further Openings and Middle-games", "section": "31. Some Salient Points about Pawns"}
+      ]
+    },
+    "holes_outposts": {
+      "label": "holes and outposts",
+      "text": "A hole is a square in your camp that none of your pawns can guard any more; an enemy knight or bishop that settles there can't be chased away by a pawn and usually has to be exchanged. Look at which squares a pawn move gives up before you make it, and look for such squares in your opponent's camp as outposts for your own pieces.",
+      "aliases": ["hole", "holes", "outpost", "outposts", "weak square", "weak squares", "weak_squares", "Knights"],
+      "cites": [
+        {"book": "capablanca", "chapter": "Chapter VI, Further Openings and Middle-games", "section": "33. The Influence of a \"Hole\""},
+        {"book": "capablanca", "chapter": "Chapter VI, Further Openings and Middle-games", "section": "31. Some Salient Points about Pawns"}
+      ]
+    },
+    "bishop_pair": {
+      "label": "bishop pair",
+      "text": "Your two bishops together reach squares of both colours and sweep long diagonals, so they are usually worth more than two knights, and often more than a bishop and a knight, all the more as the position opens up. Give up a bishop for a knight only for a clear reason, and keep your pair when the pawns start to come off.",
+      "aliases": ["bishop pair", "bishop_pair", "two bishops", "the bishop pair", "lost the bishop pair", "bishop_pair_lost"],
+      "cites": [
+        {"book": "capablanca", "chapter": "Chapter I, First Principles", "section": "5. Relative Value of the Pieces"},
+        {"book": "lasker", "chapter": "Chapter III, General Principles of Chess Strategy", "section": "Mobility"}
+      ]
+    },
+    "open_files": {
+      "label": "open files",
+      "text": "Rooks need open files: the side that occupies an open file first can use it to reach the seventh or eighth rank and tie the other side's pieces to defence. When a file opens, get a rook onto it before your opponent does.",
+      "aliases": ["open file", "open files", "open_file", "open_files", "semi-open file", "semi-open files", "half-open file", "Rooks", "rook activity"],
+      "cites": [
+        {"book": "lasker", "chapter": "Chapter VI, The Middle Game", "section": "Manoeuvres of the Pieces, Open Files and Diagonals"}
+      ]
+    },
+    "passed_pawns": {
+      "label": "passed pawns",
+      "text": "A passed pawn has no enemy pawn in front of it or on the files next to it, so only pieces can stop it, and it grows stronger as pieces come off the board. When your pawns face your opponent's on one side, look for the advance that creates a passed pawn, and count whose pawn queens first.",
+      "aliases": ["Passed", "passed", "passed pawn", "passed pawns", "passed_pawn", "passed_pawns", "passer", "passers"],
+      "cites": [
+        {"book": "capablanca", "chapter": "Chapter II, Further Principles in End-game Play", "section": "11. Obtaining a Passed Pawn"},
+        {"book": "capablanca", "chapter": "Chapter II, Further Principles in End-game Play", "section": "12. How to Find Out Which Pawn Will Be the First to Queen"},
+        {"book": "capablanca", "chapter": "Chapter VI, Further Openings and Middle-games", "section": "31. Some Salient Points about Pawns"}
+      ]
+    },
+    "piece_activity": {
+      "label": "piece activity",
+      "text": "A piece is worth what it can do: how many squares it reaches matters more than its point value. Put your pieces where they have the most scope, and look for ways to cut an enemy piece off from the fight; a bishop or knight shut out of play is almost a piece less.",
+      "aliases": ["Mobility", "mobility", "piece activity", "piece_activity", "activity", "active pieces", "passive pieces", "bad bishop", "trapped piece"],
+      "cites": [
+        {"book": "lasker", "chapter": "Chapter III, General Principles of Chess Strategy", "section": "Mobility"},
+        {"book": "capablanca", "chapter": "Chapter IV, General Theory", "section": "24. Cutting Off Pieces from the Scene of Action"}
+      ]
+    },
+    "space": {
+      "label": "space",
+      "text": "Control of the centre gives you space: your pieces can switch quickly between the wings while your opponent's stay cramped behind their own pawns. Capablanca counts the four centre squares and notes that no violent attack succeeds without control of at least two of them.",
+      "aliases": ["Space", "space", "centre", "center", "centre control", "center control", "central control", "cramped"],
+      "cites": [
+        {"book": "capablanca", "chapter": "Chapter I, First Principles", "section": "7. Control of the Centre"},
+        {"book": "lasker", "chapter": "Chapter IV, The Opening", "section": "The Centre"}
+      ]
+    }
+  }
+}
