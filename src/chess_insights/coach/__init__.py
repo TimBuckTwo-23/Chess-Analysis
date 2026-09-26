@@ -58,10 +58,13 @@ def build_coaching(ctx: "AnalysisContext", modules: list[ModuleResult], cfg: Opt
 
     cfg = cfg or CoachConfig()
     coaching = Coaching(settings={"depth": cfg.depth, "max_positions": cfg.max_positions, "multipv": cfg.multipv})
+    today = cfg.today or datetime.now(timezone.utc).date()
     if not ctx.evals:
         coaching.notes.append("Coaching needs the engine analysis (--engine): nothing to explain yet.")
+        # what needs no engine: opening names, theory exit and database facts, and the openings drill pack
+        _step(coaching, "Opening facts", lambda: openings_info.annotate(ctx, coaching, modules, cfg))
+        _step(coaching, "Drills", lambda: drills.annotate(ctx, coaching, modules, cfg, today))
         return coaching
-    today = cfg.today or datetime.now(timezone.utc).date()
 
     positions = _step(
         coaching, "Critical positions", lambda: critical.select_critical(ctx, modules, cfg.max_positions)

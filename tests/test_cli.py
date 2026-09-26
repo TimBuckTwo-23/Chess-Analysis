@@ -780,12 +780,13 @@ def test_coach_flags_reach_the_coaching_config(chesscom, run, tmp_path, monkeypa
     out.with_suffix(".json").write_text('{"username": "testerbob", "study_plan": []}', encoding="utf-8")
     code, stdout, stderr = run(
         "report", "testerbob", "--engine", "--workers", "3", "--coach", "--coach-depth", "18", "--coach-max", "40",
-        "--no-motif-profile", "--puzzle-db", str(db), "--drill-rating", "1300-1700", "--practice-minutes", "30",
+        "--coach-seconds", "2.5", "--no-motif-profile", "--puzzle-db", str(db), "--drill-rating", "1300-1700", "--practice-minutes", "30",
         "--coach-llm", "--llm-model", "claude-test", "--maia", "--out", str(out), "--formats", "json",
     )
     assert code == 0, stderr
     [cfg] = fake_coaching
     assert (cfg.depth, cfg.max_positions, cfg.profile, cfg.workers) == (18, 40, False, 3)
+    assert cfg.search_seconds == 2.5
     assert cfg.stockfish == "/opt/stockfish"
     assert cfg.lichess_token == "lip_secret_token_123"
     assert "lip_secret_token_123" not in stdout + stderr and "lip_secret_token_123" not in out.with_suffix(".json").read_text()
@@ -813,6 +814,7 @@ def test_coach_llm_with_a_key_and_offline(chesscom, run, tmp_path, monkeypatch, 
     assert first.llm is False and first.anthropic_api_key is None and first.lichess_token is None
     assert first.previous is None  # nothing at the output path yet
     assert (first.depth, first.max_positions, first.profile) == (20, 150, True)  # the defaults
+    assert first.search_seconds is None  # deep.py's own caps
     assert first.drill_rating == (1200, 1600) and first.practice_minutes == 20
     assert second.llm is True and second.anthropic_api_key == "sk-ant-secret-456" and second.offline is True
     assert second.lichess_token == "lip_given"

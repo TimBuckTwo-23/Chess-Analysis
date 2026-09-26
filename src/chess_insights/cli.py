@@ -119,6 +119,16 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _non_negative_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number of seconds, got {text!r}") from None
+    if not value >= 0 or value == float("inf"):
+        raise argparse.ArgumentTypeError(f"expected 0 or more seconds, got {text!r}")
+    return value
+
+
 def _non_negative_int(text: str) -> int:
     try:
         value = int(text)
@@ -333,6 +343,9 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
                    help=f"Stockfish depth for the positions the coaching explains (default {DEFAULT_COACH_DEPTH})")
     c.add_argument("--coach-max", type=_positive_int, metavar="N", default=DEFAULT_COACH_MAX,
                    help=f"explain at most N positions, costliest first (default {DEFAULT_COACH_MAX})")
+    c.add_argument("--coach-seconds", type=_non_negative_float, metavar="S", default=None,
+                   help="time cap per position for those searches, in seconds (default 8; 0 = none: depth is then "
+                   "reached whatever it takes)")
     c.add_argument("--no-motif-profile", action="store_true",
                    help="skip the tactical-motif profile over every error (saves a quick engine pass)")
     c.add_argument("--lichess-token", default=None, metavar="TOKEN",
@@ -754,6 +767,7 @@ def coach_config(
         stockfish=getattr(args, "stockfish_path", None),
         depth=args.coach_depth,
         max_positions=args.coach_max,
+        search_seconds=getattr(args, "coach_seconds", None),
         workers=args.workers,
         cache_dir=cache_dir / user / "coach" if cache_dir else None,
         sources_cache=cache_dir / "sources" if cache_dir else None,

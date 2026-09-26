@@ -516,3 +516,17 @@ def test_build_coaching_without_evals_or_stockfish_leaves_notes(player, monkeypa
     assert sum("Stockfish not found" in n for n in coaching.notes) == 1  # said once
     assert any("Deep analysis skipped" in n for n in coaching.notes)
     assert coaching.settings["positions"] == 5
+
+
+def test_without_engine_data_coaching_still_runs_the_engine_free_steps(monkeypatch):
+    from chess_insights import coach
+    from chess_insights.coach import drills, openings_info
+    from chess_insights.context import AnalysisContext
+    from factories import make_game
+
+    ran = []
+    monkeypatch.setattr(openings_info, "annotate", lambda ctx, coaching, modules, cfg: ran.append("openings"))
+    monkeypatch.setattr(drills, "annotate", lambda ctx, coaching, modules, cfg, today: ran.append("drills"))
+    coaching = coach.build_coaching(AnalysisContext("me", [make_game()]), [], coach.CoachConfig())
+    assert ran == ["openings", "drills"]
+    assert coaching.explanations == [] and "--engine" in coaching.notes[0]

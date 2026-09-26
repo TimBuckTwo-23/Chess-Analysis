@@ -30,6 +30,8 @@ class CoachConfig:
     depth: int = DEFAULT_COACH_DEPTH  # --coach-depth: the re-search of critical positions
     max_positions: int = DEFAULT_COACH_MAX  # --coach-max: costliest first
     multipv: int = 3
+    search_seconds: Optional[float] = None  # --coach-seconds: cap per MultiPV search (the refutation gets half);
+    # None = deep.py's defaults (8 s / 4 s), 0 = no cap (depth is then reached whatever it costs)
     workers: int = 0  # 0 = CPUs - 1
     hash_mb: int = 64
     cache_dir: Optional[Path] = None  # <cache>/<user>/coach (deep lines), never the evals cache
