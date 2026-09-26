@@ -159,13 +159,14 @@ def test_theory_exit_rows_and_chart(tmp_path, session):
     coaching, mod = run(tmp_path, games, [])
     table = coaching.theory_exit
     assert table.title == "Where you leave opening theory"
-    assert table.columns == ["Line", "Games", "Theory ends (move)", "You leave first"]  # no engine games
+    assert table.columns == ["Line", "Games", "Theory ends (move)", "You leave first", "Formats"]  # no engine games
     (row,) = table.rows
     # cxd4 games: named up to ply 6 (move 3); Nc6 games: up to ply 3 (move 2); the habit game: ply 9 (move 5)
     assert row[0] == "Sicilian Defense (Black)" and row[1] == 25
     assert row[2] == pytest.approx((13 * 3 + 11 * 2 + 5) / 25)
     # the first move out of theory: White's 4.c3 after 3...Nc6, your 2...Nc6, your 5...e5
     assert row[3] == pytest.approx(12 / 25)
+    assert row[4] == "11 bullet · 9 blitz · 5 rapid"
     assert "bullet" in table.note and "blitz" in table.note and "rapid" in table.note
     chart = next(c for c in mod.charts if c.title == "Where you leave opening theory")
     assert chart.table is table and chart.labels == ["Sicilian Defense (Black)"]
@@ -188,8 +189,8 @@ def test_theory_exit_with_engine_games():
     (row,) = table.rows
     # DEFAULT_MOVES is named up to 9.h3 (ply 17); Black's 9...h6 leaves theory, so you never leave first
     assert DEFAULT_MOVES[16] == "h3"
-    assert row[1:] == [8, 9.0, 0.0, 4, 10.0, 1.0]
-    assert table.formats == ["text", "int", "float1", "pct", "int", "float1", "float1"]
+    assert row[1:] == [8, 9.0, 0.0, 4, 10.0, 1.0, "8 blitz"]
+    assert table.formats == ["text", "int", "float1", "pct", "int", "float1", "float1", "text"]
     assert [s.name for s in chart.series] == ["Theory ends (move)", "Your first inaccuracy (move)"]
     assert "engine columns from 4 (4 blitz)" in table.note
 

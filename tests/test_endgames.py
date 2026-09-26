@@ -134,6 +134,7 @@ def test_annotate_builds_the_table_boards_and_explanation_facts(tmp_path, sessio
     assert rows["Rook endings"][7] == games[3].url
     assert rows["Queen endings"][1:6] == [1, 1, 1, 0, 0]
     assert rows["Pawn endings"][1:6] == [1, 0, 0, 0, 0] and rows["Pawn endings"][6] == ""
+    assert rows["Rook endings"][8] == "2 blitz" and rows["Queen endings"][8] == "1 bullet"
     assert "4 of your 5 engine-analysed games" in table.note and "bullet, blitz and rapid" in table.note
 
     # boards for the slips, most recent first: your move red, the tablebase's green

@@ -476,6 +476,11 @@ def _format_mix(counts: dict[str, int]) -> str:
     return ", ".join(parts[:-1]) + f" and {parts[-1]}"
 
 
+def _format_list(counts: dict[str, int]) -> str:
+    """'5 bullet · 12 blitz · 8 rapid' (a table cell)."""
+    return " · ".join(f"{n:,} {tc}" for tc, n in ordered_formats(counts).items())
+
+
 def _mean(xs: Sequence[float]) -> Optional[float]:
     return sum(xs) / len(xs) if xs else None
 
@@ -520,7 +525,10 @@ def theory_exit(games: Sequence[Game], evals: dict[str, Any]) -> tuple[Optional[
         avg_exit = _mean([float(x.last_book_move) for x in xs])
         avg_err = _mean([float(x.first_error_move) for x in errs])  # type: ignore[arg-type]
         after = _mean([float(x.first_error_move - x.last_book_move) for x in errs])  # type: ignore[operator]
-        rows.append([label, len(xs), avg_exit, _mean(left), len(eng), avg_err, after])
+        mix: dict[str, int] = {}
+        for x in xs:
+            mix[x.time_class] = mix.get(x.time_class, 0) + 1
+        rows.append([label, len(xs), avg_exit, _mean(left), len(eng), avg_err, after, _format_list(mix)])
         labels.append(label)
         exits.append(avg_exit)
         errors.append(avg_err)
@@ -547,10 +555,10 @@ def theory_exit(games: Sequence[Game], evals: dict[str, Any]) -> tuple[Optional[
         note += "."
     note += " An observation, not a tested claim."
     columns = ["Line", "Games", "Theory ends (move)", "You leave first", "Engine games", "First inaccuracy (move)",
-               "Moves after theory"]
-    formats = ["text", "int", "float1", "pct", "int", "float1", "float1"]
+               "Moves after theory", "Formats"]
+    formats = ["text", "int", "float1", "pct", "int", "float1", "float1", "text"]
     if not has_engine:
-        columns, formats, rows = columns[:4], formats[:4], [r[:4] for r in rows]
+        columns, formats, rows = columns[:4] + columns[7:], formats[:4] + formats[7:], [r[:4] + r[7:] for r in rows]
     table = Table(title=THEORY_TITLE, columns=columns, rows=rows, formats=formats, note=note,
                   key_columns=[0, 2, 5] if has_engine else [0, 2, 3])
     series: list[tuple[str, Sequence[Optional[float]]]] = [("Theory ends (move)", exits)]

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 import chess
 
 from ..models import Coaching, Diagram, Game, ModuleResult, Table
-from ..visuals import position_diagram
+from ..visuals import format_text, ordered_formats, position_diagram
 from .config import CoachConfig
 from .sources import tablebase
 from .sources.http import Fetcher
@@ -173,15 +173,17 @@ def endings_table(endings: Sequence[Ending], n_games: int, requests_capped: bool
         let_slip = [e for e in won if any(s.before == "win" for s in e.slips)]
         lost_draws = [e for e in es if any(s.before == "draw" for s in e.slips)]
         latest = slips[0] if slips else None
+        mix: dict[str, int] = {}
+        for e in es:
+            mix[e.game.time_class] = mix.get(e.game.time_class, 0) + 1
         rows.append([
             f"{kind} endings", len(es), len(won), len(let_slip), len(drawn), len(lost_draws),
             _slip_text(latest) if latest else "", latest.game.url if latest else "",
+            " · ".join(f"{n} {tc}" for tc, n in ordered_formats(mix).items()),
         ])
     formats_mix: dict[str, int] = {}
     for e in endings:
         formats_mix[e.game.time_class] = formats_mix.get(e.game.time_class, 0) + 1
-    from ..visuals import format_text
-
     note = (
         f"{len(endings)} of your {n_games} engine-analysed games reached 7 pieces or fewer "
         f"({format_text(formats_mix)}), checked with the Lichess tablebase, which knows the exact result of "
@@ -194,9 +196,10 @@ def endings_table(endings: Sequence[Ending], n_games: int, requests_capped: bool
         note += " Not every ending could be checked in this run (request limit); later runs continue from the cache."
     return Table(
         title="Endings checked with the tablebase",
-        columns=["Ending", "Games", "Had a win", "Wins let slip", "Had a draw", "Draws lost", "Latest slip", "Game"],
+        columns=["Ending", "Games", "Had a win", "Wins let slip", "Had a draw", "Draws lost", "Latest slip", "Game",
+                 "Formats"],
         rows=rows,
-        formats=["text", "int", "int", "int", "int", "int", "text", "url"],
+        formats=["text", "int", "int", "int", "int", "int", "text", "url", "text"],
         note=note,
         key_columns=[0, 2, 3, 5],
     )

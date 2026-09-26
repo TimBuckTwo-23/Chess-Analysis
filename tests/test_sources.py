@@ -505,3 +505,20 @@ def test_concept_note_lookup_by_term_label_or_fact():
     assert note["credit"].startswith("Capablanca, Chess Fundamentals (Project Gutenberg #33870)")
     sources = concept_notes.note_sources(note)
     assert sources and all(s.url.startswith("https://www.gutenberg.org/ebooks/") for s in sources)
+
+
+def test_cloud_eval_with_white_to_move_keeps_the_sign(tmp_path):
+    f = fetcher(tmp_path, recorded.RecordedSession("cloud_eval_qga_4e4_before"))
+    result = cloud_eval.evaluate(f, HABITS["qga_4e4"]["before"])
+    assert [ln.moves_san[0] for ln in result.lines] == ["d5", "Nf3", "e3"]  # 4.e4, the habit, is not among them
+    assert [ln.cp_end for ln in result.lines] == [76, 55, 40]
+
+
+def test_every_recorded_explorer_answer_is_a_401(tmp_path):
+    for name in ("explorer_masters_sicilian_5e5", "explorer_masters_qga_4e4", "explorer_lichess_sicilian_5e5"):
+        doc = recorded.load(name)
+        assert doc["status"] == 401 and "Authorization Required" in doc["body"]
+    notes: list[str] = []
+    f = fetcher(tmp_path, recorded.RecordedSession("explorer_masters_qga_4e4"), notes=notes, lichess_token="x")
+    assert lichess_explorer.masters(f, HABITS["qga_4e4"]["before"]) is None
+    assert len(notes) == 1 and "LICHESS_TOKEN" in notes[0]
