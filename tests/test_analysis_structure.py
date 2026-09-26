@@ -343,7 +343,7 @@ def test_a_gap_that_comes_from_one_opening_is_an_observation_about_it():
            "weakness" in obs.detail
     assert obs.evidence["would_be"] == "weakness" and obs.evidence["groups"][0]["n"] == 40
     assert obs.evidence["without"]["gap"] == pytest.approx(0.0) and "target" not in obs.evidence
-    assert any("main lines for Black" in a for a in obs.study)
+    assert obs.study[0].startswith("Look up the main lines of your Caro-Kann Defense (Black): if they castle as late")
     # the picture: that opening against your other games, and a board from one of its games
     assert obs.chart.labels == ["Caro-Kann Defense (Black)", "Your other games", "All games"]
     assert obs.chart.series[0].values == [0.0, 1.0, 0.6] and obs.chart.series[1].values == [1.0, 1.0, 1.0]

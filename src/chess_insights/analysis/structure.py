@@ -833,10 +833,9 @@ def fold_observation(r: HabitResult, fold: Fold, kind: str, confidence: float) -
         colour = fold.groups[0][0].capitalize()
         title = (f"Mostly your {' and '.join(f for _, f, _ in fold.groups)} games: with {colour} "
                  f"{_group_text(r, fold.games)}")
-        lines = f"the opening's main lines for {colour}"
     else:
         title = f"Mostly your {fold.names()}: {_group_text(r, fold.games)}"
-        lines = "those openings' main lines"
+    book = " and ".join(_group_label(c, f) for c, f, _ in fold.groups)
     shrunk = shrink_effect(r.test.mean, r.test.se, prior_sd=h.full / h.unit / 2.0) * h.unit
     return Insight(
         id=f"{KEY}.observation.{h.key.replace('_', '-')}",
@@ -864,8 +863,8 @@ def fold_observation(r: HabitResult, fold: Fold, kind: str, confidence: float) -
             "by_format": r.format_stats(),
         },
         study=[
-            f"Compare your {fold.names()} with {lines}: if those {_BOOK[(h.key, kind)]} as your games do, the "
-            "gap comes from the opening, not from a habit of yours.",
+            f"Look up the main lines of your {book}: if they {_BOOK[(h.key, kind)]} as your games do, the gap "
+            "comes from the opening, not from a habit of yours.",
             f"Replay one of the linked games at move {h.by} and check your moves against the main line.",
         ],
         example_games=[o.game.url for o in shown if o.game.url][:MAX_EXAMPLES],
