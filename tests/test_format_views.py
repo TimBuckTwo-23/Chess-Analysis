@@ -104,6 +104,11 @@ def test_a_view_tests_its_findings_on_its_own_games_and_claims_only_what_the_mai
                             "finding: it may be chance. You score 40% here.")
     assert shown.chart is not None and shown.diagram is not None and shown.formats == {"rapid": 65}
     assert shown.evidence["observation_because"] == "view-only" and shown.evidence["n"] == 65
+    # the section's summary, written while it was a claim, says so
+    fake = next(m for m in rapid.modules if m.key == "fake_views")
+    assert fake.summary == ("One finding below shows in your rapid games only, not across all your games, so it is "
+                            "shown as an observation.")
+    assert next(m for m in report.modules if m.key == "fake_views").summary == ""
     # the view's study plan and headline have no item for it
     assert all("fake.weakness.rapid" not in item.insight_ids for item in rapid.study_plan)
     assert "Rapid only" not in rapid.headline and not any("Rapid only" in line for line in rapid.summary_lines)
@@ -384,6 +389,25 @@ def test_a_repeated_mistake_the_deeper_search_clears_is_an_observation(verdict, 
     assert finding.evidence["observation_because"] == "deep-check"
     assert finding.evidence["deep_check"] == {"verdict": verdict, "depth": 16, "best": "5.d4", "played": "5.d3"}
     assert insights_ranked(modules) == ([], [])
+    assert modules[0].summary == "A deeper Stockfish search clears 5.d3, so it is shown as an observation."
+
+
+def test_a_repeated_mistake_seen_in_one_view_only_is_not_called_a_habit_there():
+    finding = habit_finding()
+    modules = [ModuleResult("mistakes", "Positions", "You repeated 2 moves, 2 of them a habit.", insights=[finding])]
+    assert pipeline.view_only_observations(modules, {"mistakes.weakness.other"}, "blitz") == [HABIT_ID]
+    assert finding.kind == "observation" and finding.title.endswith("; 5.d4 is better")  # the title stays
+    assert finding.detail.startswith("Seen in your blitz games only, and not strong enough across all your games to "
+                                     "call it a finding: it may be chance. After 1.e4")
+    assert "habit, not bad luck" not in finding.detail and "fix the first move" in finding.detail
+    assert modules[0].summary == ("You repeated 2 moves, 2 of them a habit. One finding below shows in your blitz "
+                                  "games only, not across all your games, so it is shown as an observation.")
+    two = [ModuleResult("m", "M", "", insights=[habit_finding(), Insight("x.strength.y", "strength", "results", "Y",
+                                                                         "", 0.5, 0.9)])]
+    assert len(pipeline.view_only_observations(two, set(), "rapid")) == 2
+    assert two[0].summary.startswith("2 findings below show in your rapid games only") and two[0].summary.endswith(
+        "so they are shown as observations.")
+    assert pipeline.view_only_observations(two, set(), "rapid") == []  # observations stay as they are
 
 
 def insights_ranked(modules):

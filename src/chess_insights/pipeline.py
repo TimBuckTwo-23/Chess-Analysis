@@ -405,10 +405,21 @@ _BETTER_SUFFIX = re.compile(r";\s*[^;]+ is better$")
 
 def _observe(ins: Insight, first: str, because: str, **evidence: Any) -> None:
     """Make ``ins`` an observation: the same card, chart and board, with ``first`` as its detail's first sentence
-    and the reason in its evidence (``observation_because``)."""
+    and the reason in its evidence (``observation_because``). A repeated-mistake finding loses the sentence that
+    calls the move a habit, not bad luck: that is the claim it no longer makes."""
     ins.kind = "observation"
-    ins.detail = f"{first} {ins.detail or ''}".strip()
+    detail = _HABIT_SENTENCE.sub("", ins.detail or "") if _position_key(ins) is not None else ins.detail or ""
+    ins.detail = f"{first} {detail}".strip()
     ins.evidence = {**(ins.evidence or {}), "observation_because": because, **evidence}
+
+
+def _say_in_summary(module: ModuleResult, text: str) -> None:
+    """Add ``text`` to a section's summary, which was written when its findings were still claims."""
+    module.summary = f"{(module.summary or '').rstrip()} {text}".strip()
+
+
+def _count_words(n: int, one: str, many: str) -> str:
+    return one if n == 1 else many.replace("{n}", str(n))
 
 
 def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching]) -> list[str]:
@@ -418,8 +429,9 @@ def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching
     move) whose ``verdict`` is "close" or "fine" rests on a verdict of the quicker game analysis that the deeper
     search does not confirm. It stays in its section as an observation, its detail starting with the deeper
     check's result in words; for the mistakes module's findings, the "is better" in the title and the habit
-    sentence go, as they would contradict it. A check of the finding's premise, not a new claim: nothing is ever
-    promoted. Run it before ranking, on the main report's modules and on every view's (the same insight ids).
+    sentence go, as they would contradict it, and the section's summary (written while it was a claim) says which
+    moves the deeper search clears. A check of the finding's premise, not a new claim: nothing is ever promoted.
+    Run it before ranking, on the main report's modules and on every view's (the same insight ids).
     """
     if coaching is None:
         return []
@@ -427,6 +439,7 @@ def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching
                if isinstance(e, Explanation) and getattr(e, "verdict", "error") in DEEP_CLEARED and e.insight_id]
     changed: list[str] = []
     for m in modules:
+        moves: list[str] = []
         for ins in m.insights or []:
             if ins.kind not in CLAIM_KINDS:
                 continue
@@ -437,11 +450,16 @@ def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching
             kind = ins.kind
             if _position_key(ins) is not None:
                 ins.title = _BETTER_SUFFIX.sub("", ins.title) or ins.title
-                ins.detail = _HABIT_SENTENCE.sub("", ins.detail or "").replace(_FIX_THE_FIRST, ".")
+                ins.detail = (ins.detail or "").replace(_FIX_THE_FIRST, ".")
                 ins.study = [a for a in ins.study or [] if f" beats {exp.played}" not in a]
             _observe(ins, deep_verdict_sentence(exp, kind, depth), "deep-check",
                      deep_check={"verdict": exp.verdict, "depth": depth, "best": exp.best, "played": exp.played})
             changed.append(ins.id)
+            moves.append(str(exp.played))
+        if moves:
+            _say_in_summary(m, f"A deeper Stockfish search clears {', '.join(moves)}, so "
+                               + _count_words(len(moves), "it is shown as an observation.",
+                                              "they are shown as observations."))
     return changed
 
 
@@ -458,16 +476,25 @@ def view_only_observations(modules: list[ModuleResult], main_claims: Iterable[st
     Each view tests its findings on its own format's games: with three views that is three more sets of chances
     for a false claim on the same page. A view keeps a claim only when the main report makes it too, so the page
     claims nothing the main report doesn't; the rest keep their card, chart, board and title, with a first
-    sentence saying the pattern shows in this format only and may be chance. Run it before the view's ranking and
-    study plan.
+    sentence saying the pattern shows in this format only and may be chance (and the section's summary says how
+    many). Run it before the view's ranking and study plan.
     """
     main = set(main_claims)
+    name = FORMAT_NAMES.get(time_class, time_class or "these").lower()
     changed: list[str] = []
     for m in modules:
+        n = 0
         for ins in m.insights or []:
             if ins.kind in CLAIM_KINDS and ins.id not in main:
                 _observe(ins, view_only_sentence(time_class), "view-only", view_only=time_class)
                 changed.append(ins.id)
+                n += 1
+        if n:
+            _say_in_summary(m, _count_words(
+                n, f"One finding below shows in your {name} games only, not across all your games, so it is shown "
+                   "as an observation.",
+                f"{{n}} findings below show in your {name} games only, not across all your games, so they are shown "
+                "as observations."))
     return changed
 
 
