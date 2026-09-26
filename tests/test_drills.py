@@ -138,6 +138,19 @@ def test_every_pack_is_written_as_pgn_that_reads_back_with_legal_moves(subset, t
             assert [m.uci() for m in game.mainline_moves()] == puzzle.solution_uci
 
 
+def test_pack_headers_from_the_puzzle_file_cannot_break_the_pgn():
+    import io
+
+    puzzle = DrillPuzzle(puzzle_id="abcde", fen=chess.STARTING_FEN, solution_uci=["e2e4"], solution_san=["e4"],
+                         rating=1300, themes=['fork"]', "short"], url="https://lichess.org/training/abcde",
+                         opening_tags=['Evil_"]_[Event_"x"_{c}'])
+    text = drills.pack_pgn(Drill(theme="fork", title="1 fork puzzle", link="", puzzles=[puzzle]))
+    game = chess.pgn.read_game(io.StringIO(text))
+    assert not game.errors and [m.uci() for m in game.mainline_moves()] == ["e2e4"]
+    assert game.headers["Event"] == "1 fork puzzle (1/1)" and game.headers["Opening"] == "Evil Event x c"
+    assert game.headers["Themes"] == "fork short"
+
+
 def test_a_pack_starts_after_the_opponents_first_move(subset, tmp_path):
     coaching = coaching_with_counts()
     drills.annotate(make_ctx(), coaching, [], cfg(subset, tmp_path), TODAY)
@@ -215,7 +228,7 @@ def test_themes_fall_back_to_the_explanations_then_the_engine_tags(subset, tmp_p
     ctx = make_ctx(tags=["hung_material"])
     picked = drills.pick_themes(ctx, Coaching(explanations=explanations))
     assert [t for t, _ in picked] == ["pin", "skewer", "hangingPiece"]
-    assert picked[0][1] == "3 positions explained in this report turn on pins"
+    assert picked[0][1] == "suggested for 3 positions explained in this report"
     assert picked[2][1].startswith("you left material hanging 68 times in 34 games; your opponents 0")
     coaching = Coaching()
     drills.annotate(ctx, coaching, [], cfg(subset, tmp_path), TODAY)
@@ -281,6 +294,77 @@ def test_the_report_schedules_your_costliest_mistakes_and_the_first_puzzles_of_e
     drills.annotate(ctx, later, [], cfg(subset, tmp_path, previous=previous), date(2026, 10, 3))
     assert len(later.review_due) == len(coaching.review)
     assert {(i.due, i.step) for i in later.review} == {("2026-10-06", 1)}
+
+
+def test_done_items_leave_for_good_and_the_next_ones_take_their_place(subset, tmp_path):
+    ctx = make_ctx()
+    first = coaching_with_counts()
+    drills.annotate(ctx, first, [], cfg(subset, tmp_path), TODAY)
+    old = {i.item_id for i in first.review}
+    # every item has gone through its steps: at the 21-day step, due now
+    previous = {"coaching": {"review": [dict(vars(i), step=3, due="2026-10-20") for i in first.review],
+                             "review_due": [], "settings": {}}}
+    later = coaching_with_counts()
+    drills.annotate(ctx, later, [], cfg(subset, tmp_path, previous=previous), date(2026, 10, 21))
+    assert {i.item_id for i in later.review_due} == old
+    assert set(later.settings["review_done"]) == old
+    ids = {i.item_id for i in later.review}
+    assert ids and not ids & old
+    own = [i for i in later.review if i.kind == "own"]
+    assert len(own) == 10  # your next ten costliest mistakes
+    for pack in later.drills:  # the next five puzzles of each pack
+        nxt = {f"lichess:{p.puzzle_id}" for p in pack.puzzles[5:10]}
+        assert nxt <= ids
+    # and they stay done in the report after that
+    previous = {"coaching": {"review": as_json(later.review), "review_due": as_json(later.review_due),
+                             "settings": later.settings}}
+    third = coaching_with_counts()
+    drills.annotate(ctx, third, [], cfg(subset, tmp_path, previous=previous), date(2026, 10, 22))
+    assert not {i.item_id for i in third.review} & old
+    assert set(third.settings["review_done"]) == old
+
+
+def test_the_schedule_survives_the_json_export(subset, tmp_path):
+    import json
+
+    from chess_insights.report.json_export import jsonable
+
+    ctx = make_ctx()
+    first = coaching_with_counts()
+    drills.annotate(ctx, first, [], cfg(subset, tmp_path), TODAY)
+    previous = {"coaching": json.loads(json.dumps(jsonable(first)))}
+    later = coaching_with_counts()
+    drills.annotate(ctx, later, [], cfg(subset, tmp_path, previous=previous), date(2026, 9, 28))
+    assert [i.item_id for i in later.review_due] == [i.item_id for i in first.review]
+    assert {(i.due, i.step) for i in later.review} == {("2026-10-01", 1)}
+
+
+def test_a_broken_puzzle_database_costs_the_packs_not_the_review(tmp_path):
+    bad = tmp_path / "subset.csv"
+    bad.write_bytes(b"PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n" + b"\xff\xfe\x00" * 50 + b"\n")
+    coaching = coaching_with_counts()
+    drills.annotate(make_ctx(), coaching, [], cfg(bad, tmp_path), TODAY)
+    assert coaching.drills == [] and not list(tmp_path.glob("*.pgn"))
+    assert any(n.startswith("No drill packs: the puzzle database at subset.csv could not be read") for n in
+               coaching.notes)
+    assert len(coaching.review) == 10 and all(i.kind == "own" for i in coaching.review)
+
+
+def test_reasons_count_in_words():
+    g = make_game(color="white")
+    ctx = AnalysisContext(username="tester", games=[g], evals={g.game_id: _evals_for(g, {4: 30}, ["hung_material"])})
+    [(theme, reason)] = drills.pick_themes(ctx, Coaching())
+    assert theme == "hangingPiece" and reason == "you left material hanging once in 1 game; your opponents 0"
+    profile = Coaching(settings={"motif_profile": {"games": 1, "counts": {"fork": {"you_missed": 1, "opp_missed": 0}}}})
+    assert drills.pick_themes(ctx, profile)[0] == ("fork", "you missed 1 fork in 1 game; your opponents 0")
+
+
+def test_pack_files_and_links_are_safe(tmp_path):
+    assert drills.pack_path(tmp_path / "me", "../../evil") == tmp_path / "me-drill-evil.pgn"
+    assert drills.pack_path(tmp_path / "me", "fork") == tmp_path / "me-drill-fork.pgn"
+    fen = "bqnrkrnb/pppppppp/8/8/8/8/PPPPPPPP/BQNRKRNB w KQkq - 0 1"
+    assert drills._analysis_url(fen, chess960=True).startswith("https://lichess.org/analysis/chess960/bqnrkrnb/")
+    assert " " not in drills._analysis_url(chess.STARTING_FEN)
 
 
 # --------------------------------------------------------------------------- the whole coaching step

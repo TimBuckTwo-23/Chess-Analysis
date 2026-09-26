@@ -175,6 +175,25 @@ def test_collect_counts_each_error_once_per_pattern_and_side():
     assert len(events) == 4
 
 
+def test_a_line_the_detectors_fail_on_counts_without_a_pattern():
+    ctx = _records_ctx(1)
+    from chess_insights.analysis.engine_stats import join
+
+    [g] = ctx.games
+    good, broken = _line(), _line(moves=("d2d4",))
+
+    def detect(line, role):
+        if line is broken:
+            raise ValueError("odd line")
+        return [Motif("fork", role, 0, ["e4"], "you" if role == "best" else "opponent")]
+
+    errors = [ProfileError(g.game_id, 4, "you", "blitz", START, "e2e4", 30.0, good, broken)]
+    notes = []
+    [c], events = profile.collect(join(ctx), errors, detect, notes)
+    assert c.count("missed", "fork") == (1, 0) and c.count("allowed", "fork") == (0, 0) and len(events) == 1
+    assert notes == ["Motif profile: the pattern detectors failed on 1 engine line (counted without a pattern)."]
+
+
 def test_table_and_chart_are_per_100_moves_with_practice_links():
     g = GameCounts("a", "blitz", (50, 50), [4, 2], {("missed", "fork"): [2, 1], ("allowed", "pin"): [1, 0],
                                                      ("missed", "mateIn2"): [3, 3]})
@@ -198,8 +217,8 @@ def test_names_of_patterns():
 
 
 # --------------------------------------------------------------------------- the coaching step
-def _planted_world(n_games=120, seed=5):
-    """Games, evals and profiled errors where you miss forks far more often than your opponents."""
+def _planted_world(n_games=120, seed=5, p_you=0.8, p_opp=0.15):
+    """Games, evals and profiled errors where you miss forks far more often than your opponents (by default)."""
     rng = random.Random(seed)
     games, evals, errors, registry = [], {}, [], {}
     for k in range(n_games):
@@ -209,7 +228,7 @@ def _planted_world(n_games=120, seed=5):
                                san=g.moves_san[i]) for i in range(g.plies)]
         games.append(g)
         evals[g.game_id] = make_game_eval(g.game_id, plies)
-        for side, p_fork in (("you", 0.8), ("opponent", 0.15)):
+        for side, p_fork in (("you", p_you), ("opponent", p_opp)):
             for e in range(2):
                 ply = 4 + 2 * e + (0 if (side == "you") == (g.color == "white") else 1)
                 fen = START if ply % 2 == 0 else AFTER_E4
@@ -289,4 +308,42 @@ def test_event_diagram_shows_the_right_line(kind):
     frames = d.strips[0].frames
     assert [f.move for f in frames] == (["1.Nf3", "1...Nc6"] if kind == "missed" else ["1.d4", "1...d5", "2.c4"])
     assert frames[1].marks and frames[1].marks[0].square == "c6"
-    assert "25 percentage points" in d.caption and d.time_class == "blitz"
+    assert "It cost you 25 percentage points" in d.caption and d.time_class == "blitz"
+    assert d.caption.startswith("You played 1.d4 (red); 1.Nf3 (green) was better.")
+
+
+def test_event_diagram_of_an_opponents_miss_keeps_your_side_at_the_bottom():
+    g = make_game(color="black")
+    best, refutation = Line(START, ["g1f3", "b8c6"]), Line(START, ["d2d4", "d7d5"])
+    e = ProfileError(g.game_id, 0, "opponent", "rapid", START, "d2d4", 18.0, best, refutation)
+    d = profile.event_diagram(profile.MotifEvent(g, e, "missed", Motif("fork", "best", 0, ["f3"], "you")))
+    assert d.title == "A fork your opponent missed: 1.Nf3 instead of 1.d4"
+    assert d.caption.startswith("Your opponent played 1.d4 (red); 1.Nf3 (green) was better. It cost your opponent 18")
+    assert d.orientation == "black"
+    d = profile.event_diagram(profile.MotifEvent(g, e, "allowed", Motif("fork", "refutation", 1, [], "opponent")))
+    assert d.title == "The fork your opponent allowed after 1.d4"
+
+
+def test_the_strip_reaches_the_pattern():
+    g = make_game(color="white")
+    moves = ["g1f3", "b8c6", "b1c3", "g8f6", "e2e4", "e7e5", "f3e5", "c6e5"]
+    e = ProfileError(g.game_id, 0, "you", "blitz", START, "a2a3", 20.0, Line(START, moves), None)
+    d = profile.event_diagram(profile.MotifEvent(g, e, "missed", Motif("fork", "best", 6, ["e5", "f7", "c6"], "you")))
+    frames = d.strips[0].frames
+    assert len(frames) == 7 and frames[6].move == "4.Nxe5" and [m.square for m in frames[6].marks] == ["e5", "f7", "c6"]
+    short = profile.event_diagram(profile.MotifEvent(g, e, "missed", Motif("fork", "best", 0, ["f3"], "you")))
+    assert len(short.strips[0].frames) == 4  # a few moves of context after an early pattern
+
+
+def test_a_strength_shows_one_of_your_opponents_misses(monkeypatch):
+    ctx, errors, registry = _planted_world(p_you=0.15, p_opp=0.8)
+    monkeypatch.setattr(deep, "profile_lines", lambda ctx, cfg, notes: errors)
+    monkeypatch.setattr(motifs, "detect_line", lambda line, role: registry.get(id(line), []))
+    monkeypatch.setattr(motifs, "GATED_THEMES", frozenset({"fork", "pin"}))
+    engine = ModuleResult(key="engine", title="Engine review", summary="")
+    profile.annotate(ctx, Coaching(), [engine], CoachConfig())
+    [claim] = [i for i in engine.insights if i.id == "tactics.strength.motif-missed.fork"]
+    assert claim.kind == "strength" and claim.title == "You miss forks less often than your opponents"
+    assert claim.chart is not None and claim.diagram is not None
+    assert claim.diagram.title.startswith("A fork your opponent missed")
+    assert claim.diagram.link in claim.example_games

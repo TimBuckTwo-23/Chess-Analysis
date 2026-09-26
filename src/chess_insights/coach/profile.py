@@ -58,6 +58,7 @@ MIN_CONFIDENCE = 0.5  # insights.MIN_CONFIDENCE
 CHART_THEMES = 6  # patterns in the overview chart (the table lists every named one)
 MAX_EXAMPLES = 5
 PUZZLE_LINE_PLIES = 8  # best lines kept for the puzzle export
+MAX_STRIP_FRAMES = 8  # small boards in a pattern's strip (at least 4, and up to the pattern itself)
 
 # Lichess theme -> (singular, plural), in the report's words
 MOTIF_NAMES: dict[str, tuple[str, str]] = {
@@ -199,8 +200,8 @@ def collect(
                 gc.counts.setdefault((kind, theme), [0, 0])[s] += 1
                 events.append(MotifEvent(game, e, kind, m))
     if failed and notes is not None:
-        notes.append(f"Motif profile: the pattern detectors failed on {failed} engine lines (counted without a "
-                     "pattern).")
+        lines = "1 engine line" if failed == 1 else f"{failed} engine lines"
+        notes.append(f"Motif profile: the pattern detectors failed on {lines} (counted without a pattern).")
     return games, events
 
 
@@ -365,7 +366,8 @@ def _format_chart(games: Sequence[GameCounts], kind: str, theme: str, formats: d
         them.append(_per100(x2, m2))
         rows.append([label, len(gs), x1, _per100(x1, m1), x2, _per100(x2, m2)])
     verb = "missed" if kind == "missed" else "allowed"
-    note = "Engine-analysed games: " + ", ".join(f"{n} {tc}" for tc, n in formats.items()) + "."
+    mix = ", ".join(f"{n} {tc}" for tc, n in formats.items() if n)
+    note = f"Engine-analysed games: {mix}." if mix else f"{len(games)} engine-analysed games."
     if len(groups) > 1:
         note += f" Formats with fewer than {MIN_FORMAT_GAMES} analysed games have no bar of their own."
     return comparison_chart(
@@ -419,31 +421,37 @@ def _marks(motif: Motif) -> list[Mark]:
 
 
 def event_diagram(event: MotifEvent) -> Diagram:
-    """The position before the error: the move played red, the engine's move green, and the line that follows."""
+    """The position before the error: the move played red, the engine's move green, and the line that follows
+    (as far as the pattern, with its squares marked). Your errors for weaknesses, your opponents' for strengths; the
+    board always has your side at the bottom."""
     e, g, theme = event.error, event.game, event.motif.theme
     best = e.best_line.moves_uci[0] if e.best_line and e.best_line.moves_uci else None
     played, best_label = _label(e.fen, e.played_uci), _label(e.fen, best) if best else ""
     name = motif_name(theme)
+    mine = event.side != "opponent"
+    who, whose = ("You", "you") if mine else ("Your opponent", "your opponent")
     if event.kind == "missed":
-        line, title = e.best_line, f"The {name} you missed: {best_label} instead of {played}"
-        strip_title = f"What {best_label} starts ({name})"
+        line = e.best_line
+        title = (f"The {name} you missed" if mine else f"A {name} your opponent missed") + (
+            f": {best_label} instead of {played}" if best_label else f" with {played}")
+        strip_title = f"What {best_label} starts ({name})" if best_label else f"The engine's line ({name})"
     else:
-        line, title = e.refutation, f"The {name} you allowed after {played}"
+        line = e.refutation
+        title = f"The {name} you allowed after {played}" if mine else f"The {name} your opponent allowed after {played}"
         strip_title = f"What {played} allowed ({name})"
-    orientation = g.color
     text = _line_text(line)
     caption = (
-        f"You played {played} (red)" + (f"; {best_label} (green) was better" if best_label else "")
-        + f". It cost {e.drop:.0f} percentage points of winning chances."
+        f"{who} played {played} (red)" + (f"; {best_label} (green) was better" if best_label else "")
+        + f". It cost {whose} {e.drop:.0f} percentage points of winning chances."
         + (f" The engine's line: {text}." if text else "")
     )
-    diagram = position_diagram(title, e.fen, orientation=orientation, played=e.played_uci, best=best, caption=caption,
+    diagram = position_diagram(title, e.fen, orientation=g.color, played=e.played_uci, best=best, caption=caption,
                                link=g.url, time_class=g.time_class)
     if line is not None and line.moves_uci:
         marks = [[] for _ in line.moves_uci]
         if 0 <= event.motif.ply < len(marks):
             marks[event.motif.ply] = _marks(event.motif)
-        frames = min(6, max(4, event.motif.ply + 1))  # far enough to show the pattern
+        frames = max(4, min(event.motif.ply + 1, MAX_STRIP_FRAMES))  # far enough to show the pattern
         strip = line_strip(strip_title, line.fen or e.fen, line.moves_uci, max_frames=frames, marks=marks)
         if strip.frames:
             diagram.strips.append(strip)
@@ -551,13 +559,13 @@ def motif_claims(
                 "drill": training_url(t.theme),
             },
             study=_study(t.theme, t.kind) if kind_word == "weakness" else [
-                f"Keep your eye for {plural} sharp: a few themed puzzles a week ({training_url(t.theme)}).",
+                f"Keep your eye sharp for {plural}: a few themed puzzles a week ({training_url(t.theme)}).",
             ],
             example_games=_urls(examples),
             formats=formats,
             chart=_format_chart(games, t.kind, t.theme, formats),
         )
-        if kind_word == "weakness" and examples:
+        if examples:  # a weakness shows your costliest miss, a strength one of your opponents'
             try:
                 insight.diagram = event_diagram(examples[0])
             except Exception:  # noqa: BLE001 — a board is decoration: never lose the finding over it

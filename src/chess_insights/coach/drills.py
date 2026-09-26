@@ -9,7 +9,8 @@
   them with when possible: ``<stem>-drill-openings.pgn``.
 * **Review schedule**: your ten costliest mistakes (``analysis.mistakes.build_puzzles``) and the first five puzzles
   of each pack come back 1, 3, 7 and 21 days after the report; items from the previous report's JSON that are due
-  move on to their next step (and leave the schedule after the last one).
+  move on to their next step, and after the last one they are done (``coaching.settings["review_done"]``) and the
+  next mistake or puzzle takes their place.
 
 The packs need the filtered puzzle database (``chess-insights puzzles-db``) at ``cfg.puzzle_db``; without it the
 report gets one note instead of packs. Nothing here is a claim: packs and reasons are practice material.
@@ -46,7 +47,11 @@ OPENINGS = "openings"
 OPENINGS_URL = "https://lichess.org/training/openings"
 # engine tags (engine.py) -> the Lichess theme that trains them, for when no motif counts exist
 TAG_THEMES = (("hung_material", "hangingPiece"), ("missed_mate", "mate"))
-TAG_WORDS = {"hung_material": "left material hanging {n} times", "missed_mate": "missed {n} forced mates"}
+TAG_WORDS = {  # (one, several)
+    "hung_material": ("left material hanging once", "left material hanging {n} times"),
+    "missed_mate": ("missed a forced mate once", "missed {n} forced mates"),
+}
+MAX_DONE = 2000  # review items remembered as done (the most recent reports' worth)
 
 
 def _plural(n: int, word: str, plural: Optional[str] = None) -> str:
@@ -67,8 +72,8 @@ def _profile_themes(coaching: Coaching) -> list[tuple[str, str]]:
     ranked = sorted((t for t in counts if n(t, "you_missed") > 0),
                     key=lambda t: (-n(t, "you_missed"), -n(t, "you_allowed"), t))
     return [
-        (t, f"you missed {_plural(n(t, 'you_missed'), motif_name(t), motif_name(t, True))} in {games} games; "
-            f"your opponents {n(t, 'opp_missed')}")
+        (t, f"you missed {_plural(n(t, 'you_missed'), motif_name(t), motif_name(t, True))} in "
+            f"{_plural(int(games), 'game')}; your opponents {n(t, 'opp_missed')}")
         for t in ranked
     ]
 
@@ -82,7 +87,7 @@ def _explanation_themes(coaching: Coaching, gated: Iterable[str]) -> list[tuple[
         counter.update(set(themes))
     ranked = sorted(counter, key=lambda t: (-counter[t], t))
     return [
-        (t, f"{_plural(counter[t], 'position')} explained in this report turn on {motif_name(t, True)}")
+        (t, f"suggested for {_plural(counter[t], 'position')} explained in this report")
         for t in ranked
     ]
 
@@ -97,8 +102,9 @@ def _tag_themes(ctx: "AnalysisContext") -> list[tuple[str, str]]:
         mine = sum(1 for r in records for p in r.plies if p.is_user and tag in (p.tags or ()))
         theirs = sum(1 for r in records for p in r.plies if not p.is_user and tag in (p.tags or ()))
         if mine:
-            found.append((mine, theme, f"you {TAG_WORDS[tag].format(n=mine)} in {len(records)} games; your "
-                                        f"opponents {theirs}"))
+            one, several = TAG_WORDS[tag]
+            words = one if mine == 1 else several.format(n=mine)
+            found.append((mine, theme, f"you {words} in {_plural(len(records), 'game')}; your opponents {theirs}"))
     return [(theme, reason) for _, theme, reason in sorted(found, key=lambda x: (-x[0], x[1]))]
 
 
@@ -118,7 +124,8 @@ def pick_themes(ctx: "AnalysisContext", coaching: Coaching, gated: Iterable[str]
 
 # --------------------------------------------------------------------------- opening families
 _GENERIC = {"opening", "game"}  # chess.com "Ruy Lopez Opening" is Lichess's "Ruy_Lopez"
-_TOKEN_ALIASES = {"alekhines": "alekhine", "owens": "owen", "birds": "bird", "defence": "defense"}
+_TOKEN_ALIASES = {"alekhines": "alekhine", "owens": "owen", "birds": "bird", "defence": "defense",
+                  "nimzowitsch-larsen": "nimzo-larsen"}
 _FAMILY_ALIASES = {("petrovs", "defense"): [("russian",), ("petrovs", "defense")]}
 
 
@@ -239,6 +246,12 @@ def _round_robin(groups: Sequence[Sequence[puzzles_db.PuzzleRow]], n: int, used:
 
 
 # --------------------------------------------------------------------------- PGN
+def _header_text(text: str) -> str:
+    """A PGN header value from the puzzle file: no quotes, brackets, braces or backslashes (python-chess writes
+    header values as they are)."""
+    return re.sub(r'["\\\[\]{}\s]+', " ", text).strip()
+
+
 def pack_pgn(drill: Drill) -> str:
     """One PGN game per puzzle: SetUp/FEN = the position after the opponent's first move, the solution moves, and
     a comment with the Lichess link. Readable by Lichess study import and any chess program."""
@@ -257,9 +270,9 @@ def pack_pgn(drill: Drill) -> str:
         game.headers["Annotator"] = "chess-insights"
         game.headers["PuzzleId"] = p.puzzle_id
         game.headers["PuzzleRating"] = str(p.rating)
-        game.headers["Themes"] = " ".join(p.themes)
+        game.headers["Themes"] = _header_text(" ".join(p.themes))
         if p.opening_tags:
-            game.headers["Opening"] = p.opening_tags[-1].replace("_", " ")
+            game.headers["Opening"] = _header_text(p.opening_tags[-1].replace("_", " "))
         side = "White" if board.turn == chess.WHITE else "Black"
         game.comment = f"{side} to move. Lichess puzzle {p.puzzle_id}, rated {p.rating}: {p.url}"
         node: chess.pgn.GameNode = game
@@ -270,8 +283,10 @@ def pack_pgn(drill: Drill) -> str:
 
 
 def pack_path(out_stem: Path, theme: str) -> Path:
+    """<stem>-drill-<theme>.pgn next to the report (the theme reduced to letters, digits, '-' and '_')."""
     stem = Path(out_stem)
-    return stem.parent / f"{stem.name}-drill-{theme}.pgn"
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", theme) or "pack"
+    return stem.parent / f"{stem.name}-drill-{safe}.pgn"
 
 
 def _write(drill: Drill, out_stem: Optional[Path], notes: list[str]) -> None:
@@ -326,33 +341,44 @@ def _days(step: int) -> timedelta:
     return timedelta(days=REVIEW_STEPS_DAYS[min(max(step, 0), len(REVIEW_STEPS_DAYS) - 1)])
 
 
-def _analysis_url(fen: str) -> str:
-    return "https://lichess.org/analysis/" + fen.replace(" ", "_")
+def _analysis_url(fen: str, chess960: bool = False) -> str:
+    """The position on Lichess's analysis board (Chess960 castling rights need the variant in the path)."""
+    return "https://lichess.org/analysis/" + ("chess960/" if chess960 else "") + fen.replace(" ", "_")
 
 
-def own_items(ctx: "AnalysisContext", limit: int = OWN_REVIEW) -> list[ReviewItem]:
-    """Your costliest mistakes (with a known better move), as review items."""
+def own_items(ctx: "AnalysisContext", limit: int = OWN_REVIEW, skip: Iterable[str] = ()) -> list[ReviewItem]:
+    """Your ``limit`` costliest mistakes (with a known better move) that are not done yet (``skip``), as review
+    items."""
     from ..analysis.mistakes import build_puzzles
 
+    skip = set(skip)
     items = []
-    for e in build_puzzles(ctx.games, ctx.evals, limit=limit):
+    for e in build_puzzles(ctx.games, ctx.evals, limit=limit + len(skip)):
+        item_id = f"own:{e.game.game_id}:{e.ply}"
+        if item_id in skip:
+            continue
         where = ", ".join(x for x in (e.game.opening_family or "", e.game.time_class or "") if x)
         items.append(ReviewItem(
-            item_id=f"own:{e.game.game_id}:{e.ply}",
+            item_id=item_id,
             kind="own",
             title=f"Find a better move than {e.move_label}" + (f" ({where})" if where else ""),
             fen=e.fen,
-            url=_analysis_url(e.fen),
+            url=_analysis_url(e.fen, e.game.rules == "chess960"),
             due="",
         ))
+        if len(items) >= limit:
+            break
     return items
 
 
-def drill_items(packs: Sequence[Drill], per_pack: int = PACK_REVIEW) -> list[ReviewItem]:
+def drill_items(packs: Sequence[Drill], per_pack: int = PACK_REVIEW, skip: Iterable[str] = ()) -> list[ReviewItem]:
+    """The first ``per_pack`` puzzles of each pack that are not done yet (``skip``), as review items."""
+    skip = set(skip)
     items = []
     for d in packs:
         what = "Puzzle from your openings" if d.theme == OPENINGS else f"{motif_name(d.theme).capitalize()} puzzle"
-        for p in d.puzzles[:per_pack]:
+        fresh = [p for p in d.puzzles if f"lichess:{p.puzzle_id}" not in skip]
+        for p in fresh[:per_pack]:
             items.append(ReviewItem(item_id=f"lichess:{p.puzzle_id}", kind="drill",
                                     title=f"{what}, rated {p.rating}", fen=p.fen, url=p.url, due=""))
     return items
@@ -390,27 +416,40 @@ def previous_items(previous: Optional[dict[str, Any]], key: str = "review") -> l
     return items
 
 
+def done_items(previous: Optional[dict[str, Any]], today: date) -> list[str]:
+    """Ids of the items that have finished their last step (21 days): those already done in earlier reports
+    (``previous["coaching"]["settings"]["review_done"]``, and the last report's due items at their last step), and
+    those finishing now. They are not scheduled again. Most recent first, at most ``MAX_DONE``."""
+    last = len(REVIEW_STEPS_DAYS) - 1
+    now = [i.item_id for i in previous_items(previous, "review")
+           if i.step >= last and (_parse_date(i.due) or date.max) <= today]
+    coaching = (previous or {}).get("coaching") if isinstance(previous, dict) else None
+    settings = coaching.get("settings") if isinstance(coaching, dict) else None
+    stored = settings.get("review_done") if isinstance(settings, dict) else None
+    earlier = [str(x) for x in stored if x] if isinstance(stored, list) else []
+    earlier += [i.item_id for i in previous_items(previous, "review_due") if i.step >= last]
+    return list(dict.fromkeys(now + earlier))[:MAX_DONE]
+
+
 def schedule(
     new: Sequence[ReviewItem], previous: Optional[dict[str, Any]], today: date
 ) -> tuple[list[ReviewItem], list[ReviewItem]]:
     """(this report's schedule, the items due now).
 
     Items from the previous report that are due (due date <= ``today``) are listed as due and move to their next
-    step (1, 3, 7, 21 days), counted from today; after the 21-day step they leave the schedule. Items not yet due
-    carry over unchanged. New items start at step 0 (due tomorrow) unless they are already scheduled or have just
-    finished their last step. Sorted by due date, your own positions first; deterministic given ``today``.
+    step (1, 3, 7, 21 days), counted from today; after the 21-day step they are done (:func:`done_items`) and leave
+    the schedule for good. Items not yet due carry over unchanged. New items start at step 0 (due tomorrow) unless
+    they are already scheduled or done. Sorted by due date, your own positions first; deterministic given ``today``.
     """
     last = len(REVIEW_STEPS_DAYS) - 1
     carried: list[ReviewItem] = []
     due_now: list[ReviewItem] = []
-    finished = {i.item_id for i in previous_items(previous, "review_due") if i.step >= last}
+    finished = set(done_items(previous, today))
     for item in previous_items(previous, "review"):
         due = _parse_date(item.due)
         if due is not None and due <= today:
             due_now.append(item)
-            if item.step >= last:
-                finished.add(item.item_id)
-            else:
+            if item.step < last:
                 carried.append(replace(item, step=item.step + 1, due=(today + _days(item.step + 1)).isoformat()))
         else:
             carried.append(item)
@@ -436,17 +475,25 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
     if path is None or not path.is_file():
         coaching.notes.append(NO_DB_NOTE + ".")
     else:
-        packs = build_packs(ctx, coaching, cfg, getattr(motifs, "GATED_THEMES", ()) or ())
-        for drill in packs:
-            _write(drill, cfg.out_stem, coaching.notes)
-        meta = puzzles_db.read_meta(path)
-        coaching.settings["puzzle_db"] = {
-            "downloaded": meta.get("downloaded", ""), "rows": meta.get("rows"), "license": meta.get("license", "CC0"),
-            "rating": list(cfg.drill_rating), "size": cfg.drill_size,
-        }
-        if not packs:
-            coaching.notes.append("No drill packs: the puzzle database has no puzzles for your patterns and openings "
-                                  f"in the {cfg.drill_rating[0]}-{cfg.drill_rating[1]} rating range.")
+        try:  # a broken subset costs the packs, not the review schedule of your own positions
+            packs = build_packs(ctx, coaching, cfg, getattr(motifs, "GATED_THEMES", ()) or ())
+        except Exception as exc:  # noqa: BLE001
+            coaching.notes.append(f"No drill packs: the puzzle database at {path.name} could not be read "
+                                  f"({type(exc).__name__}: {exc}). Run chess-insights puzzles-db again.")
+            packs = []
+        else:
+            for drill in packs:
+                _write(drill, cfg.out_stem, coaching.notes)
+            meta = puzzles_db.read_meta(path)
+            coaching.settings["puzzle_db"] = {
+                "downloaded": meta.get("downloaded", ""), "rows": meta.get("rows"),
+                "license": meta.get("license", "CC0"), "rating": list(cfg.drill_rating), "size": cfg.drill_size,
+            }
+            if not packs:
+                coaching.notes.append("No drill packs: the puzzle database has no puzzles for your patterns and "
+                                      f"openings in the {cfg.drill_rating[0]}-{cfg.drill_rating[1]} rating range.")
     coaching.drills = packs
-    new = own_items(ctx) + drill_items(packs)
+    done = done_items(cfg.previous, today)
+    new = own_items(ctx, skip=done) + drill_items(packs, skip=done)
     coaching.review, coaching.review_due = schedule(new, cfg.previous, today)
+    coaching.settings["review_done"] = done

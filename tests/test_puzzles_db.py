@@ -121,6 +121,23 @@ def test_several_zstd_frames_are_read_as_one_stream(tmp_path):
     assert [r.puzzle_id for r in puzzles_db.iter_rows(path)] == ["aaaa1", "aaaa2", "aaaa3"]
 
 
+def test_a_dump_without_a_header_row_is_read_in_the_databases_column_order(tmp_path):
+    rows = [row(*r) for r in GOOD] + [row(*FILTERED[0])]
+    old_format = [r.rsplit(",", 1)[0] for r in rows]  # older dumps: no header and no OpeningTags column
+    for body in ("\n".join(rows) + "\n", "\n".join(old_format) + "\n"):
+        path = puzzles_db.download(tmp_path, session=FakeSession(FakeResponse(zst(body.encode()))),
+                                   today=date(2026, 1, 1))
+        assert [r.puzzle_id for r in puzzles_db.iter_rows(path)] == ["aaaa1", "aaaa2", "aaaa3"]
+        assert puzzles_db.read_meta(path)["rows_read"] == 4
+
+
+def test_a_puzzle_id_that_is_not_letters_and_digits_makes_the_row_malformed():
+    base = {"FEN": FEN, "Moves": "f1c4 g8f6", "Rating": "1500"}
+    assert puzzles_db.parse_row({"PuzzleId": "abc12", **base}) is not None
+    for bad in ('x"><script>', "../x", "a b", "j:alert(1)"):
+        assert puzzles_db.parse_row({"PuzzleId": bad, **base}) is None
+
+
 @pytest.mark.parametrize(
     "response",
     [

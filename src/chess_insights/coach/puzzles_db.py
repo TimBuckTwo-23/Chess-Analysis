@@ -14,8 +14,10 @@ starts at ``Moves[1]``. ``to_puzzle`` pushes the first move, so a ``DrillPuzzle`
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -34,6 +36,10 @@ MIN_POPULARITY = 80  # Lichess's -100..100 vote score
 MIN_PLAYS = 300
 COLUMNS = ("PuzzleId", "FEN", "Moves", "Rating", "Popularity", "NbPlays", "Themes", "OpeningTags")
 REQUIRED = ("PuzzleId", "FEN", "Moves", "Rating")
+# The database's columns, for a file without a header row (older dumps had none, and no OpeningTags)
+LICHESS_COLUMNS = ("PuzzleId", "FEN", "Moves", "Rating", "RatingDeviation", "Popularity", "NbPlays", "Themes",
+                   "GameUrl", "OpeningTags")
+_PUZZLE_ID = re.compile(r"^[A-Za-z0-9]{1,16}$")  # Lichess ids are five letters and digits
 CHUNK_BYTES = 1 << 16
 PROGRESS_EVERY = 100_000  # rows read between progress callbacks
 TIMEOUT = 60  # seconds without data before the download gives up
@@ -110,6 +116,8 @@ def parse_row(row: dict[str, Any]) -> Optional[PuzzleRow]:
     non-numeric value makes the row malformed.
     """
     if not isinstance(row, dict) or any(not row.get(k) for k in REQUIRED):
+        return None
+    if not _PUZZLE_ID.match(str(row["PuzzleId"]).strip()):  # it becomes part of a link in the report
         return None
     moves = tuple(str(row["Moves"]).split())
     rating = _int(row["Rating"])
@@ -262,6 +270,13 @@ def _lines(chunks: Iterable[bytes]) -> Iterator[str]:
         yield rest.decode("utf-8", errors="replace")
 
 
+def _headerless(cells: list[str]) -> bool:
+    """The first row of a dump without a header: a puzzle in the database's own column order."""
+    if len(cells) not in (len(LICHESS_COLUMNS) - 1, len(LICHESS_COLUMNS)):
+        return False
+    return parse_row(dict(zip(LICHESS_COLUMNS, cells))) is not None
+
+
 def _atomic_write(path: Path, write: Callable[[Any], None]) -> None:
     """``write(handle)`` into a temporary file next to ``path``, then move it into place in one step."""
     tmp = path.with_name(path.name + ".part")
@@ -322,11 +337,14 @@ def download(
     def write_subset(handle: Any) -> None:
         reader = csv.reader(_lines(_decompressed(chunks())))
         header = next(reader, None)
+        first: list[list[str]] = []
+        if header and any(k not in header for k in REQUIRED) and _headerless(header):
+            header, first = list(LICHESS_COLUMNS[: len(header)]), [header]
         if not header or any(k not in header for k in REQUIRED):
             raise PuzzleDbError(f"{url} does not look like the Lichess puzzle database (header {header!r})")
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(COLUMNS)
-        for cells in reader:
+        for cells in itertools.chain(first, reader):
             counts["read"] += 1
             if progress and counts["read"] % PROGRESS_EVERY == 0:
                 progress(counts["read"])
