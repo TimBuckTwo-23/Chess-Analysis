@@ -803,7 +803,7 @@ def test_coach_flags_reach_the_coaching_config(chesscom, run, tmp_path, monkeypa
     assert cfg.search_seconds == 2.5
     assert cfg.stockfish == "/opt/stockfish"
     assert cfg.lichess_token == "lip_secret_token_123"
-    assert "lip_secret_token_123" not in stdout + stderr and "lip_secret_token_123" not in out.with_suffix(".json").read_text()
+    assert "lip_secret_token_123" not in stdout + stderr and "lip_secret_token_123" not in out.with_suffix(".json").read_text(encoding="utf-8")
     assert cfg.puzzle_db == db and cfg.drill_rating == (1300, 1700) and cfg.practice_minutes == 30
     assert cfg.llm is False and cfg.anthropic_api_key is None and "ANTHROPIC_API_KEY" in stderr  # no key: a note
     assert cfg.llm_model == "claude-test" and cfg.maia is True and cfg.offline is False
@@ -985,8 +985,12 @@ def test_puzzle_export_uses_the_coachings_lines(tmp_path, monkeypatch):
 def test_puzzles_db_command(run, tmp_path, monkeypatch):
     from chess_insights.coach import puzzles_db
 
+    def failing_download(cache_dir, progress=None, **kw):  # never the network in tests
+        raise puzzles_db.PuzzleDbError("the download was cut short")
+
+    monkeypatch.setattr(puzzles_db, "download", failing_download)
     code, _, stderr = run("puzzles-db", "--cache-dir", str(tmp_path))
-    assert code == 1 and "error:" in stderr and "Traceback" not in stderr  # the stub on this branch
+    assert code == 1 and "error:" in stderr and "Traceback" not in stderr
 
     seen = {}
 

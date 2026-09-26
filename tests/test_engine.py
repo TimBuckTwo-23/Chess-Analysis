@@ -589,7 +589,7 @@ def test_corrupt_truncated_and_foreign_cache_files_are_ignored(fake_engines, tmp
     first = analyze_games(games, cfg_fake(), cache_dir=tmp_path)
     files = sorted(tmp_path.rglob("*.json"))
     assert len(files) == 4
-    payloads = [json.loads(f.read_text()) for f in files]
+    payloads = [json.loads(f.read_text(encoding="utf-8")) for f in files]
     files[0].write_text("{not json")
     files[1].write_text(json.dumps([1, 2, 3]))
     data = payloads[2]
@@ -682,7 +682,7 @@ def test_missed_mate_in_one(sf):
 @pytest.mark.engine
 def test_chess960_and_illegal_games(sf, fixtures_dir):
     eng, cfg = sf
-    raw = json.loads((fixtures_dir / "chesscom_archive_sample.json").read_text())["games"]
+    raw = json.loads((fixtures_dir / "chesscom_archive_sample.json").read_text(encoding="utf-8"))["games"]
     games = parse_games(raw, raw[0]["white"]["username"])
     c960 = next(g for g in games if g.rules == "chess960")
     ev = analyze_game(c960, eng, cfg)
@@ -747,7 +747,7 @@ def _stockfish_descendants() -> list[int]:
         if not d.name.isdigit():
             continue
         try:
-            stat = (d / "stat").read_text()
+            stat = (d / "stat").read_text(encoding="utf-8")
         except OSError:
             continue
         name = stat[stat.index("(") + 1 : stat.rindex(")")]

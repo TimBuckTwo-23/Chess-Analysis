@@ -178,7 +178,7 @@ def test_termination_and_outcome_mapping():
 
 
 def test_pgn_import_matches_json_import(fixtures_dir, games):
-    text = (fixtures_dir / "sample_games.pgn").read_text()
+    text = (fixtures_dir / "sample_games.pgn").read_text(encoding="utf-8")
     pgn_games = parse.games_from_pgn(text, "testerbob")
     assert len(pgn_games) == 5
     json_by_url = {g.url: g for g in games}

@@ -11,7 +11,7 @@ from chess_insights.dataset import filter_games
 
 @pytest.fixture(scope="module")
 def raws(fixtures_dir):
-    return json.loads((fixtures_dir / "real_chesscom_games.json").read_text())["games"]
+    return json.loads((fixtures_dir / "real_chesscom_games.json").read_text(encoding="utf-8"))["games"]
 
 
 def players(raw):

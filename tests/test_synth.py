@@ -230,7 +230,7 @@ def test_opening_book_is_real_theory_with_chesscom_names():
 
 
 def test_tcn_matches_real_chesscom_encoding(fixtures_dir):
-    raws = json.loads((fixtures_dir / "real_chesscom_games.json").read_text())["games"]
+    raws = json.loads((fixtures_dir / "real_chesscom_games.json").read_text(encoding="utf-8"))["games"]
     checked = 0
     for raw in raws:
         if raw.get("rules") != "chess" or not raw.get("tcn") or "/game/live/" not in raw["url"]:

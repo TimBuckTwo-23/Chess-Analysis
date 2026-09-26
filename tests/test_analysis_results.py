@@ -422,7 +422,7 @@ def test_thresholds_can_be_overridden_through_options():
 
 
 def test_real_chesscom_games_every_player(fixtures_dir):
-    raws = json.loads((fixtures_dir / "real_chesscom_games.json").read_text())["games"]
+    raws = json.loads((fixtures_dir / "real_chesscom_games.json").read_text(encoding="utf-8"))["games"]
     users = {raw[side]["username"] for raw in raws for side in ("white", "black") if raw.get(side, {}).get("username")}
     for user in sorted(users):
         games = parse.parse_games(raws, user)  # unfiltered: variants, chess960, daily, casual all included

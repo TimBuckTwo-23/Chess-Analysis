@@ -102,7 +102,7 @@ def test_download_keeps_the_filtered_columns_and_records_where_it_came_from(tmp_
     assert [r["PuzzleId"] for r in rows] == ["aaaa1", "aaaa2", "aaaa3"]
     assert rows[2]["OpeningTags"] == "Italian_Game Italian_Game_Two_Knights_Defense"
     assert rows[0]["Moves"] == "f1c4 g8f6 f3g5" and rows[0]["NbPlays"] == "300"
-    meta = json.loads(puzzles_db.meta_path(path).read_text())
+    meta = json.loads(puzzles_db.meta_path(path).read_text(encoding="utf-8"))
     assert meta["downloaded"] == "2026-09-26" and meta["url"] == "https://example.test/p.csv.zst"
     assert meta["license"] == "CC0" and meta["rows"] == 3 and meta["rows_read"] == 12
     assert puzzles_db.read_meta(path) == meta
@@ -157,7 +157,7 @@ def test_a_failed_download_raises_and_keeps_the_old_subset(tmp_path, response):
     old.write_text("PuzzleId,FEN,Moves,Rating\nkeep,x,y,1\n")
     with pytest.raises(PuzzleDbError):
         puzzles_db.download(tmp_path, session=FakeSession(response), today=date(2026, 1, 1))
-    assert old.read_text() == "PuzzleId,FEN,Moves,Rating\nkeep,x,y,1\n"
+    assert old.read_text(encoding="utf-8") == "PuzzleId,FEN,Moves,Rating\nkeep,x,y,1\n"
     assert not list(old.parent.glob("*.part")) and not puzzles_db.meta_path(old).exists()
 
 

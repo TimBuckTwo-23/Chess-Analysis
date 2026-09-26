@@ -176,7 +176,7 @@ def test_a_loss_the_better_line_shares_is_counted_against_it_or_named_plainly():
 
 def test_a_fork_is_followed_until_the_queen_falls_and_the_chart_leaves_material_out(monkeypatch, fixtures_dir):
     pos, best, ref = case(BG6)
-    table = concepts.parse_eval_table((fixtures_dir / "coach" / "sf16_eval_sicilian_5e5.txt").read_text())
+    table = concepts.parse_eval_table((fixtures_dir / "coach" / "sf16_eval_sicilian_5e5.txt").read_text(encoding="utf-8"))
     other = {k: (v[0] - 0.5, v[1] - 0.5) for k, v in table.items()}  # every term differs by half a pawn
     ref_end = concepts.comparison_point(pos.fen, ref.moves_uci)
     monkeypatch.setattr(concepts.ClassicalEval, "table", lambda self, fen: other if fen == ref_end.fen() else table)

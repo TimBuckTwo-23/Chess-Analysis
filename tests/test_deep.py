@@ -109,7 +109,7 @@ def test_results_are_cached_per_engine_and_depth_and_reused(fake_engines, tmp_pa
     first = deep.analyse_positions(positions, cfg, [])
     files = sorted((tmp_path / "fake-1" / "d20").glob("*.json"))
     assert len(files) == 2
-    data = json.loads(files[0].read_text())
+    data = json.loads(files[0].read_text(encoding="utf-8"))
     assert data["format"] == deep.CACHE_FORMAT and data["multipv"] == 3 and data["seconds"] == deep.SEARCH_SECONDS
 
     attempts: list = []

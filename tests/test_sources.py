@@ -88,7 +88,7 @@ def test_answers_are_cached_on_disk_with_their_date_and_ttl(tmp_path):
     assert got.ok and not got.from_cache and got.retrieved == "2026-09-26"
     path = http.cache_path(tmp_path / "sources", "cloud_eval", doc["url"])
     assert path.parent.name == "cloud_eval" and re.fullmatch(r"[0-9a-f]{40}\.json", path.name)
-    stored = json.loads(path.read_text())
+    stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored["url"] == doc["url"] and stored["status"] == 200 and stored["retrieved"].startswith("2026-09-26")
     assert stored["body"] == doc["body"]
 
@@ -447,7 +447,7 @@ def test_bundle_builder_adds_uci_and_epd(tmp_path):
     src.write_text("eco\tname\tpgn\nB20\tSicilian Defense\t1. e4 c5\nX00\tBroken\t1. e5\n", encoding="utf-8")
     out = tmp_path / "openings.tsv"
     assert openings_db.write_bundle([src], out) == 1
-    assert out.read_text().splitlines()[1].split("\t")[3:] == [
+    assert out.read_text(encoding="utf-8").splitlines()[1].split("\t")[3:] == [
         "e2e4 c7c5", "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
     ]
 
@@ -481,7 +481,7 @@ def _words(text: str) -> str:
 
 
 def test_concept_notes_cite_real_chapters():
-    contents = json.loads((Path(__file__).parent / "fixtures" / "sources" / "gutenberg_contents.json").read_text())
+    contents = json.loads((Path(__file__).parent / "fixtures" / "sources" / "gutenberg_contents.json").read_text(encoding="utf-8"))
     data = concept_notes.load()
     wanted = {"king_safety", "development", "pawn_structure", "holes_outposts", "bishop_pair", "open_files",
               "passed_pawns", "piece_activity", "space"}

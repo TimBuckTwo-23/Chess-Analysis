@@ -462,7 +462,7 @@ def test_what_it_wins_material_or_concepts():
 
 def test_concepts_chart_and_sources_with_a_stockfish_16_table(motif_hooks, monkeypatch, fixtures_dir):
     """The comparison reads Stockfish 16's table at both line ends (faked here from a recorded table)."""
-    table = concepts.parse_eval_table((fixtures_dir / "coach" / "sf16_eval_sicilian_5e5.txt").read_text())
+    table = concepts.parse_eval_table((fixtures_dir / "coach" / "sf16_eval_sicilian_5e5.txt").read_text(encoding="utf-8"))
     worse = {**table, "Mobility": (0.80, 0.90), "King safety": (0.60, 0.10)}  # White's side: worse for Black
     pos = _position()
     result = _result(pos)
