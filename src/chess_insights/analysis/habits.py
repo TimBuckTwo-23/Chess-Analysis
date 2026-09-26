@@ -23,6 +23,11 @@ A session-length finding must survive leaving out the games played straight afte
 loss when that is a finding too (later games in a session follow losses more often).
 Games with fewer than 4 plies stay on the timeline (they still end a session or
 a streak) but are not scored.
+
+Every finding carries the games per format behind it (``Insight.formats``) and a small
+chart split by format (the finding's games next to the ones they were compared with, in
+all formats and in each format with enough games), so you can see whether it holds in
+bullet, blitz and rapid alike. The pictures never change which findings there are.
 """
 
 from __future__ import annotations
@@ -54,6 +59,8 @@ from ..stats import (
     summarize,
     vs_rating,
 )
+from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, comparison_chart, format_counts
+from .openings import format_groups, formats_note, in_format, mixed_formats_note, split_note, versus_chart
 from .results import MAX_EXAMPLES, recent_urls
 from .time_mgmt import time_spent
 
@@ -227,18 +234,49 @@ def day_part(moment: datetime, tz: tzinfo) -> int:
 
 
 # --------------------------------------------------------------------------- tables & charts
+def _rated_formats(games: Sequence[Game]) -> dict[str, int]:
+    """Games per format behind a score-vs-rating finding: the rated ones (all of them when none is rated)."""
+    rated = [g for g in games if g.expected_score is not None]
+    return format_counts(rated or games)
+
+
 def _score_cells(s: ScoreSummary) -> list[Any]:
     return [s.n, s.wdl, s.rated_score, s.expected, s.delta]
 
 
-def _score_table(title: str, first: str, rows: Sequence[tuple[str, ScoreSummary]], note: str) -> Table:
-    return Table(
-        title=title,
-        columns=[first, *SCORE_COLUMNS],
-        rows=[[label, *_score_cells(s)] for label, s in rows],
-        formats=["text", *SCORE_FORMATS],
-        note=note,
-    )
+def _score_table(
+    title: str,
+    first: str,
+    rows: Sequence[tuple[str, ScoreSummary]],
+    note: str,
+    games: Optional[Sequence[Sequence[Game]]] = None,
+    min_games: int = MIN_FORMAT_GAMES,
+) -> Table:
+    """One row per group. With ``games`` (each row's games) spanning two or more formats, one more "vs rating"
+    column per format (blank below ``min_games`` rated games), the format mix in the note, and the per-format
+    columns among the ones a phone shows first."""
+    columns, formats = [first, *SCORE_COLUMNS], ["text", *SCORE_FORMATS]
+    cells = [[label, *_score_cells(s)] for label, s in rows]
+    key_columns = None
+    if games is not None:
+        every = [g for gs in games for g in gs]
+        counts = format_counts(every)
+        if len(counts) > 1:
+            added = []
+            for tc in counts:
+                added.append(f"{FORMAT_NAMES.get(tc, tc)} vs rating")
+                formats.append("signed_pct")
+                for row, gs in zip(cells, games, strict=True):
+                    fs = summarize(in_format(gs, tc))
+                    row.append(fs.delta if fs.n_rated >= min_games else None)
+            key_columns = [0, columns.index("vs rating")] + list(range(len(columns), len(columns) + len(added)))
+            columns += added
+            names = ", ".join(f"“{c}”" for c in added)
+            note += (
+                f" Formats: {formats_note(counts)}. {names}: the same, for that format's games only (blank: fewer "
+                f"than {min_games} rated games)."
+            )
+    return Table(title=title, columns=columns, rows=cells, formats=formats, note=note, key_columns=key_columns)
 
 
 def _delta_chart(
@@ -280,7 +318,7 @@ def session_sizes(timeline: Sequence[TimelineGame]) -> dict[int, int]:
     return sizes
 
 
-def session_table(sizes: dict[int, int]) -> Table:
+def session_table(sizes: dict[int, int], note: str = "") -> Table:
     rows = []
     for label, lo, hi in SESSION_SIZES:
         matching = [n for n in sizes.values() if n >= lo and (hi is None or n <= hi)]
@@ -290,6 +328,7 @@ def session_table(sizes: dict[int, int]) -> Table:
         columns=["Games in the session", "Sessions", "Games"],
         rows=rows,
         formats=["text", "int", "int"],
+        note=note,
     )
 
 
@@ -342,6 +381,14 @@ def tilt_insight(
                 "If you catch yourself pressing 'New game' seconds after a loss, switch to puzzles instead.",
             ],
             example_games=recent_urls(losses),
+            formats=_rated_formats(after),
+            chart=versus_chart(
+                f"Score vs rating: games started within {w} min of a loss, and your other games",
+                "After a loss",
+                after,
+                "Other games",
+                rest,
+            ),
         ),
         test,
         a,
@@ -404,6 +451,7 @@ def fatigue_insight(
             if not holds or test2.mean > -th.min_effect:
                 continue
         losses = [g for g in late if g.outcome == "loss"]
+        earlier = [t.game for t in scored_timeline if t.position < first_late]
         candidate = Insight(
             id=f"{KEY}.weakness.long-sessions",
             kind="weakness",
@@ -423,6 +471,14 @@ def fatigue_insight(
                 "End the session after the first careless loss instead of playing 'one more'.",
             ],
             example_games=recent_urls(losses),
+            formats=_rated_formats(late),
+            chart=versus_chart(
+                f"Score vs rating: from the {_ordinal(first_late)} game of a session on, and before",
+                f"Game {first_late} on",
+                late,
+                f"Games 1–{first_late - 1}",
+                earlier,
+            ),
         )
         if best is None or candidate.priority > best.priority:
             best = candidate
@@ -470,6 +526,7 @@ def time_of_day_insights(
         else:
             title = f"You score below your rating in {name} games ({label})"
         losses = [g for g in parts[i] if g.outcome == "loss"]
+        ids = {id(g) for g in parts[i]}
         out.append(
             Insight(
                 id=f"{KEY}.weakness.time-of-day-{start[:2]}-{end[:2]}",
@@ -502,6 +559,14 @@ def time_of_day_insights(
                     "If you do play then, choose a slower time control and stop after the first loss.",
                 ],
                 example_games=recent_urls(losses),
+                formats=_rated_formats(parts[i]),
+                chart=versus_chart(
+                    f"Score vs rating: games started {label} ({tz_name}), and at other times",
+                    f"Started {label}",
+                    parts[i],
+                    "Other times",
+                    [g for g in scored if id(g) not in ids],
+                ),
             )
         )
     return out, [adjusted.get(i) for i in range(len(parts))]
@@ -577,6 +642,14 @@ def late_night_insight(
                 "If you do play late, choose a slower time control and stop after the first loss.",
             ],
             example_games=recent_urls(losses),
+            formats=_rated_formats(late),
+            chart=versus_chart(
+                f"Score vs rating: games started {start}–{end} ({tz_name}), and at other times",
+                f"Started {start}–{end}",
+                late,
+                "Other times",
+                [g for g in scored if id(g) not in ids],
+            ),
         ),
         stats,
     )
@@ -674,8 +747,39 @@ def rematch_insight(
                 "Spend two minutes on the lost game before a rematch: what did this opponent do that worked?",
             ],
             example_games=recent_urls(games, "loss"),
+            formats=format_counts(games),
+            chart=rematch_chart(games),
         ),
         stats,
+    )
+
+
+def rematch_chart(games: Sequence[Game]) -> Chart:
+    """Your score in immediate rematches next to what your ratings predicted, overall and per format."""
+    bars, small = format_groups(games, rated=False)
+    you: list[Optional[float]] = []
+    predicted: list[Optional[float]] = []
+    rows = []
+    for label, tc in bars:
+        s = summarize(in_format(games, tc))
+        you.append(s.score)
+        predicted.append(s.expected)
+        rows.append([label, s.n, s.wdl, s.score, s.expected, s.delta])
+    title = "Immediate rematches after a loss: your score and what your ratings predicted"
+    note = " ".join(x for x in ("Rating predicts: the Elo expected score for those games.", split_note(games, small)) if x)
+    return comparison_chart(
+        title,
+        [label for label, _ in bars],
+        [("You", you), ("Rating predicts", predicted)],
+        value_format="pct",
+        note=note,
+        table=Table(
+            title=title,
+            columns=["Format", *SCORE_COLUMNS],
+            rows=rows,
+            formats=["text", *SCORE_FORMATS],
+            note=note,
+        ),
     )
 
 
@@ -689,6 +793,44 @@ def _streak_advice(after_two: ScoreSummary) -> str:
             "is not the problem: look at what the lost games had in common."
         )
     return "Take a short break after a loss before starting the next game."
+
+
+def add_streak_visuals(ins: Insight, timeline: Sequence[TimelineGame]) -> None:
+    """Formats and chart for the losing-streak observation: the longest run of losses over all your live games
+    and within each format's games (in order, the other formats' games left out)."""
+    games = [t.game for t in timeline]
+    ins.formats = format_counts(games)
+    bars, small = format_groups(games, rated=False)
+    values: list[Optional[float]] = []
+    rows = []
+    for label, tc in bars:
+        run = longest_losing_streak([t for t in timeline if tc is None or t.game.time_class == tc])
+        values.append(len(run))
+        rows.append([label, sum(1 for g in games if tc is None or g.time_class == tc), len(run)])
+    title = "Longest losing streak, by format"
+    note = " ".join(
+        x
+        for x in (
+            "Consecutive losses. Per format: counting only that format's games, in the order you played them "
+            "(games in other formats in between are skipped, so a format's streak can be longer than the overall one).",
+            split_note(games, small),
+        )
+        if x
+    )
+    ins.chart = comparison_chart(
+        title,
+        [label for label, _ in bars],
+        [("Longest losing streak", values)],
+        value_format="int",
+        note=note,
+        table=Table(
+            title=title,
+            columns=["Format", "Games", "Longest losing streak"],
+            rows=rows,
+            formats=["text", "int", "int"],
+            note=note,
+        ),
+    )
 
 
 def streak_insight(streak: list[Game], after_two: ScoreSummary, n_games: int, th: Thresholds) -> Optional[Insight]:
@@ -825,49 +967,70 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     part_rows = [(label, summarize(p)) for (label, _), p in zip(DAY_PARTS, parts, strict=True)]
     weekday_rows = [(calendar.day_name[i], summarize(weekdays[i])) for i in range(7)]
 
+    streak_ins = streak_insight(streak, after_two, len(timeline), th)
+    if streak_ins is not None:
+        add_streak_visuals(streak_ins, timeline)
     insights = [i for i in (tilt, fatigue) if i] + tod_insights
-    insights += [i for i in (rematch, streak_insight(streak, after_two, len(timeline), th)) if i]
+    insights += [i for i in (rematch, streak_ins) if i]
     if len(timeline) < th.min_games:
         insights = []
 
     diff_note = "vs rating = your score minus what your rating predicts, per game (+5% = 5 points per 100 games)."
+    mixed = mixed_formats_note(scored)
+    fatigue_games = [
+        [t.game for t in scored_tl if t.position >= lo and (hi is None or t.position <= hi)] for _, lo, hi in FATIGUE_BUCKETS
+    ]
     paired = [
         _delta_chart(
             "Score vs rating after a loss, a win or a break",
             situation_rows,
-            "Per game, by when the game started relative to the previous one.",
+            "Per game, by when the game started relative to the previous one." + mixed,
             th.min_chart_games,
             _score_table(
                 "After a loss, a win or a break",
                 "Game started",
                 situation_rows,
                 f"When each game started relative to the end of your previous live game. {diff_note}",
+                [groups[key] for key, _ in situations],
+                th.min_chart_games,
             ),
         ),
         _delta_chart(
             "Score vs rating by game number in a session",
             fatigue_rows,
-            "Per game, against what your rating predicts.",
+            "Per game, against what your rating predicts." + mixed,
             th.min_chart_games,
             _score_table(
                 "By game number in a session",
                 "Game in the session",
                 fatigue_rows,
                 f"A session ends when you pause for more than {th.session_gap_min:g} minutes. {diff_note}",
+                fatigue_games,
+                th.min_chart_games,
             ),
         ),
         _delta_chart(
             f"Score vs rating by time of day ({tz_name})",
             part_rows,
-            "Per game, by start time.",
+            "Per game, by start time." + mixed,
             th.min_chart_games,
-            _score_table(f"By time of day ({tz_name})", "Started", part_rows, f"Start times in {tz_name}. {diff_note}"),
+            _score_table(
+                f"By time of day ({tz_name})",
+                "Started",
+                part_rows,
+                f"Start times in {tz_name}. {diff_note}",
+                parts,
+                th.min_chart_games,
+            ),
         ),
     ]
     # a chart with no bar to draw gives way to its table
     charts = [c for c in paired if any(v is not None for v in c.series[0].values)]
-    tables = [session_table(sizes)] + [c.table for c in paired if c not in charts and c.table is not None]
-    tables.append(_score_table("By weekday", "Day", weekday_rows, f"Days in {tz_name}. {diff_note}"))
+    tables = [session_table(sizes, mixed_formats_note([t.game for t in timeline]).strip())]
+    tables += [c.table for c in paired if c not in charts and c.table is not None]
+    tables.append(
+        _score_table("By weekday", "Day", weekday_rows, f"Days in {tz_name}. {diff_note}", weekdays, th.min_chart_games)
+    )
 
     kpis = [
         Kpi("Sessions", n_sessions, "int", hint=f"a pause of more than {th.session_gap_min:g} min starts a new one"),
@@ -888,6 +1051,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         stats={
             "n": len(timeline),
             "n_scored": len(scored),
+            "formats": format_counts([t.game for t in timeline]),
             "sessions": n_sessions,
             "games_per_session": avg,
             "longest_session": longest,
