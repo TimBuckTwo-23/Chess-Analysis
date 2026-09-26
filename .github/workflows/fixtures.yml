@@ -1,0 +1,37 @@
+# Record public reference data (Lichess puzzles, API responses, opening names, book headings) that
+# this sandbox-free runner can reach, and save it on the `fixtures` branch for the tests to use.
+name: fixtures
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [scripts/record_fixtures.py, .github/workflows/fixtures.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install chess zstandard
+      - run: python scripts/record_fixtures.py fixtures-out
+      - name: Save on the fixtures branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dest="$RUNNER_TEMP/fixtures-branch"
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY"
+          git config --global user.name "chess-insights"
+          git config --global user.email "chess-insights@users.noreply.github.com"
+          mkdir -p "$dest" && git -C "$dest" init --quiet -b fixtures
+          cp -r fixtures-out/. "$dest/"
+          git -C "$dest" add -A
+          git -C "$dest" commit --quiet -m "Recorded fixtures ($(date -u +%Y-%m-%d))"
+          git -C "$dest" push --quiet --force "$remote" fixtures
