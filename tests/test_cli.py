@@ -932,3 +932,44 @@ def test_format_views_are_listed_in_the_summary(capsys):
     report.format_reports = {"blitz": report, "rapid": report}
     cli.print_summary(report)
     assert "Formats: 20 bullet, 180 blitz, 100 rapid. Separate views in the report: blitz, rapid." in capsys.readouterr().out
+
+
+def test_puzzle_db_may_be_the_folder_puzzles_db_wrote_to(chesscom, run, tmp_path, fake_engine, fake_coaching):
+    """The GitHub workflow keeps the database in its own cached folder and passes that folder."""
+    from chess_insights.coach.puzzles_db import subset_path
+
+    folder = tmp_path / "puzzle-cache"
+    folder.mkdir()
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--puzzle-db", str(folder),
+                          "--out", str(tmp_path / "f"), "--formats", "json")
+    assert code == 0 and "no puzzle file" in stderr and fake_coaching[-1].puzzle_db is None  # a failed download
+    subset = subset_path(folder)
+    subset.parent.mkdir(parents=True)
+    subset.write_text("PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n", encoding="utf-8")
+    code, _, stderr = run("report", "testerbob", "--engine", "--coach", "--puzzle-db", str(folder),
+                          "--out", str(tmp_path / "f"), "--formats", "json")
+    assert code == 0 and "no puzzle file" not in stderr and fake_coaching[-1].puzzle_db == subset
+
+
+def test_engine_time_classes_reach_the_analysis_options(chesscom, run, tmp_path, fake_engine, monkeypatch):
+    seen = {}
+    real = pipeline.run_analysis
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs["options"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "run_analysis", spy)
+    code, _, stderr = run("report", "testerbob", "--engine", "--engine-time-class", "blitz", "--engine-time-class",
+                          "rapid", "--out", str(tmp_path / "t"), "--formats", "json")
+    assert code == 0, stderr
+    assert seen["engine_time_classes"] == ["blitz", "rapid"] and seen["engine_sample"] == "recent"
+
+
+def test_ask_with_an_unreadable_report_says_so_once(run, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "testerbob.json").write_text("{half a report", encoding="utf-8")
+    code, _, stderr = run("ask", "testerbob", "why?")
+    assert code == 1 and "could not read the report" in stderr
+    assert "previous" not in stderr and "progress" not in stderr  # not the --previous wording

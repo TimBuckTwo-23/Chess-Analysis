@@ -115,13 +115,12 @@ jobs:
 
       # Downloaded months, Stockfish results and the coaching's lines are kept between runs, so a
       # re-run only fetches the current month and analyses new games and positions. (The puzzle
-      # database has its own monthly cache below.)
+      # database has its own folder and monthly cache below; this path is unchanged so that the
+      # caches saved by earlier runs still restore.)
       - name: Restore game and engine cache
         uses: actions/cache@v4
         with:
-          path: |
-            .chess-insights-cache
-            !.chess-insights-cache/puzzles
+          path: .chess-insights-cache
           key: chess-insights-${{ matrix.username }}-${{ github.run_id }}
           restore-keys: chess-insights-${{ matrix.username }}-
 
@@ -137,7 +136,7 @@ jobs:
         if: env.ENGINE == 'true' && env.COACH == 'true'
         uses: actions/cache/restore@v4
         with:
-          path: .chess-insights-cache/puzzles
+          path: .chess-insights-puzzles
           key: lichess-puzzles-${{ steps.month.outputs.month }}
           restore-keys: lichess-puzzles-
 
@@ -146,13 +145,13 @@ jobs:
         if: env.ENGINE == 'true' && env.COACH == 'true' && steps.puzzles.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 30
-        run: chess-insights puzzles-db --cache-dir .chess-insights-cache
+        run: chess-insights puzzles-db --cache-dir .chess-insights-puzzles
 
       - name: Save the puzzle database
         if: steps.puzzles_download.outcome == 'success'
         uses: actions/cache/save@v4
         with:
-          path: .chess-insights-cache/puzzles
+          path: .chess-insights-puzzles
           key: lichess-puzzles-${{ steps.month.outputs.month }}
 
       # The previous report (for progress against its targets and the puzzles due for review).
@@ -184,6 +183,7 @@ jobs:
                    --engine-sample "$ENGINE_SAMPLE" --workers "$(nproc)" --puzzles)
             if [ "$COACH" = "true" ]; then
               args+=(--coach --coach-depth "$COACH_DEPTH" --coach-max "$COACH_MAX")
+              if [ -d .chess-insights-puzzles ]; then args+=(--puzzle-db .chess-insights-puzzles); fi
               if [ -n "$ANTHROPIC_API_KEY" ]; then args+=(--coach-llm); fi
             fi
           fi

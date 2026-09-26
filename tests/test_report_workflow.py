@@ -87,7 +87,14 @@ def test_every_option_the_workflow_passes_exists():
     known = {a for action in cli.build_parser()._subparsers._group_actions[0].choices["report"]._actions
              for a in action.option_strings}
     assert options <= known, options - known
-    assert "puzzles-db --cache-dir .chess-insights-cache" in block("Download the puzzle database (once a month)")
+
+
+def test_the_game_and_engine_cache_path_is_unchanged():
+    """actions/cache keys a cache's version on its paths: changing them would make every cache saved by earlier runs
+    unrestorable, so the first run after an upgrade would download every game and re-run Stockfish from scratch."""
+    restore = block("Restore game and engine cache")
+    assert "path: .chess-insights-cache\n" in restore and "!" not in restore.split("with:", 1)[1]
+    assert "--cache-dir .chess-insights-cache " in block("Analyse games")
 
 
 def test_previous_report_comes_from_the_reports_branch():
@@ -103,10 +110,13 @@ def test_puzzle_database_is_downloaded_at_most_once_a_month_and_never_blocks():
     restore, download, save = (block(n) for n in (
         "Restore the puzzle database", "Download the puzzle database (once a month)", "Save the puzzle database"))
     assert "actions/cache/restore@v4" in restore and "key: lichess-puzzles-${{ steps.month.outputs.month }}" in restore
-    assert "path: .chess-insights-cache/puzzles" in restore and "path: .chess-insights-cache/puzzles" in save
+    assert "path: .chess-insights-puzzles\n" in restore and "path: .chess-insights-puzzles\n" in save
     assert "steps.puzzles.outputs.cache-hit != 'true'" in download and "continue-on-error: true" in download
+    assert "puzzles-db --cache-dir .chess-insights-puzzles" in download
     assert "actions/cache/save@v4" in save and "steps.puzzles_download.outcome == 'success'" in save
-    assert "!.chess-insights-cache/puzzles" in block("Restore game and engine cache")  # not cached twice
+    # the analysis finds it only when it is there (a failed first download leaves the drills on Lichess's pages)
+    assert "if [ -d .chess-insights-puzzles ]; then args+=(--puzzle-db .chess-insights-puzzles); fi" in block(
+        "Analyse games")
     order = [WORKFLOW.index(f"- name: {n}") for n in ("Restore the puzzle database",
              "Download the puzzle database (once a month)", "Save the puzzle database", "Analyse games")]
     assert order == sorted(order)

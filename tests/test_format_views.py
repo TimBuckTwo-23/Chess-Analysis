@@ -62,7 +62,7 @@ def test_views_only_for_formats_with_enough_games_each_with_only_its_games(monke
     assert blitz.time_class == "blitz" and blitz.n_games == 70 and blitz.formats == {"blitz": 70}
     assert blitz.engine_formats == {"blitz": 3} and rapid.engine_formats == {}
     assert blitz.filters == "blitz only, rated + casual, standard chess"
-    assert blitz.engine_note == "Stockfish 16 at depth 12 on 3 of your blitz games."
+    assert blitz.engine_note == "Stockfish 16 at depth 12 on 3 of your 70 blitz games (the most recent)."
     assert "None of your rapid games were in the engine sample" in rapid.engine_note
     assert "--engine-sample balanced" in rapid.engine_note
     assert blitz.format_reports == {} and rapid.format_reports == {}
@@ -221,3 +221,38 @@ def test_practice_actions_with_either_signature(monkeypatch, fake_coach, new_sig
         assert any("fork" in a for item in report.format_reports["blitz"].study_plan for a in item.actions)
     else:
         assert seen == ["old"] * 3
+
+
+def test_engine_note_of_a_view_whose_format_was_not_sent_to_stockfish(monkeypatch):
+    """With --engine-time-class the hint to balance the sample would not help: say which formats were sent."""
+    games = multi_format_games()
+    evals = {g.game_id: make_game_eval(g.game_id, [], engine="Stockfish 16", depth=12)
+             for g in games if g.game_id in {"blitz-0", "blitz-1"}}
+    note = "Stockfish 16 at depth 12 on the 2 most recent blitz games: all blitz."
+    report = pipeline.run_analysis(games, "t", evals=evals, modules=capture(monkeypatch, []), engine_note=note,
+                                   options={"engine_sample": "recent", "engine_time_classes": ["blitz"]})
+    rapid = report.format_reports["rapid"].engine_note
+    assert rapid.startswith("None of your rapid games were in the engine sample (Stockfish 16")
+    assert rapid.endswith("Only blitz games were sent to Stockfish.") and "--engine-sample" not in rapid
+    assert report.format_reports["blitz"].engine_note == (
+        "Stockfish 16 at depth 12 on 2 of your 70 blitz games (the most recent).")
+
+
+def test_view_engine_note_wording():
+    from chess_insights.context import AnalysisContext
+
+    games = multi_format_games(n_bullet=0, n_blitz=3, n_rapid=2)
+    evals = {g.game_id: make_game_eval(g.game_id, [], engine="Stockfish 16", depth=12) for g in games}
+    whole = AnalysisContext("t", games, evals)
+    blitz = AnalysisContext("t", [g for g in games if g.time_class == "blitz"],
+                            {k: v for k, v in evals.items() if k.startswith("blitz")})
+    assert pipeline.view_engine_note("blitz", blitz, whole, "x") == "Stockfish 16 at depth 12 on 3 of your 3 blitz games."
+    empty = AnalysisContext("t", blitz.games, {})
+    assert pipeline.view_engine_note("blitz", empty, whole, "") == (
+        "None of your blitz games were in the engine sample. A balanced engine sample (--engine-sample balanced, the "
+        "default on GitHub) takes games from every format.")
+    daily = AnalysisContext("t", [make_game(time_class="daily")], {})
+    whole.options["engine_sample"] = "balanced"
+    assert pipeline.view_engine_note("daily", daily, whole, "SF.") == (
+        "None of your daily games were in the engine sample (SF). A balanced sample takes daily games only when "
+        "asked to (--engine-time-class).")

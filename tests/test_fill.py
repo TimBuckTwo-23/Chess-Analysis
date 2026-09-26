@@ -172,3 +172,111 @@ def test_a_broken_evidence_value_never_sinks_the_report():
     item.evidence = Weird()
     fill.fill(one_module(item), ctx_of([make_game()]))  # logged, not raised
     assert item.chart is None
+
+
+# --------------------------------------------------------------------------- review fixes: formats of one position / opening
+SICILIAN = ["e4", "c5", "Nf3", "e6", "d4", "cxd4", "Nxd4", "Nc6", "Nc3"]  # Black to move: SICILIAN_FEN
+
+
+def sicilian(tc, color="black", **kw):
+    return make_game(time_class=tc, color=color, moves_san=SICILIAN + ["e5", "Ndb5", "d6"], **kw)
+
+
+def test_a_position_finding_gets_the_formats_of_the_games_that_reached_it():
+    """Not every format of the module: the games in which the position came up with you to move."""
+    reached = [sicilian("blitz") for _ in range(3)] + [sicilian("rapid")]
+    as_white = sicilian("bullet", color="white")  # the same position, but not with you to move
+    elsewhere = [make_game(time_class="bullet", color="black") for _ in range(5)]  # never reach it
+    games = reached + [as_white] + elsewhere
+    evals = {g.game_id: make_game_eval(g.game_id, []) for g in games}
+    ctx = ctx_of(games, evals)
+    found = ins("mistakes.weakness.p", {"fen": SICILIAN_FEN, "move": "e5", "reached": 4}, category="positions")
+    wrong = ins("mistakes.weakness.q", {"fen": SICILIAN_FEN, "move": "e5", "reached": 7}, category="positions")
+    fill.fill_formats(one_module(found, wrong, key="mistakes"), ctx)
+    assert found.formats == {"blitz": 3, "rapid": 1}
+    assert wrong.formats == {"bullet": 6, "blitz": 3, "rapid": 1}  # counts disagree: the module's games instead
+    assert fill.games_reaching([], games) == {}
+
+
+def test_an_opening_finding_gets_the_formats_of_that_openings_games():
+    caro = [make_game(time_class="blitz", color="black", opening_family="Caro-Kann Defense", outcome=o)
+            for o in ("loss", "loss", "win")]
+    caro.append(make_game(time_class="rapid", color="black", opening_family="Caro-Kann Defense", outcome="loss"))
+    caro_as_white = make_game(time_class="bullet", color="white", opening_family="Caro-Kann Defense")
+    other = [make_game(time_class="bullet", color="black", opening_family="Sicilian Defense") for _ in range(4)]
+    games = caro + [caro_as_white] + other
+    scored = ins("openings.weakness.black.caro", {"color": "black", "family": "Caro-Kann Defense", "n": 4})
+    quick = ins("openings.weakness.early", {"color": "black", "family": "Caro-Kann Defense", "losses": 3, "wins": 1})
+    engine = ins("engine.x", {"colour": "black", "family": "Caro-Kann Defense", "games": 4})
+    miscounted = ins("openings.weakness.y", {"color": "black", "family": "Caro-Kann Defense", "n": 9})
+    by_colour = ins("openings.observation.breadth-black", {"color": "black", "games": 8})
+    colour_only = ins("openings.observation.z", {"color": "black"})  # nothing to confirm which games
+    fill.fill_formats(one_module(scored, quick, engine, miscounted, by_colour, colour_only, key="openings"),
+                      ctx_of(games))
+    assert scored.formats == quick.formats == engine.formats == {"blitz": 3, "rapid": 1}
+    everything = {"bullet": 5, "blitz": 3, "rapid": 1}
+    assert miscounted.formats == everything and colour_only.formats == everything
+    assert by_colour.formats == {"bullet": 4, "blitz": 3, "rapid": 1}
+
+
+def test_one_odd_finding_does_not_leave_the_others_without_formats():
+    class Weird(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("odd evidence")
+
+    odd, fine = ins("results.odd"), ins("results.fine", {"n": 3})
+    odd.evidence = Weird()
+    fill.fill_formats(one_module(odd, fine), ctx_of([make_game(time_class="rapid")]))
+    assert odd.formats == {} and fine.formats == {"rapid": 1}
+
+
+# --------------------------------------------------------------------------- review fixes: pictures
+def test_time_pressure_without_the_opponents_numbers_shows_your_own_comparison():
+    c = chart_of({"time_class": "blitz", "per100_low": 9.0, "per100_ok": 3.0, "opp_per100_low": None,
+                  "opp_per100_ok": 2.5, "opp_moves_low": 0}, category="time").chart
+    assert c.labels == ["Short of time", "With time left"] and values(c) == {"You": [9.0, 3.0]}
+    assert "you vs your opponents" not in c.title and "too few" in c.note
+    # a chart about you against your opponents is not drawn with one side missing
+    assert chart_of({"rate": 0.7, "opp_rate": None}).chart is None
+
+
+def test_a_chart_is_only_drawn_for_the_finding_it_describes():
+    """"per100" is blunders in one finding, one phase's mistakes and blunders in another: without "rest_per100"
+    for the phase, the blunder chart must not be drawn for it."""
+    phase = chart_of({"phase": "endgame", "per100": 9.0, "opp_per100": 6.0}, category="phases").chart
+    assert phase is None or "Blunders" not in phase.title
+    blunders = chart_of({"blunders": 40, "per100": 4.0, "opp_per100": 3.0, "games": 90}, category="blunders").chart
+    assert blunders.title.startswith("Blunders per 100 moves") and values(blunders) == {
+        "You": [4.0], "Your opponents": [3.0]}
+
+
+def test_lost_positions_saved():
+    c = chart_of({"lost_positions": 29, "saved": 4, "save_rate": 4 / 29}, category="conversion").chart
+    assert values(c) == {"Games": [4.0, 25.0]} and c.value_format == "int" and "29 games" in c.note
+    assert chart_of({"lost_positions": 3, "saved": 5}).chart is None  # impossible numbers: no picture
+
+
+def test_the_board_names_the_moves_with_their_numbers_and_needs_your_move():
+    item = chart_of({"fen": SICILIAN_FEN, "move": "e5", "best": "a6"}, category="positions")
+    assert item.diagram.title == "You played 5...e5 here"
+    assert item.diagram.caption == "Red: your move 5...e5. Green: Stockfish's choice, 5...a6."
+    same = chart_of({"fen": SICILIAN_FEN, "move": "e5", "best": "e5"}, category="positions").diagram
+    assert [a.kind for a in same.arrows] == ["played"] and "Green" not in same.caption
+    only_best = chart_of({"fen": SICILIAN_FEN, "move": "Qxh7", "best": "a6"}, category="positions")
+    assert only_best.diagram is None  # a board without your move would not show what the finding is about
+    castle = chart_of({"fen": "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 20", "move": "O-O", "best": "O-O-O"},
+                      category="positions").diagram
+    assert [(a.start, a.end, a.kind) for a in castle.arrows] == [("e1", "g1", "played"), ("e1", "c1", "best")]
+    assert castle.title == "You played 20.O-O here" and castle.orientation == "white"
+
+
+def test_numpy_counts_are_counts():
+    import numpy as np
+
+    games = [make_game(time_class="blitz", color="black", opening_family="Caro-Kann Defense") for _ in range(3)]
+    games += [make_game(time_class="rapid", color="white") for _ in range(2)]
+    right = ins("openings.a", {"color": "black", "family": "Caro-Kann Defense", "n": np.int64(3)})
+    wrong = ins("openings.b", {"color": "black", "family": "Caro-Kann Defense", "n": np.int64(7)})
+    clock = ins("time.c", {"time_class": "blitz", "n": np.int64(2)})
+    fill.fill_formats(one_module(right, wrong, clock, key="openings"), ctx_of(games))
+    assert right.formats == {"blitz": 3} and wrong.formats == {"blitz": 3, "rapid": 2} and clock.formats == {"blitz": 2}

@@ -3,9 +3,10 @@
 The analysis modules set ``Insight.formats``, ``Insight.chart`` and ``Insight.diagram`` where they know best;
 these fallbacks only fill what a module left empty, from facts it already recorded:
 
-* ``fill_formats``: the time classes of the games the module analysed (the engine-analysed games for the engine
-  sections), narrowed to the format(s) a finding names in its evidence ("time_class", "time_classes", a rating
-  pool such as "Blitz").
+* ``fill_formats``: the time classes of the games behind a finding: the format(s) its evidence names
+  ("time_class", "time_classes", a rating pool such as "Blitz"); for one position, the games in which it came up;
+  for one colour (and opening), those games; else the games the module analysed (the engine-analysed games for
+  the engine sections).
 * ``fill_visuals``: a small chart built from the finding's evidence (your score against the rating's
   expectation, your rate against your opponents' in the same games ...), or the board for a finding about one
   position. Evidence that fits none of the patterns below leaves the finding without a picture rather than
@@ -19,11 +20,22 @@ from __future__ import annotations
 
 import logging
 import math
+import numbers
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
+
+import chess
 
 from .models import TIME_CLASSES, Chart, Diagram, Game, Insight, ModuleResult
 from .stats import MINUS, per100_games
-from .visuals import FORMAT_NAMES, comparison_chart, format_counts, ordered_formats, position_diagram
+from .visuals import (
+    FORMAT_NAMES,
+    comparison_chart,
+    format_counts,
+    move_label,
+    ordered_formats,
+    parse_move,
+    position_diagram,
+)
 
 if TYPE_CHECKING:
     from .context import AnalysisContext
@@ -67,8 +79,16 @@ def named_formats(evidence: dict[str, Any]) -> list[str]:
     return names
 
 
+def _whole(value: Any) -> Optional[int]:
+    """A whole number (numpy integers included) as an int; None for anything else, booleans too."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        return None
+    return int(value)
+
+
 def _count(value: Any) -> Optional[int]:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+    n = _whole(value)
+    return n if n is not None and n > 0 else None
 
 
 def _games_behind(evidence: dict[str, Any], tc: str, single: bool) -> Optional[int]:
@@ -82,22 +102,128 @@ def _games_behind(evidence: dict[str, Any], tc: str, single: bool) -> Optional[i
     return _count(evidence.get("n")) if single else None
 
 
+def _epd(fen: Any) -> Optional[str]:
+    """The position part of a FEN (what ``chess.Board.epd()`` gives for the same board); None for anything else."""
+    if not isinstance(fen, str):
+        return None
+    fields = fen.split()
+    return " ".join(fields[:4]) if len(fields) >= 4 else None
+
+
+def games_reaching(epds: Iterable[str], games: Iterable[Game]) -> dict[str, list[Game]]:
+    """For each position (EPD), the games in which it came up with you to move; a game counts once.
+
+    The same scan as the repeated-mistakes module's "reached" count (transpositions included), so a finding about
+    one position can say which formats its games were. A game stops being searched once fewer pieces are left than
+    in every position looked for (captures are irreversible); a game that doesn't replay keeps what was counted.
+    """
+    wanted = set(epds)
+    reached: dict[str, list[Game]] = {}
+    if not wanted:
+        return reached
+    fewest = min(sum(ch.isalpha() for ch in epd.split(" ", 1)[0]) for epd in wanted)
+    for game in games:
+        seen: set[str] = set()
+        try:
+            board = chess.Board(game.initial_fen or chess.STARTING_FEN, chess960=game.rules == "chess960")
+            for ply, san in enumerate(game.moves_san):
+                if chess.popcount(board.occupied) < fewest:
+                    break
+                if game.is_my_ply(ply):
+                    epd = board.epd()
+                    if epd in wanted and epd not in seen:
+                        seen.add(epd)
+                        reached.setdefault(epd, []).append(game)
+                board.push_san(san)
+        except ValueError:
+            continue
+    return reached
+
+
+def _counts_agree(evidence: dict[str, Any], games: Sequence[Game], keys: Sequence[str]) -> bool:
+    """Whether ``games`` are the games the evidence counts. The first of ``keys`` present decides: a game count
+    must equal ``len(games)``; "wins" and "losses" (checked together) must equal those outcomes in ``games``.
+    With none of them present there is nothing to contradict."""
+    for key in keys:
+        n = _whole(evidence.get(key))
+        if n is None:
+            continue
+        if key in ("wins", "losses"):
+            return all(
+                sum(g.outcome == outcome for g in games) == _whole(evidence.get(k))
+                for k, outcome in (("wins", "win"), ("losses", "loss"))
+                if _whole(evidence.get(k)) is not None
+            )
+        return len(games) == n
+    return True
+
+
+def _opening_games(evidence: dict[str, Any], games: Sequence[Game]) -> Optional[list[Game]]:
+    """The games of the colour (and opening family) a finding names ("color" or "colour", "family"), when the
+    evidence's own counts confirm they are the games behind it; None otherwise."""
+    family, colour = evidence.get("family"), evidence.get("color", evidence.get("colour"))
+    if colour not in ("white", "black") or (family is not None and (not isinstance(family, str) or not family)):
+        return None
+    chosen = [g for g in games if g.color == colour and (family is None or g.opening_family == family)]
+    keys = ("n", "games", "wins", "losses") if family is not None else ("n", "games")
+    if not chosen or not _counts_agree(evidence, chosen, keys):
+        return None
+    if family is None and not any(_whole(evidence.get(k)) is not None for k in keys):
+        return None  # a colour alone, with no count to confirm it, says too little about which games
+    return chosen
+
+
+def _formats_of(
+    ins: Insight, games: Sequence[Game], counts: dict[str, int], reached: dict[str, list[Game]]
+) -> dict[str, int]:
+    """One finding's formats: see ``fill_formats``."""
+    evidence = ins.evidence if isinstance(ins.evidence, dict) else {}
+    named = named_formats(evidence)
+    formats = {}
+    for tc in named:
+        n = _games_behind(evidence, tc, single=len(named) == 1) or counts.get(tc)
+        if n:
+            formats[tc] = n
+    if formats:
+        return ordered_formats(formats)
+    epd = _epd(evidence.get("fen"))
+    if epd is not None and reached.get(epd) and _counts_agree(evidence, reached[epd], ("reached",)):
+        return format_counts(reached[epd])
+    opening = _opening_games(evidence, games)
+    if opening:
+        return format_counts(opening)
+    return dict(counts)
+
+
 def fill_formats(modules: Iterable[ModuleResult], ctx: "AnalysisContext") -> None:
-    """Give every finding without ``formats`` the format mix behind it (see the module docstring)."""
+    """Give every finding without ``formats`` the format mix behind it (see the module docstring).
+
+    Most precise first: the format(s) its evidence names; for a finding about one position (evidence "fen"), the
+    games in which the position came up with you to move; for one colour (and opening), those games (each only
+    when the evidence's own game counts confirm them); else the games the module analysed.
+    """
+    modules = list(modules)
+    positions: set[str] = set()
+    for ins in (i for m in modules for i in m.insights or [] if not i.formats):
+        try:
+            epd = _epd(ins.evidence.get("fen")) if isinstance(ins.evidence, dict) else None
+        except Exception:  # noqa: BLE001 — an odd evidence object: that finding falls back below
+            epd = None
+        if epd:
+            positions.add(epd)
+    reached = games_reaching(positions, ctx.games) if positions else {}
     for m in modules:
         if not m.insights:
             continue
-        counts = format_counts(module_games(m.key, ctx))
+        games = module_games(m.key, ctx)
+        counts = format_counts(games)
         for ins in m.insights:
             if ins.formats:
                 continue
-            named = named_formats(ins.evidence or {})
-            formats = {}
-            for tc in named:
-                n = _games_behind(ins.evidence, tc, single=len(named) == 1) or counts.get(tc)
-                if n:
-                    formats[tc] = n
-            ins.formats = ordered_formats(formats) if formats else dict(counts)
+            try:
+                ins.formats = _formats_of(ins, games, counts, reached)
+            except Exception as exc:  # noqa: BLE001 — one odd finding must not leave the others without formats
+                log.warning("no formats for %s: %s", ins.id, exc)
 
 
 # --------------------------------------------------------------------------- visuals
@@ -210,18 +336,22 @@ _PAIRS = {
     "allowed_mates": ("allowed_mates", "opp_allowed_mates", "int"),
     "abandoned": ("abandoned", "opponent_abandoned", "int"),
 }
-# (chart title, [(pair row, bar label)]): the first chart whose rows are all in the evidence is drawn.
-# "{phase}" is the evidence's game phase.
-_PAIR_CHARTS: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Blunders per 100 moves, you vs your opponents", [("per100_low", "Short of time"), ("per100_ok", "With time left")]),
-    ("Mistakes and blunders per 100 moves, you vs your opponents", [("per100", "{phase}"), ("rest_per100", "Other phases")]),
-    ("Errors per 100 moves, you vs your opponents", [("per100", "This kind of error"), ("other_errors", "Other errors")]),
-    ("Blunders per 100 moves, you vs your opponents", [("per100", "Blunders per 100 moves")]),
-    ("Converting winning positions, you vs your opponents", [("rate", "Winning positions won")]),
-    ("Time trouble, you vs your opponents", [("trouble", "Games in time trouble")]),
-    ("Opening pace, you vs your opponents", [("opening_share", "Clock used on the first moves")]),
-    ("Mates, you vs your opponents", [("missed_mates", "Mates missed"), ("allowed_mates", "Mates allowed")]),
-    ("Abandoned games, you vs your opponents", [("abandoned", "Games abandoned")]),
+# (chart title, [(pair row, bar label)], a key the evidence must also have): the first chart whose rows are all in
+# the evidence is drawn. "{phase}" is the evidence's game phase. The key keeps a chart to the finding it describes
+# ("per100" is blunders in one finding, mistakes and blunders of one phase in another).
+_PAIR_CHARTS: list[tuple[str, list[tuple[str, str]], Optional[str]]] = [
+    ("Blunders per 100 moves, you vs your opponents",
+     [("per100_low", "Short of time"), ("per100_ok", "With time left")], None),
+    ("Mistakes and blunders per 100 moves, you vs your opponents",
+     [("per100", "{phase}"), ("rest_per100", "Other phases")], "phase"),
+    ("Errors per 100 moves, you vs your opponents",
+     [("per100", "This kind of error"), ("other_errors", "Other errors")], None),
+    ("Blunders per 100 moves, you vs your opponents", [("per100", "Blunders per 100 moves")], "blunders"),
+    ("Converting winning positions, you vs your opponents", [("rate", "Winning positions won")], None),
+    ("Time trouble, you vs your opponents", [("trouble", "Games in time trouble")], None),
+    ("Opening pace, you vs your opponents", [("opening_share", "Clock used on the first moves")], None),
+    ("Mates, you vs your opponents", [("missed_mates", "Mates missed"), ("allowed_mates", "Mates allowed")], None),
+    ("Abandoned games, you vs your opponents", [("abandoned", "Games abandoned")], None),
 ]
 
 
@@ -234,20 +364,44 @@ def _pair_values(ev: dict[str, Any], row: str) -> Optional[tuple[float, float, s
     return mine, theirs, fmt
 
 
+# Charts whose rows compare you with yourself (short of time vs with time left, one phase vs the others, one kind
+# of error vs the others): without your opponents' numbers they still show what the finding measured.
+_OWN_COMPARISONS = frozenset({"per100_low", "per100"})
+
+
 def _pair_chart(ins: Insight) -> Optional[Chart]:
-    """Your rate against your opponents' in the same games (grouped where the evidence has several)."""
+    """Your rate against your opponents' in the same games (grouped where the evidence has several).
+
+    When your opponents' numbers are missing (they were never that short of time ...), a chart that compares you
+    with yourself is drawn with your bars only; any other chart needs both players.
+    """
     ev = ins.evidence
-    for title, rows in _PAIR_CHARTS:
+    phase = str(ev.get("phase") or "This phase").capitalize()
+    for title, rows, needs in _PAIR_CHARTS:
         values = [_pair_values(ev, row) for row, _ in rows]
-        if any(v is None for v in values):
+        if any(v is None for v in values) or (needs and needs not in ev):
             continue
-        phase = str(ev.get("phase") or "This phase").capitalize()
         return comparison_chart(
             title,
             [label.format(phase=phase) for _, label in rows],
             [(YOU, [v[0] for v in values]), (OPPONENTS, [v[1] for v in values])],  # type: ignore[index]
             value_format=values[0][2],  # type: ignore[index]
             note=_games_note(ev.get("games", ev.get("n"))),
+        )
+    for title, rows, needs in _PAIR_CHARTS:
+        if len(rows) < 2 or rows[0][0] not in _OWN_COMPARISONS or (needs and needs not in ev):
+            continue
+        mine_keys = [_PAIRS[row][0] for row, _ in rows]
+        fmt = _PAIRS[rows[0][0]][2]
+        mine = [(_share if fmt == "pct" else _num)(ev.get(key)) for key in mine_keys]
+        if any(v is None for v in mine):
+            continue
+        return comparison_chart(
+            title.replace(", you vs your opponents", ""),
+            [label.format(phase=phase) for _, label in rows],
+            [(YOU, mine)],
+            value_format=fmt,
+            note=_games_note(ev.get("games", ev.get("n")), "your opponents had too few such moves to compare"),
         )
     return None
 
@@ -260,12 +414,12 @@ def _per_format_pair_chart(ins: Insight) -> Optional[Chart]:
         return None
     labels = [FORMAT_NAMES.get(tc, tc) for tc in classes]
     note = ", ".join(f"{FORMAT_NAMES.get(tc, tc)}: {n} games" for tc in classes if (n := _count(ev[tc].get("n"))))
-    for title, rows in _PAIR_CHARTS:
+    for _title, rows, needs in _PAIR_CHARTS:
         if len(rows) != 1:
             continue
         row, label = rows[0]
         values = [_pair_values(ev[tc], row) for tc in classes]
-        if any(v is None for v in values):
+        if any(v is None for v in values) or (needs and any(needs not in ev[tc] for tc in classes)):
             continue
         return comparison_chart(
             f"{label} by format, you vs your opponents",
@@ -328,6 +482,22 @@ def _share_chart(ins: Insight) -> Optional[Chart]:
             note=_games_note(None, f"{int(_num(ev['total_blunders']) or 0)} blunders in {int(_num(ev['total_moves']) or 0)} moves"),
         )
     return None
+
+
+def _saved_chart(ins: Insight) -> Optional[Chart]:
+    """Lost positions you saved (drew or won) against those you went on to lose (evidence "saved" of
+    "lost_positions")."""
+    ev = ins.evidence
+    lost, saved = _count(ev.get("lost_positions")), _num(ev.get("saved"))
+    if lost is None or saved is None or not 0 <= saved <= lost:
+        return None
+    return comparison_chart(
+        "Games where your opponent got a winning position first",
+        ["You saved (drew or won)", "You lost"],
+        [("Games", [saved, lost - saved])],
+        value_format="int",
+        note=f"{lost} games",
+    )
 
 
 def _flag_chart(ins: Insight) -> Optional[Chart]:
@@ -459,6 +629,7 @@ _CHARTS: Sequence[Callable[[Insight], Optional[Chart]]] = (
     _share_chart,
     _pair_chart,
     _flag_chart,
+    _saved_chart,
     _accuracy_chart,
     _by_format_rate_chart,
     _opening_eval_chart,
@@ -478,25 +649,42 @@ def chart_from_evidence(ins: Insight) -> Optional[Chart]:
     return None
 
 
+def _board_of(fen: str) -> Optional[chess.Board]:
+    for chess960 in (False, True):
+        try:
+            return chess.Board(fen, chess960=chess960)
+        except ValueError:
+            continue
+    return None
+
+
 def diagram_from_evidence(ins: Insight) -> Optional[Diagram]:
-    """The board for a finding about one position (evidence "fen" and your "move"; the engine's "best" in green)."""
+    """The board for a finding about one position (evidence "fen" and your "move"; the engine's "best" in green).
+
+    The board is seen from the side to move (the move was yours); nothing when your move is not legal there.
+    """
     ev = ins.evidence
     fen, move = ev.get("fen"), ev.get("move")
     if not isinstance(fen, str) or not fen or not isinstance(move, str) or not move:
         return None
-    parts = fen.split()
-    orientation = "black" if len(parts) > 1 and parts[1] == "b" else "white"
+    board = _board_of(fen)
+    played = parse_move(board, move) if board is not None else None
+    if board is None or played is None:
+        return None
     best = ev.get("best") if isinstance(ev.get("best"), str) else None
-    diagram = position_diagram(
-        f"You played {move} here",
+    better = parse_move(board, best) if best else None
+    played_label = move_label(board, played)
+    best_label = move_label(board, better) if better is not None and better != played else None
+    return position_diagram(
+        f"You played {played_label} here",
         fen,
-        orientation=orientation,
-        played=move,
-        best=best,
-        caption=f"Red: your move {move}." + (f" Green: Stockfish's {best}." if best else ""),
+        orientation="white" if board.turn == chess.WHITE else "black",
+        played=played.uci(),
+        best=better.uci() if best_label else None,
+        caption=f"Red: your move {played_label}."
+        + (f" Green: Stockfish's choice, {best_label}." if best_label else ""),
         link=ins.example_games[0] if ins.example_games else "",
     )
-    return diagram if diagram.arrows else None
 
 
 def fill_visuals(modules: Iterable[ModuleResult]) -> None:

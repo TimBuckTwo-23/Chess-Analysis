@@ -272,13 +272,23 @@ def view_engine_note(time_class: str, view: AnalysisContext, whole: AnalysisCont
     if not whole.evals:
         return engine_note  # not run, or skipped: the same reason holds for every format
     if not view.evals:
-        note = f"None of your {time_class} games were in the engine sample ({engine_note.rstrip('.')})."
-        if whole.opt("engine_sample", "recent") != "balanced":
-            note += " --engine-sample balanced spreads the sample over your formats."
+        sample = engine_note.strip().rstrip(".")
+        note = f"None of your {time_class} games were in the engine sample" + (f" ({sample})." if sample else ".")
+        listed = [tc for tc in whole.opt("engine_time_classes", None) or [] if isinstance(tc, str)]
+        if listed and time_class not in {tc.lower() for tc in listed}:
+            sent = format_text({tc.lower(): 1 for tc in listed}).removesuffix(" only")
+            note += f" Only {sent} games were sent to Stockfish."
+        elif whole.opt("engine_sample", "recent") != "balanced":
+            note += (" A balanced engine sample (--engine-sample balanced, the default on GitHub) takes games from "
+                     "every format.")
+        elif time_class == "daily":
+            note += " A balanced sample takes daily games only when asked to (--engine-time-class)."
         return note
     first = next(iter(view.evals.values()))
     depth = f" at depth {first.depth}" if first.depth else ""
-    return f"{first.engine}{depth} on {len(view.evals)} of your {time_class} games."
+    k, n = len(view.evals), len(view.games)
+    which = " (the most recent)" if k < n else ""  # both samples take a format's games newest first
+    return f"{first.engine}{depth} on {k} of your {n} {time_class} games{which}."
 
 
 def build_format_views(

@@ -226,7 +226,7 @@ thousand games).
 | `--coach-max 150` | Explain at most this many positions, costliest first (default 150) |
 | `--no-motif-profile` | Skip the tactic profile over every error (you vs your opponents; saves a quick engine pass) |
 | `--lichess-token TOKEN` | Lichess personal access token for the opening explorer (default: the `LICHESS_TOKEN` environment variable; never printed) |
-| `--puzzle-db PATH` | The puzzle file for the drills (default: the subset `chess-insights puzzles-db` keeps in the cache folder) |
+| `--puzzle-db PATH` | The puzzle file for the drills, or the cache folder the `puzzles-db` command wrote it to (default: the subset in the cache folder) |
 | `--drill-rating 1200-1600` | Puzzle rating window for the drills (default 1200-1600) |
 | `--practice-minutes 20` | Minutes of practice a day the plan is sized for (default 20) |
 | `--coach-llm` | Claude rewrites the explanations and drafts a weekly plan, every move and number checked (needs `ANTHROPIC_API_KEY`) |
