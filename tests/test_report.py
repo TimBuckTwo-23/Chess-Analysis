@@ -776,7 +776,7 @@ def test_json_handles_numpy_and_pandas_values():
     assert stats["ts"] == "2024-06-01T18:00:00+00:00" and stats["nat"] is None and stats["na"] is None
     assert stats["series"] == {"a": 1, "b": 2}
     assert stats["frame"] == [{"x": 1.5}, {"x": None}]
-    assert stats["1|tuple"] == [1, 2, 3] and stats["2024-01-01"] == 120.0 and stats["path"] == "/tmp/x"
+    assert stats["1|tuple"] == [1, 2, 3] and stats["2024-01-01"] == 120.0 and stats["path"] == str(Path("/tmp/x"))  # native separators on Windows
 
 
 # --------------------------------------------------------------------------- write_report
