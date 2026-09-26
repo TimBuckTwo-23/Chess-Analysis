@@ -307,3 +307,72 @@ def test_stockfish_16_eval_table_and_check(stockfish_path):
             pytest.skip(f"{ce.name} has no classical eval table (concepts need Stockfish 16)")
         assert table is not None and table["Threats"] == (-0.86, -0.53)
         assert ce.supported is True and ce.note == ""
+
+
+# --------------------------------------------------------------------------- settled comparison points
+def test_static_exchange_count():
+    see = concepts.see
+    board = chess.Board("4k3/8/8/3n4/8/8/8/3QK3 w - - 0 1")
+    assert see(board, chess.Move.from_uci("d1d5")) == 3  # nothing guards the knight
+    board = chess.Board("4k3/8/4p3/3n4/8/8/8/3QK3 w - - 0 1")
+    assert see(board, chess.Move.from_uci("d1d5")) == -6  # the pawn takes the queen back
+    board = chess.Board("4k3/8/4p3/3p4/4P3/8/8/4K3 w - - 0 1")
+    assert see(board, chess.Move.from_uci("e4d5")) == 0  # an even trade
+    board = chess.Board("4k3/8/8/3r4/8/8/3R4/3RK3 w - - 0 1")
+    assert see(board, chess.Move.from_uci("d2d5")) == 5  # two rooks against one: the rook falls
+    board = chess.Board("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2")
+    assert see(board, chess.Move.from_uci("e5d6")) == 1  # en passant takes a pawn
+    assert concepts.settled(chess.Board()) and not concepts.settled(chess.Board(IN_CHECK))
+
+
+def test_a_comparison_point_is_never_in_the_middle_of_a_fork():
+    """33...Bg6? 34.Nhxf5+ Nxf5 35.Ng4+ Kh5 36.Nf6+ Kh6 37.Nxd7: the knight forks king and queen on move 36. Read
+    after 36...Kh6 the refutation looked better for Black on material (Material +1.86); the comparison point waits
+    until the queen has gone."""
+    fen = "8/pp1qn1r1/3p3k/2pP1p1b/2P1pP1N/2P1N2P/P4Q1K/6R1 b - - 1 33"
+    moves = ["h5g6", "h4f5", "e7f5", "e3g4", "h6h5", "g4f6", "h5h6", "f6d7", "e4e3", "f2e2"]
+    board = chess.Board(fen)
+    for uci in moves[:7]:
+        board.push_uci(uci)
+    assert not concepts.settled(board)  # 37.Nxd7 wins the queen
+    n = concepts.comparison_ply(fen, moves)
+    end = comparison_point(fen, moves)
+    assert n is not None and n >= 8 and not end.pieces(chess.QUEEN, chess.BLACK)
+    assert concepts.settled(end)
+
+
+def test_captures_castling_and_holes_along_a_line():
+    fen = "r1bqk2r/ppp2pbp/2n1p1p1/3pPn2/3P4/2NBBN2/PPPQ1PPP/R3K2R b KQkq - 4 8"  # 8...Ncxd4?
+    line = _uci(["Ncxd4", "Nxd4", "Nxe3", "fxe3", "Bxe5"], fen)
+    mine, theirs = concepts.captures(fen, line, "black")
+    assert (mine, theirs) == ([chess.KNIGHT, chess.KNIGHT], [chess.PAWN, chess.BISHOP, chess.PAWN])
+    start = "rn1qk2r/ppp2ppp/5b2/3P4/4P3/5Q1P/PPP2PP1/RN2KB1R b KQkq - 0 10"
+    line = _uci(["Qd6", "c3", "Qb6", "Qe2", "c6", "Na3", "O-O"], start)
+    assert concepts.castles_within(start, line, 6, "black") and not concepts.castles_within(start, line, 0, "black", 4)
+    # 5...e5? 6.Ndb5 a6 7.Nd6+: the knight lands on d6, a square no black pawn can cover any more
+    sicilian = "r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/2N5/PPP2PPP/R1BQKB1R b KQkq - 0 5"
+    found = concepts.hole_invasion(sicilian, _uci(["e5", "Ndb5", "a6", "Nd6+", "Bxd6"], sicilian), "black")
+    assert found == concepts.Invasion(ply=3, piece="knight", square="d6", san="7.Nd6+")
+    assert concepts.hole_invasion(sicilian, _uci(["Nf6", "Nxc6", "bxc6", "e5"], sicilian), "black") is None
+
+
+def test_the_king_is_not_left_in_the_centre_by_a_line_that_castles_next(monkeypatch):
+    """10...Qd6 11.c3 Qb6 12.Qe2 c6 13.Na3 O-O: Black castles the move after the comparison point."""
+    from chess_insights.coach import explain
+    from chess_insights.coach.deep import make_line
+
+    fen = "rn1qk2r/ppp2ppp/5b2/3P4/4P3/5Q1P/PPP2PP1/RN2KB1R b KQkq - 0 10"
+    moves, b = [], chess.Board(fen)
+    for san in ["Bxb2", "Qb3", "Bxa1", "c3", "O-O", "Be2"]:
+        moves.append(b.push_san(san))
+    best = make_line(fen, moves, 354, None, 16)
+    moves, b = [], chess.Board(fen)
+    for san in ["Qd6", "c3", "Qb6", "Qe2", "c6", "Na3", "O-O"]:
+        moves.append(b.push_san(san))
+    refutation = make_line(fen, moves, -265, None, 16)
+    tool = explain._Concepts(None)
+    cmp = tool.compare(fen, best, refutation, "black")
+    assert not any("centre" in f for f in cmp.facts)
+    monkeypatch.setattr(concepts, "castles_within", lambda *args, **kw: False)  # read one move early, it would be
+    assert "your king stays in the centre" in tool.compare(fen, best, refutation, "black").facts
+    tool.close()

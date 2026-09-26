@@ -557,7 +557,7 @@ class Point:
     """The point of a refutation that the board shows (a pawn counted short of defenders, a piece chased by a pawn,
     an enemy piece on a hole), in words, and what to check next time."""
 
-    kind: str  # "count" | "tempo" | "invasion"
+    kind: str  # "count" | "recapture" | "tempo" | "invasion"
     text: str
     check: str
     covers_material: bool = False  # the words already say what you lose
@@ -620,8 +620,8 @@ def _tempo_point(pos: CriticalPosition, best: Line, refutation: Line, best_label
     board.push(reply)
     again = chess.Move.from_uci(refutation.moves_uci[2])
     if not board.attacks_mask(reply.to_square) & chess.BB_SQUARES[mine.to_square] or again.from_square != mine.to_square \
-            or again not in board.legal_moves:
-        return None
+            or again not in board.legal_moves or board.is_capture(again):
+        return None  # not chased, or it moves on by taking something: no time lost
     text = (f"{reply_label} hits your {PIECE_WORDS[piece]} with a pawn and it has to move again "
             f"({visuals.move_label(board, again)}), so you lose time")
     first = chess.Move.from_uci(best.moves_uci[0]) if best.moves_uci else None

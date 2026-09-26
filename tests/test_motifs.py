@@ -444,3 +444,53 @@ def test_patterns_that_need_the_other_side_to_cooperate_are_not_named():
     assert motifs._forcing_reach(scandi, ["e4d5", "d8d5", "b1c3", "d5a5"], 0) == 3
     assert motifs._forcing_reach(fen, ["d4d5", "c6a5", "d1a4"], 0) == 1
     assert motifs._forcing_reach(fen, ["e2e4", "d8d4"], 1) == 2  # the refutation's side: its first move counts
+
+
+# ---------------------------------------------------------------------------
+# What a move allowed, and which pattern leads (the chess review's positions, Stockfish 16 lines at depth 16)
+# ---------------------------------------------------------------------------
+def test_a_pin_that_stood_before_your_move_is_not_what_it_allowed():
+    # 15.Qd1: the pawn on e3 was pinned by Re8 to Ke1 before the move; what 15.Qd1 did is take the queen off the
+    # b3-f7 diagonal, and Black takes the bishop
+    fen = "r2qrk2/ppp2Bpp/5n2/8/3n4/PQN1PPP1/1P3P2/R3K2R w KQ - 1 15"
+    refutation = Line(fen=fen, moves_uci=["b3d1", "f8f7", "g3g4", "d4e6", "d1b3", "f7f8", "a1d1", "d8e7"])
+    loose = {m.theme for m in motifs.carried_by(refutation, "second")}
+    assert "pin" in loose  # the detector sees the pin ...
+    found = [m.theme for m in detect_line(refutation, "refutation")]
+    assert "pin" not in found and found[0] == "hangingPiece"  # ... but the move did not allow it
+    # a pin the move does create is kept: ...d5 opens the b5-e8 diagonal, and the knight on c6 is pinned
+    created = Line(fen="4k3/3p4/2n5/1B6/8/8/8/4K3 b - - 0 1", moves_uci=["d7d5", "e1d2", "e8d7", "b5c6"])
+    assert [m.squares for m in detect_line(created, "refutation") if m.theme == "pin"] == [["b5", "c6", "e8"]]
+
+
+def test_a_hanging_piece_leads_a_pin_and_a_double_check_leads_a_discovered_check():
+    # 20...Rxa1 takes a loose rook, which also pins the bishop on c1: the capture is the plainer story
+    best = Line(fen="r1q1kb1r/5pp1/1N1p3p/3Ppb2/7P/1nP2N2/1P2QPP1/R1B1K2R b KQkq - 4 20",
+                moves_uci=["a8a1", "e2b5", "f5d7", "b5b3", "c8a6", "e1d1"])
+    found = detect_line(best, "best")
+    assert [m.theme for m in found if m.ply == 0][:2] == ["hangingPiece", "pin"]
+    # 25.Bxe6+ is a double check (and so a discovered one too): the double check is named first
+    best = Line(fen="r5r1/1p1k1p2/p3b3/3Bb3/8/P2Q3q/1P3PP1/R4RK1 w - - 0 25",
+                moves_uci=["d5e6", "d7e6", "d3h3", "e6f6", "h3f3", "f6g7"])
+    first = [m.theme for m in detect_line(best, "best") if m.ply == 0]
+    assert first.index("doubleCheck") < first.index("discoveredCheck")
+
+
+def test_a_pawn_taken_at_once_is_not_a_far_advanced_pawn():
+    # 5...Nf6 6.dxe7 Nxe7: the pawn reaches the seventh rank by a capture and is taken straight back
+    fen = "r1bqk1nr/ppp1ppbp/2nP2p1/8/3P4/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 5"
+    refutation = Line(fen=fen, moves_uci=["g8f6", "d6e7", "c6e7", "f1d3", "e8g8", "e1g1"])
+    assert "advancedPawn" not in {m.theme for m in detect_line(refutation, "refutation")}
+    # a pawn on the seventh that stays there, or promotes, still counts
+    assert "advancedPawn" in themes("4k3/8/4P3/8/8/8/8/4K3 w - - 0 1", ["e6e7", "e8d7"])
+    assert "advancedPawn" in themes("3rk3/4P3/8/8/8/8/8/4K3 w - - 0 1", ["e7d8q", "e8d8"])
+
+
+def test_carried_by_reads_either_side_and_forcing_reach_is_public():
+    line = Line(fen="r3k3/8/8/3N4/8/8/8/4K3 b - - 0 1", moves_uci=["a8a6", "d5c7", "e8e7", "c7a6"])
+    assert [m.theme for m in motifs.carried_by(line, "second")] == ["fork"]
+    assert all(m.line == "" for m in motifs.carried_by(line, "second"))
+    assert motifs.carried_by(None, "first") == []
+    with pytest.raises(ValueError):
+        motifs.carried_by(line, "you")
+    assert motifs.forcing_reach(line.fen, line.moves_uci, 1) == motifs._forcing_reach(line.fen, line.moves_uci, 1)

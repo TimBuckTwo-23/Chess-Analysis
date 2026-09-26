@@ -562,6 +562,36 @@ def test_puzzle_pgn_with_lines_themes_and_explanations(player):
     assert pgn.endswith(single) and "Themes" not in games[-1].headers
 
 
+def test_puzzle_themes_describe_the_printed_solution_never_the_opponents_tactic(player, monkeypatch):
+    """The Themes header of a puzzle names the patterns you carry out along the moves printed: not the opponent's
+    tactic from the refutation (a "mateIn1" tag on a puzzle whose side to move has no mate), and not the patterns of
+    another line (the motif profile's shorter line)."""
+    ctx, _ = player
+    events = mistakes.build_puzzles(ctx.games, ctx.evals)
+    second = events[1]  # 5...e5, explained below
+    res = _result(_position())
+    theirs = Motif("fork", "refutation", 3, ["d6", "e8", "b7"], "opponent")
+    x = Explanation(epd=second.epd, fen=second.fen, played=second.move_label, best="5...Nf6", best_line=res.best_line,
+                    refutation=res.refutation, text="After 5...e5 ...", motifs=[theirs], drill_themes=["fork"])
+    coaching = Coaching(explanations=[x])
+    assert "Themes" not in _read_all(puzzles.puzzles_pgn(events, coaching))[1].headers
+    x.motifs = [theirs, Motif("pin", "best", 1, ["c6"], "you"), Motif("skewer", "best", 9, ["a1"], "you")]
+    assert _read_all(puzzles.puzzles_pgn(events, coaching))[1].headers["Themes"] == "pin"  # the skewer comes later
+    # fill_puzzle_lines records an empty list for a line it sets without a pattern, so the motif profile (which
+    # only fills keys without one) cannot tag it with its own line's patterns
+    monkeypatch.setattr(motifs, "detect_line", lambda line, role, previous_fen=None: [])
+    coaching = Coaching()
+    board = chess.Board(second.fen)
+    deep_best = make_line(second.fen, [board.parse_san("Nf6")], -39, None, 20)
+    puzzles.fill_puzzle_lines(ctx, coaching, {(second.epd, second.uci): DeepResult(second.epd, second.uci,
+                                                                                    deep_best, None)})
+    key = puzzles.puzzle_key(second.game.game_id, second.ply)
+    assert coaching.puzzle_lines[key].moves_san == ["Nf6"] and coaching.puzzle_themes[key] == []
+    coaching.puzzle_themes.setdefault(key, ["skewer"])  # what profile._puzzle_lines does
+    assert coaching.puzzle_themes[key] == []
+    assert "Themes" not in _read_all(puzzles.puzzles_pgn(events, coaching))[1].headers
+
+
 def test_fill_puzzle_lines_from_deep_and_profile_results(player, monkeypatch):
     ctx, _ = player
     monkeypatch.setattr(motifs, "GATED_THEMES", frozenset({"fork"}))
