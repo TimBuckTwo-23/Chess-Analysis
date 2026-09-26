@@ -236,6 +236,11 @@ def test_format_bars_are_computed_on_each_formats_games(mixed):
         name = visuals.FORMAT_NAMES[tc]
         assert you[name] == pytest.approx(100 * sum(p.judgement == "blunder" for p in mine) / len(mine))
         assert them[name] == pytest.approx(100 * sum(p.judgement == "blunder" for p in theirs) / len(theirs))
+    # the accuracy chart's line is the opponents' average over every game; the note gives it per format too
+    accuracy = next(i for i in eng.insights if i.id == "engine.observation.accuracy-by-result")
+    for tc in ("bullet", "blitz", "rapid"):
+        theirs = [ev.opp_accuracy for g, ev in pairs if g.time_class == tc]
+        assert f"{tc} {sum(theirs) / len(theirs):.1f}" in accuracy.chart.note
 
 
 def test_costliest_example_board_is_the_largest_drop(mixed):
@@ -281,6 +286,7 @@ def test_the_costliest_puzzles_get_a_board_each_in_table_order(mixed):
     for d, row in zip(boards, puzzles.rows):
         assert row[2] in d.caption and row[3] in d.caption and visuals.FORMAT_NAMES[d.time_class] == row[1]
         assert [a.kind for a in d.arrows] == ["played", "best"]
+        assert d.caption.endswith(f"{row[3]} (green) was better.")  # the green arrow shows it: no "find it first"
     events = mistakes.build_puzzles([g for g, _ in pairs], {g.game_id: ev for g, ev in pairs})
     assert [e.game.url for e in events[: len(boards)]] == [d.link for d in boards]  # the export is unchanged
 
@@ -394,6 +400,35 @@ def test_game_diagram_edge_cases():
     assert mistakes.formats_note({}) == "" and mistakes.formats_words({}) == ""
     assert mistakes.formats_note({"rapid": 2, "bullet": 3}) == "Bullet 3 · Rapid 2 games"
     assert mistakes.formats_words({"blitz": 5}) == "all blitz"
+    # a "better move" that isn't legal in the position (an eval from another record) gets no arrow and no mention
+    stale = mistakes.game_diagram(game, 2, describe, best_san="Qxf7#")
+    assert [a.kind for a in stale.arrows] == ["played"] and stale.caption == ""
+
+
+def test_chess960_boards_castle_in_the_arrows_and_the_strip():
+    fen = "rk5r/pppppppp/8/8/8/8/PPPPPPPP/RK5R w HAha - 0 1"
+    game = make_game(rules="chess960", initial_fen=fen, moves_san=["a3", "a6", "O-O", "O-O-O", "h3"])
+    board = mistakes.game_diagram(game, 2, lambda played, best: (played, best or ""), best_san="h3")
+    assert [(a.start, a.end, a.kind) for a in board.arrows] == [("b1", "g1", "played"), ("h2", "h3", "best")]
+    [strip] = board.strips
+    assert [f.move for f in strip.frames] == ["2.O-O", "2...O-O-O", "3.h3"]  # the whole rest of the game
+    after = chess.Board(strip.frames[1].fen, chess960=True)
+    assert after.king(chess.WHITE) == chess.G1 and after.king(chess.BLACK) == chess.C8
+
+
+def test_board_titles_name_the_move_you_missed():
+    p = make_ply_eval(ply=38, mover="white", is_user=True, san="Qd2", best_san="Qh7#", mate_before=1,
+                      win_before=100.0, win_after=60.0, tags=["missed_mate"])
+    record = engine_stats.Analysed(make_game(), make_game_eval("g", [p]), [p])
+    title, caption = engine_stats._mate_caption(record, p)("20.Qd2", "20.Qh7#")
+    assert title == "Your costliest missed mate: 20.Qh7#"
+    assert caption == "Stockfish saw a forced mate in 1 here, starting with 20.Qh7# (green); you played 20.Qd2 (red)."
+    assert engine_stats._mate_caption(record, p)("20.Qd2", None)[0] == "Your costliest missed mate, at 20.Qd2"
+    black = make_ply_eval(ply=39, mover="black", is_user=True, san="Kg8", mate_before=-3, tags=["missed_mate"])
+    assert "a forced mate in 3 here" in engine_stats._mate_caption(record, black)("20...Kg8", "20...Qh2+")[1]
+    shot = engine_stats._tactic_caption("missed_tactic")(record, p)
+    assert shot("20.Qd2", "20.Qh7#")[0] == "Your costliest missed shot: 20.Qh7#"
+    assert shot("20.Qd2", None)[0] == "Your costliest missed shot, at 20.Qd2"
 
 
 # --------------------------------------------------------------------------- real Stockfish

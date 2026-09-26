@@ -310,6 +310,7 @@ def move_bucket(ply: int) -> str:
 
 # --------------------------------------------------------------------------- pictures
 ALL_GAMES = "All games"
+MIN_BAR_GAMES = 5  # games behind one side's share in a format's conversion bar (the pooled bars need far more)
 Metric = Callable[[Sequence[Analysed]], Optional[float]]
 
 
@@ -448,7 +449,7 @@ def _tactic_caption(tag: str) -> Callable[[Analysed, PlyEval], Describe]:
     def describe(r: Analysed, p: PlyEval) -> Describe:
         if tag == "missed_tactic":
             return lambda played, best: (
-                f"Your costliest missed shot: {best or played}",
+                f"Your costliest missed shot: {best}" if best else f"Your costliest missed shot, at {played}",
                 (f"{best} (green) was the shot. " if best else "") + f"You played {played} (red) and {_chances(p)}.",
             )
         return lambda played, best: (
@@ -461,11 +462,12 @@ def _tactic_caption(tag: str) -> Callable[[Analysed, PlyEval], Describe]:
 
 
 def _mate_caption(r: Analysed, p: PlyEval) -> Describe:
-    """Title and caption for your costliest missed forced mate (mate-in-N from the engine's verdict)."""
+    """Title and caption for your costliest missed forced mate (mate-in-N from the engine's verdict). The title names
+    the mating move you missed, not the move you played instead."""
     mate = p.mate_before if p.mate_before is None or p.mover == "white" else -p.mate_before
     within = f" in {mate}" if mate is not None and mate > 0 else ""
     return lambda played, best: (
-        f"Your costliest missed mate: {played}",
+        f"Your costliest missed mate: {best}" if best else f"Your costliest missed mate, at {played}",
         f"Stockfish saw a forced mate{within} here"
         + (f", starting with {best} (green)" if best else "")
         + f"; you played {played} (red).",
@@ -655,7 +657,10 @@ def accuracy_by_result(records: Sequence[Analysed], th: Thresholds) -> tuple[Opt
     bars, values = _split(rated, [accuracy_in(o) for o in present])
     note = "Lichess's accuracy formula (0-100)."
     if opp is not None:
-        note += f" The line is your opponents' average over the same games ({opp:.1f})."
+        note += f" The line is your opponents' average over all these games ({opp:.1f})"
+        _, (opp_values,) = _split(rated, [lambda rs: _avg(r.ev.opp_accuracy for r in rs)])
+        each = [f"{label.lower()} {v:.1f}" for label, v in zip(bars[1:], opp_values[1:]) if v is not None]
+        note += f"; by format: {', '.join(each)}." if each else "."
     chart = visuals.comparison_chart(
         "Your engine accuracy in wins, draws and losses",
         bars,
@@ -1230,19 +1235,24 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     yours = {id(r.game) for r in conv.reached}
 
     def share(first_you: bool, good: Callable[[Game], bool]) -> Metric:
-        """Among the games that side got a winning position in first, the share where ``good`` holds."""
+        """Among the games that side got a winning position in first, the share where ``good`` holds. The first bar
+        (every game) is the finding's own number; a format's bar needs ``MIN_BAR_GAMES`` such games (1 of 1 would
+        read as 100%)."""
 
         def metric(rs: Sequence[Analysed]) -> Optional[float]:
             group = [r for r in rs if (id(r.game) in yours) == first_you]
-            return sum(1 for r in group if good(r.game)) / len(group) if group else None
+            enough = len(group) >= MIN_BAR_GAMES or len(rs) == len(decided)
+            return sum(1 for r in group if good(r.game)) / len(group) if group and enough else None
 
         return metric
 
     def conversion_chart(title: str, you: Metric, them: Metric, what: str) -> Chart:
         labels, (mine, theirs) = _split(decided, [you, them])
+        thin = len(labels) > 1 and any(v is None for v in mine[1:] + theirs[1:])
         return visuals.comparison_chart(
             title, labels, [("You", mine), ("Opponents", theirs)], value_format="pct",
-            note=f"{what} {_split_note(decided)}",
+            note=f"{what} {_split_note(decided)}"
+            + (f" A bar needs at least {MIN_BAR_GAMES} such games." if thin else ""),
         )
 
     test = two_proportion_test(conv.converted, len(conv.reached), conv.opp_converted, len(conv.opp_reached))
@@ -1657,15 +1667,21 @@ def anatomy_section(
         study.append(f"Around moves {worst_bucket}, slow down and double-check every capture and check for both sides.")
     blundered = [r for r in records if r.count(lambda p: p.judgement == "blunder" and piece_of(p.san) == piece)]
 
-    def piece_share(rs: Sequence[Analysed]) -> Optional[str]:
-        mine = [p for r in rs for p in r.mine() if p.judgement == "blunder"]
-        return pct(sum(1 for p in mine if piece_of(p.san) == piece) / len(mine)) if mine else None
+    def piece_share(tc: str) -> Optional[str]:
+        """"29% of your 17 bullet blunders" (None without blunders in that format)."""
+        mine = [p for r in records if r.game.time_class == tc for p in r.mine() if p.judgement == "blunder"]
+        if not mine:
+            return None
+        share = sum(1 for p in mine if piece_of(p.san) == piece) / len(mine)
+        return f"{pct(share)} of your {len(mine)} {format_name(tc).lower()} blunders"
 
+    # each format with enough games for a bar elsewhere; one format's share is the chart itself
+    counts = _formats(records)
     by_format = [
-        f"{format_name(tc)} {share}"
-        for tc in _formats(records)
-        if (share := piece_share([r for r in records if r.game.time_class == tc])) is not None
-    ]
+        share for tc, n in counts.items() if n >= visuals.MIN_FORMAT_GAMES and (share := piece_share(tc)) is not None
+    ] if len(counts) > 1 else []
+    listed = ", ".join(by_format[:-1]) + f" and {by_format[-1]}" if len(by_format) > 1 else "".join(by_format)
+    split = f"{name.capitalize()} moves were {listed}." if listed else ""
     piece_chart = visuals.comparison_chart(
         "Your moves and your blunders, by piece moved",
         [label for _, label in PIECES],
@@ -1674,8 +1690,7 @@ def anatomy_section(
             ("Share of your blunders", [blunders[k] / total_blunders for k, _ in PIECES]),
         ],
         value_format="pct",
-        note=f"{name.capitalize()} moves' share of your blunders by format: {', '.join(by_format)}."
-        + _mix_note(records),
+        note=(split + _mix_note(records)).strip(),
         kind="bar",
     )
     board = _example_board(
@@ -1865,7 +1880,8 @@ def opening_section(
 def _opening_chart(groups: dict[tuple[str, str], list[tuple[Analysed, float]]], key: tuple[str, str],
                    th: Thresholds) -> Chart:
     """Your average eval after move 10 in one opening (as one colour) next to your other openings with that colour,
-    for every game and by format (a format needs ``min_opening_games`` games in the opening for a bar)."""
+    for every game and by format (a format needs ``min_opening_games`` games in the opening for a bar, and your
+    other openings need as many games for theirs)."""
     family, colour = key
     evals = {id(r.game): cp for items in groups.values() for r, cp in items}
     this = [r for r, _ in groups[key]]
@@ -1874,25 +1890,33 @@ def _opening_chart(groups: dict[tuple[str, str], list[tuple[Analysed, float]]], 
     def average(rs: Sequence[Analysed]) -> Optional[float]:
         return sum(evals[id(r.game)] for r in rs) / len(rs) / 100.0 if rs else None
 
+    def rest_average(rs: Sequence[Analysed]) -> Optional[float]:
+        return average(rs) if len(rs) >= th.min_opening_games else None
+
     labels, (mine,) = _split(this, [average], th.min_opening_games)
     by_name = {format_name(tc): tc for tc in _formats(this)}
-    if len(labels) == 1:  # one format in this opening: your other openings in that format
-        rest = [average([r for r in others if r.game.time_class == by_name.get(labels[0])])]
-    else:  # every game, then format by format
-        rest = [average(others)] + [
-            average([r for r in others if r.game.time_class == by_name[label]]) for label in labels[1:]
-        ]
+
+    def others_in(label: str) -> list[Analysed]:
+        """Your other openings behind one bar: all of them for "All games", else that format's."""
+        return others if label == ALL_GAMES else [r for r in others if r.game.time_class == by_name.get(label)]
+
+    rest = [rest_average(others_in(label)) for label in labels]
     series = [(f"The {family}", mine)]
+    note = (
+        "Stockfish's evaluation from your side after both players' 10th move, compared with the start position "
+        f"(capped at ±5 pawns per game). {_split_note(this, th.min_opening_games)}"
+    )
     if any(v is not None for v in rest):
         series.append((f"Your other openings as {colour.capitalize()}", rest))
+        used = {id(r.game): r for label in labels for r in others_in(label)}.values()
+        note += f" Your other openings as {colour.capitalize()}: {formats_note(_formats(used))}."
     return visuals.comparison_chart(
         f"Your position after move 10 as {colour.capitalize()}, in pawns",
         labels,
         series,
         value_format="signed_float2",
         reference=0.0,
-        note="Stockfish's evaluation from your side after both players' 10th move, compared with the start position "
-        f"(capped at ±5 pawns per game). {_split_note(this, th.min_opening_games)}",
+        note=note,
     )
 
 

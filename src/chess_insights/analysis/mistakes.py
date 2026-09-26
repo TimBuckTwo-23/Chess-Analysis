@@ -33,7 +33,7 @@ import chess
 
 from .. import visuals
 from ..context import AnalysisContext
-from ..models import Chart, Diagram, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Table
+from ..models import Chart, Diagram, Frame, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Strip, Table
 from ..stats import STRICT_ALPHA, MeanTest, bh_adjust, clamp, significance
 
 KEY = "mistakes"
@@ -436,6 +436,8 @@ def game_diagram(
         pass
     if not line:  # the move itself doesn't replay: no position to talk about
         return None
+    if best_san and visuals.parse_move(before, best_san) is None:  # e.g. an eval from another record: no green
+        best_san = None
     title, caption = describe(move_label(fen, played), move_label(fen, best_san) if best_san else None)
     diagram = visuals.position_diagram(
         title,
@@ -448,18 +450,34 @@ def game_diagram(
         time_class=game.time_class,
         last_move=last,
     )
-    if game.rules == "chess960":  # arrows from the Chess960 board (castling moves differ from standard chess)
+    plies = {p.ply: p for p in ev.plies} if ev is not None else {}
+    captions = [_win_caption(plies[ply + i]) if ply + i in plies else "" for i in range(len(line))]
+    if game.rules == "chess960":  # arrows and strip from the Chess960 board (castling differs from standard chess)
         diagram.arrows = []
         for move_text, kind in ((played, "played"), (best_san, "best")):
             arrow = visuals.move_arrow(before, move_text, kind) if move_text else None
             if arrow is not None and all((a.start, a.end) != (arrow.start, arrow.end) for a in diagram.arrows):
                 diagram.arrows.append(arrow)
-    plies = {p.ply: p for p in ev.plies} if ev is not None else {}
-    captions = [_win_caption(plies[ply + i]) if ply + i in plies else "" for i in range(len(line))]
-    strip = visuals.line_strip(strip_title, fen, line, max_frames=len(line), captions=captions)
+        strip = _strip_on(before, strip_title, line, captions)
+    else:
+        strip = visuals.line_strip(strip_title, fen, line, max_frames=len(line), captions=captions)
     if strip.frames:
         diagram.strips.append(strip)
     return diagram
+
+
+def _strip_on(board: chess.Board, title: str, moves_uci: list[str], captions: list[str]) -> Strip:
+    """:func:`visuals.line_strip` played on ``board`` itself, which keeps its rules (Chess960 castling)."""
+    board = board.copy(stack=False)
+    frames = []
+    for uci, caption in zip(moves_uci, captions):
+        move = chess.Move.from_uci(uci)
+        if move not in board.legal_moves:
+            break
+        label = visuals.move_label(board, move)
+        board.push(move)
+        frames.append(Frame(fen=board.fen(), move=label, last_move=uci, caption=caption))
+    return Strip(title=title, frames=frames)
 
 
 def _slug(epd: str) -> str:
@@ -551,7 +569,7 @@ def _puzzle_diagram(number: int, e: MistakeEvent, ev: Optional[GameEval] = None)
         return (
             f"Puzzle {number}: {e.game.opening_family or format_name(e.game.time_class) + ' game'}",
             f"You played {played} (red), which cost you {e.drop:.0f} in 100 of your chances to win"
-            + (f"; {best} (green) is better. Try to find it before you look." if best else "."),
+            + (f"; {best} (green) was better." if best else "."),
         )
 
     return game_diagram(e.game, e.ply, describe, best_san=e.best_san, ev=ev)

@@ -315,6 +315,24 @@ def test_conversion_rates_and_thrown_games():
     assert rows[1][1:5] == [20, 0, 1, 19] and rows[1][5] == pytest.approx(0.05)
 
 
+def test_conversion_chart_by_format_leaves_out_a_side_with_too_few_games():
+    pairs = []
+    for k in range(20):  # you reach +85% first: 16 blitz games, 4 bullet; you win half
+        tc = "blitz" if k < 16 else "bullet"
+        pairs.append(analysed(lambda i, u: {"win_before": 90.0} if u and i == 10 else {},
+                              outcome="win" if k % 2 else "loss", time_class=tc))
+    for k in range(20):  # your opponent reaches 85%+ first: 10 blitz, 10 bullet; they win all
+        pairs.append(analysed(lambda i, u: {"win_before": 90.0} if not u and i == 11 else {}, outcome="loss",
+                              time_class="blitz" if k < 10 else "bullet"))
+    ins = insight(run(pairs), "engine.weakness.conversion")
+    assert ins.formats == {"bullet": 14, "blitz": 26}
+    assert ins.chart.labels == ["All games", "Bullet", "Blitz"]
+    # bullet: only 4 games where you got there first, too few for a share of your own; blitz: 8 of 16
+    assert series(ins.chart, "You") == [pytest.approx(0.5), None, pytest.approx(0.5)]
+    assert series(ins.chart, "Opponents") == [pytest.approx(1.0), pytest.approx(1.0), pytest.approx(1.0)]
+    assert f"A bar needs at least {engine_stats.MIN_BAR_GAMES} such games." in ins.chart.note
+
+
 def test_conversion_counts_each_game_once_for_whoever_got_there_first():
     def swing(i, user):  # you are winning at ply 10, then your opponent is winning at ply 21
         if user and i == 10:
@@ -388,12 +406,30 @@ def test_blunder_anatomy_by_piece_and_move_number():
     assert ins and "Queen moves" in ins.title and ins.evidence["blunders"] == 40
     shares = dict(zip(ins.chart.labels, zip(*(s.values for s in ins.chart.series))))
     assert shares["Queen"] == (pytest.approx(40 / 200), pytest.approx(1.0))  # 20% of your moves, all your blunders
-    assert "Blitz 100%" in ins.chart.note
+    assert ins.chart.note == "Formats: Blitz 10 games."  # one format: the chart is that format's split
     buckets = table(mr, "Blunders by move number")
     chart = next(c for c in mr.charts if c.title.startswith("Blunders per 100 moves, by move number"))
     assert chart.series[0].values == [r[2] for r in buckets.rows]
     assert chart.series[1].values == [r[4] for r in buckets.rows]
     assert buckets.rows[0][1:3] == [100, pytest.approx(20.0)]  # moves 1-10: 2 blunders in 10 of your moves
+
+
+def test_blunder_anatomy_note_gives_each_formats_share_with_its_count():
+    def queen(i, user):  # every blunder a queen move (Qd1)
+        return {"judgement": "blunder"} if user and i in (2, 12, 22, 32) else {}
+
+    def mixed(i, user):  # one queen blunder, one pawn blunder (e4 at ply 0, exd5 at ply 4)
+        return {"judgement": "blunder"} if user and i in (4, 12) else {}
+
+    pairs = [analysed(queen, time_class="bullet") for _ in range(10)]
+    pairs += [analysed(mixed, time_class="blitz") for _ in range(10)]
+    pairs += [analysed(queen, time_class="rapid") for _ in range(3)]  # too few games for a share of its own
+    ins = insight(run(pairs), "engine.observation.blunder-anatomy")
+    assert ins.evidence["blunders"] == 40 + 10 + 12 and ins.evidence["total_blunders"] == 40 + 20 + 12
+    assert ins.chart.note == (
+        "Queen moves were 100% of your 40 bullet blunders and 50% of your 20 blitz blunders. "
+        "Formats: Bullet 10 · Blitz 10 · Rapid 3 games."
+    )
 
 
 # --------------------------------------------------------------------------- opening outcome
@@ -419,6 +455,25 @@ def test_opening_outcome_eval_after_move_ten():
     assert series(ins.chart, "The Caro-Kann Defense") == [pytest.approx(caro_row[3])]
     assert len(ins.chart.series) == 1  # no other opening as Black
     assert not any(i.id.startswith("engine.") and "italian" in i.id for i in mr.insights)  # 6 games: table only
+
+
+def test_opening_chart_compares_with_your_other_openings_when_no_format_has_a_bar():
+    """12 Caro-Kann games spread over three formats (4 each: no format bar) still get the comparison with your other
+    openings as Black; an opening row needs 5 games, and so does the other openings' bar."""
+    def at_ply_20(cp):
+        return lambda i, user: {"cp_after": cp} if i == 19 else {}
+
+    caro = [analysed(at_ply_20(200), color="black", opening_family="Caro-Kann Defense", time_class=tc)
+            for tc in ("bullet", "blitz", "rapid") for _ in range(4)]
+    sicilian = [analysed(at_ply_20(-50), color="black", opening_family="Sicilian Defense") for _ in range(6)]
+    ins = insight(run(caro + sicilian), "engine.weakness.openings-black-caro-kann-defense")
+    assert ins.formats == {"bullet": 4, "blitz": 4, "rapid": 4} and ins.chart.labels == ["All games"]
+    assert series(ins.chart, "The Caro-Kann Defense") == [pytest.approx(-2.0)]
+    assert series(ins.chart, "Your other openings as Black") == [pytest.approx(0.5)]
+    assert "Your other openings as Black: Blitz 6 games." in ins.chart.note
+    few = sicilian[:4]  # 4 games of other openings: too few for a bar
+    ins = insight(run(caro + few), "engine.weakness.openings-black-caro-kann-defense")
+    assert [s.name for s in ins.chart.series] == ["The Caro-Kann Defense"]
 
 
 # --------------------------------------------------------------------------- accuracy trend and by result
