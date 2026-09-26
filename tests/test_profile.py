@@ -4,8 +4,10 @@ a real difference, and real differences found)."""
 
 import dataclasses
 import math
+import os
 import random
 
+import chess
 import pytest
 
 from chess_insights.coach import CoachConfig, deep, motifs, profile
@@ -19,14 +21,22 @@ START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 GATED = frozenset({"fork", "pin", "skewer", "hangingPiece", "discoveredAttack", "backRankMate"})
 
-# Per mistake or blunder: how often each pattern is in the best line (missed) or the refutation (allowed).
-MISSED = {"fork": 0.12, "pin": 0.06, "skewer": 0.03, "hangingPiece": 0.30, "discoveredAttack": 0.05,
-          "backRankMate": 0.02}
-ALLOWED = {"fork": 0.10, "pin": 0.05, "skewer": 0.03, "hangingPiece": 0.35, "discoveredAttack": 0.04,
-           "backRankMate": 0.03}
+# Per mistake or blunder: how often its refutation carries each pattern (what it allows the other side). All 17
+# patterns the detectors name, as in production (motifs.GATED_THEMES), so the tests face as many tests per report.
+ALLOWED = {"hangingPiece": 0.35, "fork": 0.10, "pin": 0.05, "skewer": 0.03, "discoveredAttack": 0.04,
+           "backRankMate": 0.03, "discoveredCheck": 0.02, "doubleCheck": 0.005, "trappedPiece": 0.02,
+           "smotheredMate": 0.002, "mateIn1": 0.06, "mateIn2": 0.04, "mateIn3": 0.02, "mateIn4": 0.01,
+           "deflection": 0.03, "attraction": 0.02, "advancedPawn": 0.04}
+MISSED = {k: 0.9 * v for k, v in ALLOWED.items()}  # patterns in a best line with no chance before it
+THEMES = frozenset(ALLOWED)
+TACTICAL = 0.6  # share of errors whose lines carry patterns at all (patterns come together)
+FORMATS = (("bullet", 1.4), ("blitz", 1.0), ("rapid", 0.7))  # (format, how error-prone)
+RUNS = int(os.environ.get("MOTIF_RUNS", "0"))  # > 0: re-measure the rates below over that many worlds each
 
 
 def _poisson(rng: random.Random, lam: float) -> int:
+    if lam > 30:
+        return max(0, int(round(rng.gauss(lam, math.sqrt(lam)))))
     limit, k, p = math.exp(-lam), 0, 1.0
     while True:
         p *= rng.random()
@@ -35,97 +45,211 @@ def _poisson(rng: random.Random, lam: float) -> int:
         k += 1
 
 
-def simulate(n_games: int, seed: int, planted=None, error_boost: float = 1.0) -> list[GameCounts]:
-    """Engine-analysed games in which both sides share the same pattern rates, unless ``planted`` says otherwise.
+def _patterns(rng: random.Random, base: dict, rich: dict, scale: float = 1.0) -> tuple:
+    """The patterns along one line: only tactical errors carry any, and they come together."""
+    if rng.random() > TACTICAL:
+        return ()
+    return tuple(t for t, p in base.items() if rng.random() < min(1.0, p * scale / TACTICAL * rich[t]))
 
-    Realistic clustering: a game-level error propensity shared by both sides (wild games have errors on both
-    sides), a per-side factor, and a per-game proneness to each pattern (positions rich in forks). ``planted``:
-    {(side, kind, theme): rate}, side 0 = you. ``error_boost`` multiplies your error rate only.
+
+def _add(gc: GameCounts, kind: str, theme: str, side: int) -> None:
+    gc.counts.setdefault((kind, theme), [0, 0])[side] += 1
+
+
+def simulate(n_games: int, seed: int, *, boost: float = 1.0, q: float = 0.5, planted_q=None, planted_allowed=None,
+             punish: float = 1.0, indep_share: float = 0.1, followup_allows: float = 0.3) -> list[GameCounts]:
+    """Engine-analysed games in which a missed pattern mostly exists because the other side had just allowed it.
+
+    Each side makes errors of its own at its base rate (yours times ``boost``), with heavy clustering: a game-level
+    error propensity shared by both sides (wild games), a per-side factor and a per-game richness in each pattern
+    shared by both sides (positions rich in forks). Each error's refutation carries patterns with the same
+    per-error probabilities for both sides (``ALLOWED``). Every error is a chance for the other side, which misses
+    it with probability ``q``, the same for both sides: an error on the next move whose best line carries the
+    chance's patterns. Such a follow-up allows patterns too (``followup_allows`` of the usual rate) and is a chance
+    in turn. A share ``indep_share`` of the own errors also carries a missed pattern with no chance before it.
+
+    So a side that errs more hands the other side more patterns to miss: the reviewer's coupled world, in which
+    the old per-move "missed" test made claims out of error rates. Planted differences: ``planted_q`` {theme: q}
+    (you miss the chances carrying it with that probability), ``planted_allowed`` {theme: probability per error of
+    yours}, ``punish`` (you miss every chance ``punish`` times as often: worse at punishing everything).
     """
     rng = random.Random(seed)
-    planted = planted or {}
+    planted_q, planted_allowed = planted_q or {}, planted_allowed or {}
+    yours = {**ALLOWED, **planted_allowed}
     games = []
     for i in range(n_games):
-        moves = rng.randint(12, 60)
+        tc, prone = rng.choice(FORMATS)
+        moves = rng.randint(15, 60)
         wild = rng.gammavariate(2.0, 0.5)
-        gc = GameCounts(f"g{i}", rng.choice(["bullet", "blitz", "rapid"]), (moves, moves - rng.randint(0, 1)))
+        rich = {t: rng.gammavariate(1.0, 1.0) for t in ALLOWED}
+        gc = GameCounts(f"g{i}", tc, (moves, moves - rng.randint(0, 1)))
+        chances = []  # (side that erred, the patterns it left the other side)
         for side in (0, 1):
-            lam = moves * 0.10 * wild * rng.gammavariate(4.0, 0.25) * (error_boost if side == 0 else 1.0)
-            errors = _poisson(rng, lam)
-            gc.errors[side] = errors
-            for kind, base in (("missed", MISSED), ("allowed", ALLOWED)):
-                for theme, rate in base.items():
-                    prone = min(1.0, planted.get((side, kind, theme), rate) * rng.gammavariate(2.0, 0.5))
-                    hits = sum(1 for _ in range(errors) if rng.random() < prone)
-                    if hits:
-                        gc.counts.setdefault((kind, theme), [0, 0])[side] += hits
+            own = rng.gammavariate(4.0, 0.25) * (boost if side == 0 else 1.0)
+            for _ in range(_poisson(rng, moves * 0.09 * prone * wild * own)):
+                left = _patterns(rng, yours if side == 0 else ALLOWED, rich)
+                gc.errors[side] += 1
+                gc.chances[1 - side] += 1
+                gc.pattern_chances[1 - side] += bool(left)
+                for t in left:
+                    _add(gc, "allowed", t, side)
+                    _add(gc, profile.OWN_ALLOWED, t, side)
+                if rng.random() < indep_share:
+                    for t in _patterns(rng, MISSED, rich):
+                        _add(gc, "missed", t, side)
+                chances.append((side, left))
+        while chances:
+            side, left = chances.pop()
+            other = 1 - side
+            p = q if other == 1 else max([q * punish] + [planted_q[t] for t in left if t in planted_q])
+            if rng.random() >= min(1.0, p):
+                continue
+            gc.errors[other] += 1
+            gc.followups[other] += 1
+            gc.pattern_followups[other] += bool(left)
+            for t in left:
+                _add(gc, profile.CHANCE_MISSED, t, other)
+                _add(gc, "missed", t, other)
+            again = _patterns(rng, yours if other == 0 else ALLOWED, rich, followup_allows)
+            gc.chances[side] += 1
+            gc.pattern_chances[side] += bool(again)
+            for t in again:
+                _add(gc, "allowed", t, other)
+            chances.append((other, again))
         games.append(gc)
     return games
 
 
+def _formats(games) -> dict[str, int]:
+    return {tc: sum(g.time_class == tc for g in games) for tc, _ in FORMATS}
+
+
+def _claims(n_games: int, seeds, gated=THEMES, **world) -> list[list[str]]:
+    out = []
+    for seed in seeds:
+        games = simulate(n_games, seed, **world)
+        out.append([i.id for i in motif_claims(games, gated, formats=_formats(games))[0]])
+    return out
+
+
+def _error_ratio(games) -> float:
+    """Your mistakes and blunders per move over your opponents'."""
+    e1, e2 = sum(g.errors[0] for g in games), sum(g.errors[1] for g in games)
+    m1, m2 = sum(g.moves[0] for g in games), sum(g.moves[1] for g in games)
+    return (e1 / m1) / (e2 / m2)
+
+
 # --------------------------------------------------------------------------- honesty of the claims
+# Measured over 200 worlds of 300 analysed games and 60 of 1,000 in each world below: 0 to 0.033 false claims per
+# report. The old tests ("missed" per move, "allowed" among all errors) made 0.9 to 12 per report in the coupled
+# worlds at 300 games and 5 to 26 at 1,000 ("you miss hanging pieces less often than your opponents" beside a
+# higher blunder rate). MOTIF_RUNS=<n> re-measures with n worlds per size.
 def test_no_false_motif_claims_when_both_sides_share_the_same_rates():
-    runs, n = 200, 300
-    claims = [motif_claims(simulate(n, seed), GATED)[0] for seed in range(runs)]
-    mean = sum(len(c) for c in claims) / runs
-    assert mean <= 0.05, [[i.id for i in c] for c in claims if c]
+    claims = _claims(300, range(RUNS or 60))
+    mean = sum(len(c) for c in claims) / len(claims)
+    assert mean <= 0.05, [c for c in claims if c]
 
 
-def test_more_errors_of_every_kind_is_not_a_motif_finding():
-    # You make 60% more mistakes and blunders than your opponents, with the same mix of patterns: that is the
-    # blunder-rate finding, not "you miss forks more often" (the pattern's share of your errors must stand out).
-    claims = [motif_claims(simulate(300, seed, error_boost=1.6), GATED)[0] for seed in range(30)]
-    assert sum(len(c) for c in claims) / len(claims) <= 0.1, [[i.id for i in c] for c in claims if c]
+# The coupled worlds of the review: a side that errs more hands the other side more patterns to miss, and both
+# sides miss a pattern they were left with the same probability. {your mistakes and blunders per move over your
+# opponents': [(your base error rate multiplier, q, share of own errors with a missed pattern of their own)]}:
+# with a few such misses (10%), and fully coupled (none, q 0.6: the review's worst case).
+COUPLED = {0.8: [(0.5, 0.5, 0.1), (0.35, 0.6, 0.0)], 1.25: [(2.1, 0.5, 0.1), (2.6, 0.6, 0.0)]}
+
+
+@pytest.mark.parametrize("ratio", list(COUPLED))
+def test_different_error_rates_are_not_motif_findings_when_missed_patterns_follow_allowed_ones(ratio):
+    claims = []
+    for boost, q, indep in COUPLED[ratio]:
+        world = dict(boost=boost, q=q, indep_share=indep)
+        assert _error_ratio(simulate(1000, 0, **world)) == pytest.approx(ratio, abs=0.05)  # the world it says
+        claims += _claims(300, range(RUNS or 15), **world) + _claims(1000, range(1000, 1000 + (RUNS or 5)), **world)
+    mean = sum(len(c) for c in claims) / len(claims)
+    assert mean <= 0.05, (mean, [c for c in claims if c])
+
+
+@pytest.mark.parametrize("punish", [0.75, 1.3])
+def test_missing_more_chances_of_every_kind_is_not_a_motif_finding(punish):
+    # You miss every chance your opponents leave you 30% more often (or 25% less often) than they miss yours: a
+    # difference in punishing mistakes in general, not "you miss forks more often" once per pattern.
+    claims = _claims(300, range(RUNS or 20), punish=punish) + _claims(1000, range(RUNS or 5), punish=punish)
+    assert sum(len(c) for c in claims) / len(claims) <= 0.05, [c for c in claims if c]
 
 
 def test_a_real_difference_is_found():
-    # you miss forks twice as often as your opponents, per error: realistic at 300 analysed games
-    planted = {(0, "missed", "fork"): 0.24}
+    # you miss forks twice as often as your opponents, per chance (0.7 of the forks they leave you, against 0.35):
+    # found in 30 of 40 worlds of 300 analysed games, 39 of 40 at 600 and 40 of 40 at 1,000 (1.5 times as often:
+    # 14, 26 and 35 of 40)
     found, opposite = 0, 0
     for seed in range(20):
-        claims, stats = motif_claims(simulate(300, 100 + seed, planted), GATED,
-                                     formats={"bullet": 100, "blitz": 100, "rapid": 100})
-        ids = [i.id for i in claims]
+        games = simulate(300, 100 + seed, q=0.35, planted_q={"fork": 0.7})
+        ids = [i.id for i in motif_claims(games, THEMES, formats=_formats(games))[0]]
         found += "tactics.weakness.motif-missed.fork" in ids
         opposite += "tactics.strength.motif-missed.fork" in ids
-    assert found >= 16, found
+    assert found >= 14, found
     assert opposite == 0
 
 
+def test_a_real_difference_in_what_you_allow_is_found():
+    # your mistakes and blunders allow a fork twice as often as your opponents' (0.2 of them, against 0.1): found
+    # in 38 of 40 worlds of 300 analysed games, 40 of 40 at 600 and 1,000
+    claims = _claims(300, range(200, 220), planted_allowed={"fork": 0.2})
+    assert sum("tactics.weakness.motif-allowed.fork" in c for c in claims) >= 16
+    assert not any("tactics.strength.motif-allowed.fork" in c for c in claims)
+
+
 def test_a_claim_carries_formats_a_chart_split_by_format_and_a_drill():
-    games = simulate(300, 101, {(0, "missed", "fork"): 0.30})
-    formats = {"bullet": 0, "blitz": 0, "rapid": 0}
-    for g in games:
-        formats[g.time_class] += 1
-    claims, stats = motif_claims(games, GATED, formats=formats)
+    games = simulate(300, 101, q=0.35, planted_q={"fork": 0.8})
+    formats = _formats(games)
+    claims, stats = motif_claims(games, THEMES, formats=formats)
     [fork] = [i for i in claims if i.id == "tactics.weakness.motif-missed.fork"]
     assert fork.kind == "weakness" and fork.category == "tactics"
     assert fork.title == "You miss forks more often than your opponents"
     assert fork.confidence >= 0.5 and 0 < fork.severity <= 1
     assert fork.evidence["p_adjusted"] <= 0.01 and fork.evidence["share_p_adjusted"] <= 0.01
+    # per chance: of the forks your opponents' errors left you, the share you missed, against theirs
+    ev = fork.evidence
+    assert ev["chances"] == sum(g.count("allowed", "fork")[1] for g in games) and ev["rate"] > 1.5 * ev["opp_rate"]
+    assert ev["count"] == sum(g.count(profile.CHANCE_MISSED, "fork")[0] for g in games)
     assert fork.formats == formats
-    assert "300 engine-analysed games (bullet, blitz and rapid)" in fork.detail
+    assert fork.detail.startswith("In 300 engine-analysed games (bullet, blitz and rapid), your opponents' mistakes "
+                                  f"and blunders left you a fork {ev['chances']} times and you missed {ev['count']}")
     chart = fork.chart
-    assert chart.labels == ["All games", "Bullet", "Blitz", "Rapid"]
+    assert chart.labels == ["All games", "Bullet", "Blitz", "Rapid"] and chart.value_format == "pct"
     assert [s.name for s in chart.series] == ["You", "Opponents"]
     you, them = chart.series[0].values, chart.series[1].values
-    assert you[0] > them[0] > 0
+    assert you[0] == pytest.approx(ev["rate"]) and you[0] > them[0] > 0
     assert chart.table is not None and len(chart.table.rows) == 4
     assert any("lichess.org/training/fork" in a for a in fork.study)
     assert stats["fork:missed"]["claim"] == "weakness"
 
 
+def test_the_allowed_share_leaves_out_the_missed_chances():
+    # Your errors allow forks at the same rate as your opponents', but half of their errors are chances they
+    # missed (which allow nothing): among all errors your share looks twice theirs, among their own errors not.
+    games = []
+    for i in range(200):
+        gc = GameCounts(f"g{i}", "blitz", (40, 40), [4, 8], {("allowed", "fork"): [1, 1],
+                                                            (profile.OWN_ALLOWED, "fork"): [1, 1]})
+        gc.followups = [0, 4]
+        games.append(gc)
+    [test] = [t for t in profile.motif_tests(games, {"fork"}) if t.kind == "allowed"]
+    assert test.share.mean == pytest.approx(0.0) and test.rate.mean == pytest.approx(0.0)
+    assert motif_claims(games, {"fork"})[0] == []
+
+
 def test_minimum_samples_before_any_test():
-    games = simulate(40, 7, {(0, "missed", "backRankMate"): 0.5})
-    tests = {(t.theme, t.kind) for t in profile.motif_tests(games, GATED)}
-    for t in profile.motif_tests(games, GATED):
+    games = simulate(40, 7, planted_q={"backRankMate": 0.9})
+    tests = {(t.theme, t.kind) for t in profile.motif_tests(games, THEMES)}
+    for t in profile.motif_tests(games, THEMES):
         assert t.games_with >= profile.MIN_MOTIF_GAMES and t.events >= profile.MIN_MOTIF_EVENTS
-    assert ("backRankMate", "allowed") not in tests  # rare: never enough games
+    assert ("backRankMate", "missed") not in tests  # rare: never enough games
     assert profile.motif_tests(games, frozenset()) == []  # nothing gated, nothing tested
 
 
 def test_only_gated_patterns_are_named():
-    games = simulate(300, 3, {(0, "missed", "fork"): 0.40})
+    games = simulate(300, 3, q=0.35, planted_q={"fork": 0.9})
+    assert "tactics.weakness.motif-missed.fork" in [i.id for i in motif_claims(games, THEMES)[0]]
     assert motif_claims(games, frozenset({"pin"}))[0] == []  # the fork detector did not pass the gate
     table = profile.profile_table(games, {"pin"}, {"blitz": 300})
     assert [r[0] for r in table.rows] == ["Pin"]
@@ -176,6 +300,55 @@ def test_collect_counts_each_error_once_per_pattern_and_side():
     assert len(events) == 4
 
 
+def test_collect_links_each_chance_to_the_next_move():
+    """An error with a refutation is a chance for the other side; an error of theirs on the next ply missed it."""
+    ctx = _records_ctx(1)
+    from chess_insights.analysis.engine_stats import join
+
+    [g] = ctx.games  # you are White: your moves are the even plies
+    lines = {name: _line() for name in ("fork-left", "pin-left", "quiet", "missed-fork", "other", "none")}
+    found = {
+        id(lines["fork-left"]): [Motif("fork", "refutation", 0, [], "opponent"),
+                                 Motif("hangingPiece", "refutation", 0, [], "opponent")],
+        id(lines["pin-left"]): [Motif("pin", "refutation", 0, [], "opponent")],
+        id(lines["missed-fork"]): [Motif("fork", "best", 0, ["e4"], "you")],
+    }
+    errors = [
+        # your error at ply 4 leaves a fork and a hanging piece; your opponent errs at ply 5: both chances missed
+        ProfileError(g.game_id, 4, "you", "blitz", START, "e2e4", 30.0, lines["none"], lines["fork-left"]),
+        ProfileError(g.game_id, 5, "opponent", "blitz", START, "e2e4", 20.0, lines["missed-fork"], lines["quiet"]),
+        # ... which leaves you a chance with no pattern: your error at ply 6 is a missed chance, of no pattern
+        ProfileError(g.game_id, 6, "you", "blitz", START, "e2e4", 20.0, lines["other"], lines["pin-left"]),
+        # your pin at ply 6 is taken (no error at ply 7); your error at ply 10 follows no error of theirs
+        ProfileError(g.game_id, 10, "you", "blitz", START, "e2e4", 20.0, lines["missed-fork"], None),
+    ]
+    [c], events = profile.collect(join(ctx), errors, lambda line, role: found.get(id(line), []), gated={"fork", "pin"})
+    assert c.errors == [3, 1] and c.chances == [1, 2] and c.followups == [1, 1]
+    assert c.pattern_chances == [0, 2] and c.pattern_followups == [0, 1]  # the quiet chance has no named pattern
+    assert c.count(profile.CHANCE_MISSED, "fork") == (0, 1) and c.count(profile.CHANCE_MISSED, "hangingPiece") == (0, 1)
+    assert c.count("allowed", "pin") == (1, 0) and c.count(profile.OWN_ALLOWED, "pin") == (0, 0)  # ply 6: a followup
+    assert c.count(profile.OWN_ALLOWED, "fork") == (1, 0) and c.own_errors(0) == 2 and c.own_errors(1) == 0
+    # the fork your opponent missed at ply 5 came right after you left it; yours at ply 10 followed no chance
+    missed = {(e.error.ply, e.after_chance) for e in events if e.kind == "missed"}
+    assert missed == {(5, True), (10, False)}
+    assert c.count("missed", "fork") == (1, 1)  # the table still counts every missed fork
+    # without a gate every named pattern counts as a tactical chance
+    [c], _ = profile.collect(join(ctx), errors, lambda line, role: found.get(id(line), []))
+    assert c.pattern_chances == [0, 2]
+
+
+def test_the_contrast_test_asks_whether_a_share_stands_out_more_for_you():
+    # you miss 60% of your fork chances and 30% of the others; your opponents 30% and 30%
+    rows = [(6, 10, 3, 10, 3, 10, 3, 10)] * 40
+    t = profile.ratio_contrast_test(rows)
+    assert t.mean == pytest.approx(math.log(2.0), abs=0.01) and t.p_value < 0.001  # log(60% / 30%) - log(1)
+    # you miss everything more often than your opponents, forks no more than the rest: no contrast
+    even = profile.ratio_contrast_test([(6, 10, 6, 10, 3, 10, 3, 10)] * 40)
+    assert even.mean == pytest.approx(0.0) and even.p_value > 0.5
+    assert profile.ratio_contrast_test([]).p_value == 1.0
+    assert profile.ratio_contrast_test([(1, 1, 0, 0, 1, 1, 0, 0)] * 5).p_value == 1.0  # no other chances
+
+
 def test_a_line_the_detectors_fail_on_counts_without_a_pattern():
     ctx = _records_ctx(1)
     from chess_insights.analysis.engine_stats import join
@@ -204,7 +377,10 @@ def test_table_and_chart_are_per_100_moves_with_practice_links():
     assert table.rows[0] == ["Fork", 3.0, 1.0, 0.0, 0.0, "https://lichess.org/training/fork"]
     assert [r[0] for r in table.rows] == ["Fork", "Pin"]  # mateIn2 is not gated here
     assert "2 engine-analysed games (2 blitz)" in table.note
+    # untested: the gaps between you and your opponents here are observations, not findings
+    assert table.note.endswith(profile.UNTESTED_NOTE) and "not findings" in profile.UNTESTED_NOTE
     chart = profile.profile_chart([g, h], GATED, {"blitz": 2})
+    assert chart.note.endswith(profile.UNTESTED_NOTE)
     assert chart.labels == ["Fork · missed", "Fork · allowed", "Pin · missed", "Pin · allowed"]
     assert chart.series[0].values == [3.0, 0.0, 0.0, 1.0] and chart.series[1].values == [1.0, 0.0, 0.0, 0.0]
     assert chart.table.rows[0][:3] == ["Fork", "missed", 3]
@@ -218,8 +394,14 @@ def test_names_of_patterns():
 
 
 # --------------------------------------------------------------------------- the coaching step
-def _planted_world(n_games=120, seed=5, p_you=0.8, p_opp=0.15):
-    """Games, evals and profiled errors where you miss forks far more often than your opponents (by default)."""
+def _planted_world(n_games=90, seed=5, p_you=0.8, p_opp=0.15, p_pin=0.3):
+    """Games, evals and profiled errors where you miss the forks your opponents' errors leave you far more often
+    than they miss yours (by default).
+
+    Each game has four chances, one error each at the plies below: your opponent's error leaves you a fork, and
+    your next move is an error too (the fork missed) with probability ``p_you``; your error leaves them a fork,
+    missed with probability ``p_opp``; and the same with a pin (missed with ``p_pin`` on both sides), so there are
+    other tactical chances to compare with."""
     rng = random.Random(seed)
     games, evals, errors, registry = [], {}, [], {}
     for k in range(n_games):
@@ -227,24 +409,36 @@ def _planted_world(n_games=120, seed=5, p_you=0.8, p_opp=0.15):
                       game_id=f"pg{k}", url=f"https://www.chess.com/game/live/{9000 + k}")
         plies = [make_ply_eval(ply=i, mover="white" if i % 2 == 0 else "black", is_user=g.is_my_ply(i),
                                san=g.moves_san[i]) for i in range(g.plies)]
-        for i in (4, 5, 6, 7):  # your errors are errors in the game analysis too (the puzzle export's selection)
-            if g.is_my_ply(i):
-                plies[i] = dataclasses.replace(plies[i], win_before=60.0, win_after=40.0,
-                                               best_san="h4" if g.moves_san[i] != "h4" else "a4")
-        games.append(g)
-        evals[g.game_id] = make_game_eval(g.game_id, plies)
-        for side, p_fork in (("you", p_you), ("opponent", p_opp)):
-            for e in range(2):
-                ply = 4 + 2 * e + (0 if (side == "you") == (g.color == "white") else 1)
-                fen = START if ply % 2 == 0 else AFTER_E4
-                best = Line(fen=fen, moves_uci=["g1f3", "b8c6", "f1c4"] if fen == START else ["e7e5", "g1f3"])
-                refutation = Line(fen=fen, moves_uci=["d2d4", "d7d5"] if fen == START else ["d7d5", "e4d5"])
-                fork = Motif("fork", "best", 0, ["f3", "e5", "d4"], "you")
-                registry[id(best)] = [fork] if rng.random() < p_fork else []
-                registry[id(refutation)] = [Motif("pin", "refutation", 1, [], "opponent")] if rng.random() < 0.2 else []
-                played = "d2d4" if fen == START else "d7d5"
+        o = 5 if g.color == "white" else 4  # your opponent's first error
+        board, fens = chess.Board(), []
+        for san in g.moves_san:
+            fens.append(board.fen())
+            board.push_san(san)
+        mine = []
+        for start, first, second, theme, p_miss in ((o, "opponent", "you", "fork", p_you),
+                                                     (o + 3, "you", "opponent", "fork", p_opp),
+                                                     (o + 6, "opponent", "you", "pin", p_pin),
+                                                     (o + 9, "you", "opponent", "pin", p_pin)):
+            for ply, side, role in ((start, first, "refutation"), (start + 1, second, "best")):
+                if role == "best" and rng.random() >= p_miss:
+                    continue  # the chance was taken: no error
+                fen = fens[ply]
+                best = Line(fen=fen, moves_uci=["h2h4"] if chess.Board(fen).turn == chess.WHITE else ["h7h5"])
+                refutation = Line(fen=fens[ply + 1], moves_uci=[])
+                if role == "refutation":
+                    registry[id(refutation)] = [Motif(theme, "refutation", 0, ["e4", "e5"], "opponent")]
+                else:
+                    registry[id(best)] = [Motif(theme, "best", 0, ["f3", "e5", "d4"], "you")]
+                played = chess.Board(fen).parse_san(g.moves_san[ply]).uci()
                 errors.append(ProfileError(g.game_id, ply, side, g.time_class, fen, played, 20.0 + k % 7, best,
                                            refutation))
+                if side == "you":
+                    mine.append(ply)
+        for i in mine:  # your errors are errors in the game analysis too (the puzzle export's selection)
+            plies[i] = dataclasses.replace(plies[i], win_before=60.0, win_after=40.0,
+                                           best_san="h4" if g.moves_san[i] != "h4" else "a4")
+        games.append(g)
+        evals[g.game_id] = make_game_eval(g.game_id, plies)
     ctx = AnalysisContext(username="tester", games=games, evals=evals)
     return ctx, errors, registry
 
@@ -260,18 +454,25 @@ def test_annotate_adds_the_profile_and_claims_to_the_engine_review(monkeypatch):
 
     assert coaching.motif_profile is not None and coaching.motif_profile in engine.tables
     assert coaching.motif_chart is not None and coaching.motif_chart in engine.charts
-    assert "(40 bullet, 40 blitz, 40 rapid)" in coaching.motif_profile.note  # the formats analysed, in order
+    assert "(30 bullet, 30 blitz, 30 rapid)" in coaching.motif_profile.note  # the formats analysed, in order
+    assert profile.UNTESTED_NOTE in coaching.motif_profile.note and profile.UNTESTED_NOTE in coaching.motif_chart.note
     [claim] = [i for i in engine.insights if i.id == "tactics.weakness.motif-missed.fork"]
-    assert claim.formats == {"bullet": 40, "blitz": 40, "rapid": 40}
+    assert [i.id for i in engine.insights] == ["tactics.weakness.motif-missed.fork"]  # the pins: no difference
+    assert claim.formats == {"bullet": 30, "blitz": 30, "rapid": 30}
     assert claim.example_games and all(u.startswith("https://www.chess.com/game/live/") for u in claim.example_games)
     diagram = claim.diagram
-    assert diagram is not None and diagram.fen in (START, AFTER_E4)
+    assert diagram is not None and diagram.fen in {e.fen for e in errors if e.side == "you"}
     assert [a.kind for a in diagram.arrows] == ["played", "best"]
     assert diagram.strips and diagram.strips[0].frames[0].marks[0].kind == "attacker"
     assert diagram.orientation in ("white", "black") and diagram.link == claim.example_games[0]
     counts = coaching.settings["motif_profile"]["counts"]
     assert counts["fork"]["you_missed"] > 3 * counts["fork"]["opp_missed"] > 0
+    assert counts["fork"]["you_chances"] == counts["fork"]["opp_allowed"] == 90
+    assert counts["fork"]["you_missed_chances"] == counts["fork"]["you_missed"]
     assert engine.stats["motif_profile"]["tests"]["fork:missed"]["claim"] == "weakness"
+    assert coaching.settings["motif_profile"]["findings"] == [claim.id]
+    # the board shows one of the forks your opponent had just left you
+    assert claim.diagram.title.startswith("The fork you missed")
     # the puzzle export gets your errors' best lines and their named patterns
     assert set(coaching.puzzle_lines) == {f"{e.game_id}:{e.ply}" for e in errors if e.side == "you"}
     assert any(v == ["fork"] for v in coaching.puzzle_themes.values())
@@ -433,3 +634,22 @@ def test_puzzle_lines_are_kept_only_for_the_puzzle_exports_errors(monkeypatch):
     coaching = Coaching()
     profile.annotate(ctx, coaching, [], CoachConfig())
     assert len(coaching.puzzle_lines) == 1
+
+
+def test_puzzle_themes_come_only_with_the_line_they_describe():
+    """The profile pass adds a Themes entry only for a line it supplies, and only patterns within the moves kept."""
+    g = make_game(color="white", game_id="pz")
+    long = Line(START, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d4", "e5d4", "e1g1", "f6e4"])
+    errors = [ProfileError("pz", ply, "you", "blitz", START, "a2a3", 20.0, long, None) for ply in (4, 6, 8)]
+    events = [
+        profile.MotifEvent(g, errors[0], "missed", Motif("fork", "best", 2, [], "you")),
+        profile.MotifEvent(g, errors[1], "missed", Motif("pin", "best", 1, [], "you")),
+        profile.MotifEvent(g, errors[2], "missed", Motif("skewer", "best", 9, [], "you")),  # beyond the 8 plies kept
+    ]
+    coaching = Coaching()
+    deeper = Line(START, ["d2d4"])
+    coaching.puzzle_lines["pz:6"] = deeper  # the deeper coach line (fill_puzzle_lines) found no pattern on it
+    profile._puzzle_lines(coaching, errors, events, frozenset({"fork", "pin", "skewer"}))
+    assert coaching.puzzle_lines["pz:6"] is deeper and "pz:6" not in coaching.puzzle_themes  # not the profile's pin
+    assert coaching.puzzle_themes == {"pz:4": ["fork"]}
+    assert len(coaching.puzzle_lines["pz:8"].moves_uci) == profile.PUZZLE_LINE_PLIES  # the skewer is not in it

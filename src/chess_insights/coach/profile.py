@@ -12,16 +12,30 @@ Each error counts once per pattern, and the counts are compared per 100 moves of
 your opponents (rating-matched, same positions, same clock) are the benchmark, as everywhere in the Engine review.
 
 The table and chart are observations. The only claims are "you miss (allow) forks more (less) often than your
-opponents", and each must pass the project-wide rule: games are the unit (the clustered tests of
-``analysis.engine_stats``, pairing you and your opponent in each game), the pattern must be more common per move
-*and* a larger share of your errors than of theirs (so making more errors of every kind stays one finding, the
-blunder rate), Benjamini-Hochberg adjusted across every pattern and both kinds, ``stats.significance`` at
-``stats.STRICT_ALPHA``, minimum samples, and a rate ratio of at least ``MOTIF_RATIO``. Only patterns whose
-detector passed the precision gate (``motifs.GATED_THEMES``) are named at all.
+opponents", and they are built so that making more errors than your opponents cannot turn into a pattern claim:
+
+* A pattern is mostly there to be missed because the other side's last move allowed it (a piece left hanging, a
+  fork let in), so a player who blunders more hands their opponents more patterns to miss. "Missed" claims are
+  therefore judged **per chance**: of the X's your opponents' mistakes and blunders left you (their errors whose
+  refutation carries X), the share you missed (your next move was a mistake or blunder too), against the same
+  share for your opponents, judged on the smaller side's games with such a chance. The share must also stand out
+  against the share of your other tactical chances you missed, more than it does for your opponents
+  (:func:`ratio_contrast_test`): missing more chances of every kind, or a pattern that merely comes with another
+  one, is not one claim per pattern.
+* "Allowed" claims need the pattern to be more common per move *and* a larger share of your own mistakes and
+  blunders than of theirs, where the errors made right after one of the other side's (a missed chance, whose
+  number depends on the other side's errors) are left out of both.
+
+Each test has games as the unit (the clustered tests of ``analysis.engine_stats``, pairing you and your opponent
+in each game), is Benjamini-Hochberg adjusted across every pattern and both kinds, and must pass
+``stats.significance`` at ``stats.STRICT_ALPHA`` with minimum samples and a ratio of at least ``MOTIF_RATIO``
+(the comparison with the rest is not truncated at 1). Only patterns whose detector passed the precision gate
+(``motifs.GATED_THEMES``) are named at all.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
@@ -30,7 +44,7 @@ import chess
 
 from ..analysis.engine_stats import Analysed, clustered_share_test, join
 from ..models import Chart, Coaching, Diagram, Game, Insight, Line, Mark, ModuleResult, Motif, Table
-from ..stats import STRICT_ALPHA, MeanTest, bh_adjust, clamp, pct, significance
+from ..stats import STRICT_ALPHA, MeanTest, bh_adjust, clamp, normal_cdf, pct, significance
 from ..visuals import (
     FORMAT_NAMES,
     MIN_FORMAT_GAMES,
@@ -118,11 +132,26 @@ def _article(word: str) -> str:
 
 
 # --------------------------------------------------------------------------- counting
+CHANCE_MISSED = "chance-missed"  # count kind: errors right after the other side's error that left the pattern
+OWN_ALLOWED = "own-allowed"  # count kind: "allowed" among the errors that did not follow one of the other side's
+
+
 @dataclass
 class GameCounts:
     """One engine-analysed game: each side's moves, profiled errors and pattern counts (the unit of every test).
 
-    Pairs are (yours, your opponent's).
+    Pairs are (yours, your opponent's). ``counts`` has, per (kind, theme):
+
+    * ``"missed"`` / ``"allowed"``: errors whose best line / refutation carries the pattern (the table and chart);
+    * ``CHANCE_MISSED``: errors made right after one of the other side's errors whose refutation carried the
+      pattern: chances left by the other side and missed (a side's ``"allowed"`` count is the *other* side's
+      chances of that pattern);
+    * ``OWN_ALLOWED``: ``"allowed"`` among the errors that are not such follow-ups.
+
+    ``chances``: the other side's errors with a refutation line (the chances it left you, and you left it);
+    ``followups``: errors made right after one of those (a chance missed, whatever the pattern);
+    ``pattern_chances`` / ``pattern_followups``: the same for the chances whose refutation carries a named pattern
+    (the tactical chances each pattern's miss rate is compared with).
     """
 
     game_id: str
@@ -131,10 +160,18 @@ class GameCounts:
     errors: list[int] = field(default_factory=lambda: [0, 0])  # mistakes and blunders with engine lines
     counts: dict[tuple[str, str], list[int]] = field(default_factory=dict)  # (kind, theme) -> errors with it
     url: str = ""
+    chances: list[int] = field(default_factory=lambda: [0, 0])
+    followups: list[int] = field(default_factory=lambda: [0, 0])
+    pattern_chances: list[int] = field(default_factory=lambda: [0, 0])
+    pattern_followups: list[int] = field(default_factory=lambda: [0, 0])
 
     def count(self, kind: str, theme: str) -> tuple[int, int]:
         pair = self.counts.get((kind, theme))
         return (pair[0], pair[1]) if pair else (0, 0)
+
+    def own_errors(self, side: int) -> int:
+        """Errors of ``side`` (0 = you) that did not come right after a chance the other side left."""
+        return self.errors[side] - self.followups[side]
 
 
 @dataclass
@@ -145,6 +182,7 @@ class MotifEvent:
     error: "ProfileError"
     kind: str  # "missed" | "allowed"
     motif: Motif
+    after_chance: bool = False  # "missed": the other side's error on the ply before had just left this pattern
 
     @property
     def side(self) -> str:
@@ -178,6 +216,7 @@ def collect(
     errors: Iterable["ProfileError"],
     detect: Callable[..., list[Motif]],
     notes: Optional[list[str]] = None,
+    gated: Optional[Iterable[str]] = None,
 ) -> tuple[list[GameCounts], list[MotifEvent]]:
     """Per-game counts and the individual events, from the profiled errors of the analysed games.
 
@@ -187,7 +226,13 @@ def collect(
     that led to the error's position (``detect(line, "best", previous_fen)``: a capture that ends a trade is no
     hanging piece), from ``ProfileError.previous_fen`` or, when an error lacks it, from one replay of its game;
     a detector that takes only ``(line, role)`` is called with two arguments.
+
+    An error with a refutation line is a chance for the other side, carrying the patterns its refutation shows;
+    an error of the other side on the very next ply is that chance missed (``GameCounts.followups`` and the
+    ``CHANCE_MISSED`` counts; its "missed" events are marked ``after_chance`` for the patterns the chance had).
+    A chance whose refutation carries a pattern in ``gated`` (any pattern when None) is a pattern chance.
     """
+    named = None if gated is None else frozenset(gated)
     games: list[GameCounts] = []
     by_id: dict[str, tuple[Game, GameCounts]] = {}
     for r in records:
@@ -197,23 +242,24 @@ def collect(
         by_id[r.game.game_id] = (r.game, gc)
     errors = list(errors)
     previous = _previous_positions(errors, {gid: g for gid, (g, _) in by_id.items()})
-    events: list[MotifEvent] = []
     seen: set[tuple[str, int]] = set()
     failed = 0
+    # first pass: each error once, with the patterns along its lines (allowed None: no refutation line)
+    read: list[tuple["ProfileError", Game, GameCounts, int, dict[str, Motif], Optional[dict[str, Motif]]]] = []
     for e in errors:
         entry = by_id.get(e.game_id)
         if entry is None or e.side not in SIDES or (e.game_id, e.ply) in seen:
             continue
         seen.add((e.game_id, e.ply))
         game, gc = entry
-        s = SIDES.index(e.side)
-        gc.errors[s] += 1
         before = getattr(e, "previous_fen", None) or previous.get((e.game_id, e.ply))
         # best line: the patterns the player who went wrong would have carried out ("you" = the side to move);
         # refutation: the ones the other side carries out after the move
+        patterns: dict[str, Optional[dict[str, Motif]]] = {}
         for kind, line, role, carrier in (("missed", e.best_line, "best", "you"),
                                           ("allowed", e.refutation, "refutation", "opponent")):
             if line is None:
+                patterns[kind] = None
                 continue
             try:
                 detected = _detect(detect, line, role, before if role == "best" else None)
@@ -224,13 +270,41 @@ def collect(
             for m in detected:
                 if m.theme and (not m.side or m.side == carrier):
                     found.setdefault(m.theme, m)
-            for theme, m in found.items():
-                gc.counts.setdefault((kind, theme), [0, 0])[s] += 1
-                events.append(MotifEvent(game, e, kind, m))
+            patterns[kind] = found
+        read.append((e, game, gc, SIDES.index(e.side), patterns["missed"] or {}, patterns["allowed"]))
+    # the chance each error with a refutation left the other side: (game, ply) -> (side that erred, its patterns)
+    chance_at = {(e.game_id, e.ply): (s, allowed) for e, _, _, s, _, allowed in read if allowed is not None}
+    events: list[MotifEvent] = []
+    for e, game, gc, s, missed, allowed in read:
+        gc.errors[s] += 1
+        chance = chance_at.get((e.game_id, e.ply - 1))
+        followup = chance is not None and chance[0] != s  # right after a chance the other side left: missed it
+        left: dict[str, Motif] = chance[1] if followup else {}
+        if followup:
+            gc.followups[s] += 1
+            gc.pattern_followups[s] += _named_in(left, named)
+            for theme in left:
+                gc.counts.setdefault((CHANCE_MISSED, theme), [0, 0])[s] += 1
+        if allowed is not None:
+            gc.chances[1 - s] += 1
+            gc.pattern_chances[1 - s] += _named_in(allowed, named)
+        for theme, m in missed.items():
+            gc.counts.setdefault(("missed", theme), [0, 0])[s] += 1
+            events.append(MotifEvent(game, e, "missed", m, after_chance=theme in left))
+        for theme, m in (allowed or {}).items():
+            gc.counts.setdefault(("allowed", theme), [0, 0])[s] += 1
+            if not followup:
+                gc.counts.setdefault((OWN_ALLOWED, theme), [0, 0])[s] += 1
+            events.append(MotifEvent(game, e, "allowed", m))
     if failed and notes is not None:
         lines = "1 engine line" if failed == 1 else f"{failed} engine lines"
         notes.append(f"Motif profile: the pattern detectors failed on {lines} (counted without a pattern).")
     return games, events
+
+
+def _named_in(themes: Iterable[str], named: Optional[frozenset[str]]) -> bool:
+    """Whether ``themes`` has a named pattern (any, when ``named`` is None)."""
+    return any(named is None or t in named for t in themes)
 
 
 def _sums(games: Sequence[GameCounts], kind: str, theme: str) -> tuple[int, int, int, int]:
@@ -250,13 +324,21 @@ def themes_seen(games: Sequence[GameCounts]) -> list[str]:
     return sorted({theme for g in games for (_, theme) in g.counts})
 
 
+_BASE_COUNTS = ("you_missed", "opp_missed", "you_allowed", "opp_allowed")
+
+
 def profile_counts(games: Sequence[GameCounts], themes: Iterable[str]) -> dict[str, dict[str, int]]:
-    """{theme: {"you_missed", "opp_missed", "you_allowed", "opp_allowed"}} over every game."""
+    """{theme: {"you_missed", "opp_missed", "you_allowed", "opp_allowed", "you_chances", "you_missed_chances",
+    "opp_chances", "opp_missed_chances"}} over every game. Your chances are the patterns your opponents' errors
+    left you (their "allowed"), and "missed_chances" how many of them the side missed (its next move was an error
+    too)."""
     out = {}
     for theme in themes:
         mx, _, ox, _ = _sums(games, "missed", theme)
         ax, _, bx, _ = _sums(games, "allowed", theme)
-        out[theme] = {"you_missed": mx, "opp_missed": ox, "you_allowed": ax, "opp_allowed": bx}
+        cx, _, dx, _ = _sums(games, CHANCE_MISSED, theme)
+        out[theme] = {"you_missed": mx, "opp_missed": ox, "you_allowed": ax, "opp_allowed": bx,
+                      "you_chances": bx, "you_missed_chances": cx, "opp_chances": ax, "opp_missed_chances": dx}
     return out
 
 
@@ -264,7 +346,8 @@ def profile_counts(games: Sequence[GameCounts], themes: Iterable[str]) -> dict[s
 def _named(games: Sequence[GameCounts], gated: Iterable[str]) -> list[str]:
     """Named patterns that turned up at all, most frequent first."""
     counts = profile_counts(games, [t for t in themes_seen(games) if t in set(gated)])
-    return sorted((t for t, c in counts.items() if sum(c.values())), key=lambda t: (-sum(counts[t].values()), t))
+    total = {t: sum(c[k] for k in _BASE_COUNTS) for t, c in counts.items()}
+    return sorted((t for t in counts if total[t]), key=lambda t: (-total[t], t))
 
 
 def _games_note(games: Sequence[GameCounts], formats: dict[str, int]) -> str:
@@ -281,6 +364,12 @@ _KIND_NOTE = (
     "Missed: the engine's better move started the pattern for the player who went wrong. Allowed: after a mistake "
     "or blunder, the engine's refutation uses the pattern against the player who made it. Each mistake or blunder "
     "counts once per pattern."
+)
+# the profile's numbers are not tested as they stand: a gap between the bars is a finding only when listed as one
+UNTESTED_NOTE = (
+    "These are observations, not findings: a difference here counts only when this section lists it as a finding. "
+    "Most patterns are there to be missed because the other side's mistake left them, so the 'missed' numbers also "
+    "rise and fall with how often the other side errs."
 )
 
 
@@ -299,7 +388,7 @@ def profile_table(games: Sequence[GameCounts], gated: Iterable[str], formats: di
         columns=["Pattern", "You missed", "Opponents missed", "You allowed", "Opponents allowed", "Practice"],
         rows=rows,
         formats=["text", "float2", "float2", "float2", "float2", "url"],
-        note=f"{_games_note(games, formats)} {_KIND_NOTE} Practice: Lichess puzzles of that theme.",
+        note=f"{_games_note(games, formats)} {_KIND_NOTE} Practice: Lichess puzzles of that theme. {UNTESTED_NOTE}",
         key_columns=[0, 1, 2, 3, 4],
     )
 
@@ -322,7 +411,7 @@ def profile_chart(games: Sequence[GameCounts], gated: Iterable[str], formats: di
         labels,
         [("You", you), ("Opponents", them)],
         value_format="float2",
-        note=f"{_games_note(games, formats)} {_KIND_NOTE}",
+        note=f"{_games_note(games, formats)} {_KIND_NOTE} {UNTESTED_NOTE}",
         table=Table(
             title="Tactical patterns: counts",
             columns=["Pattern", "Kind", "You", "You /100 moves", "Opponents", "Opponents /100 moves"],
@@ -335,14 +424,72 @@ def profile_chart(games: Sequence[GameCounts], gated: Iterable[str], formats: di
 # --------------------------------------------------------------------------- claims
 @dataclass
 class MotifTest:
+    """The two tests behind one possible claim, games as the unit.
+
+    ``missed``: ``rate`` is the share of the pattern's chances you missed minus your opponents' share (your chances:
+    the patterns their errors left you); ``share`` whether that stands out against the other tactical chances
+    (:func:`ratio_contrast_test`). ``allowed``: ``rate`` is your rate per move minus theirs, ``share`` the pattern's
+    share of your own errors (not counting the ones right after a chance) minus theirs."""
+
     theme: str
     kind: str
-    rate: MeanTest  # your rate per move minus theirs, games as the unit
-    share: MeanTest  # the pattern's share of your errors minus its share of theirs
-    games_with: int  # games in which either side had it
-    events: int  # both sides
+    rate: MeanTest
+    share: MeanTest
+    games_with: int  # games in which either side had it (a chance of it, for "missed")
+    events: int  # both sides (chances, for "missed")
+    n: int = 0  # the sample size the claim rule judges: for "missed", the smaller side's games with a chance of it
     p_rate: float = 1.0  # BH-adjusted
     p_share: float = 1.0
+
+
+def ratio_contrast_test(rows: Sequence[tuple[int, int, int, int, int, int, int, int]]) -> MeanTest:
+    """Whether one share stands out against another more for you than for your opponents: a test of
+    log(a1 / b1) - log(a2 / b2), games as the unit.
+
+    ``rows`` holds per game (x_a1, n_a1, x_b1, n_b1, x_a2, n_a2, x_b2, n_b2), with a = x_a / n_a (e.g. the forks
+    you were left that you missed) and b = x_b / n_b (the other tactical chances you missed); 1 = you, 2 = your
+    opponents. The four shares are ratio estimators with half an event added to each count; the variance is the
+    clustered (delta-method) one, never below that of four independent binomial shares. The mean is > 0 when the
+    first share stands out more for you."""
+    rows = [r for r in rows if any(r)]
+    n = len(rows)
+    events = [sum(r[2 * k] for r in rows) for k in range(4)]
+    totals = [sum(r[2 * k + 1] for r in rows) for k in range(4)]
+    if n < 2 or min(totals) <= 0:
+        return MeanTest(n, 0.0, float("inf"), 0.0, 1.0)
+    shares = [(x + 0.5) / (t + 1.0) for x, t in zip(events, totals)]
+    signs = (1.0, -1.0, -1.0, 1.0)
+    mean = sum(sign * math.log(p) for sign, p in zip(signs, shares))
+    residuals = [
+        sum(sign * (r[2 * k] - shares[k] * r[2 * k + 1]) / (shares[k] * (totals[k] + 1.0))
+            for k, sign in enumerate(signs))
+        for r in rows
+    ]
+    variance = n / (n - 1) * sum(v * v for v in residuals)
+    floor = sum(max(0.0, 1.0 - p) / (p * (t + 1.0)) for p, t in zip(shares, totals))
+    variance = max(variance, floor)
+    if variance <= 0.0:
+        return MeanTest(n, mean, float("inf"), 0.0, 1.0)
+    se = math.sqrt(variance)
+    z = mean / se
+    return MeanTest(n, mean, se, z, 2.0 * (1.0 - normal_cdf(abs(z))))
+
+
+def _chances(games: Sequence[GameCounts], theme: str) -> tuple[int, int, int, int]:
+    """(chances of ``theme`` you missed, chances your opponents' errors left you, theirs missed, theirs)."""
+    x1, _, x2, _ = _sums(games, CHANCE_MISSED, theme)
+    allowed_you, _, allowed_them, _ = _sums(games, "allowed", theme)
+    return x1, allowed_them, x2, allowed_you  # your chances are your opponents' "allowed", and theirs yours
+
+
+def _missed_rows(g: GameCounts, theme: str) -> tuple[int, int, int, int, int, int, int, int]:
+    """One game's (chances of ``theme`` you missed, your chances of it, your other tactical chances missed, your
+    other tactical chances), then your opponents' four."""
+    out: list[int] = []
+    for side in (0, 1):
+        missed, chances = g.count(CHANCE_MISSED, theme)[side], g.count("allowed", theme)[1 - side]
+        out += [missed, chances, max(0, g.pattern_followups[side] - missed), max(0, g.pattern_chances[side] - chances)]
+    return tuple(out)  # type: ignore[return-value]
 
 
 def motif_tests(
@@ -350,20 +497,29 @@ def motif_tests(
     min_events: int = MIN_MOTIF_EVENTS,
 ) -> list[MotifTest]:
     """Every named pattern x {missed, allowed} with enough data, BH-adjusted across all of them (each test family:
-    rates and shares)."""
+    the rates, and the shares)."""
     tests = []
     for theme in sorted(set(gated)):
-        for kind in KINDS:
-            pairs = [g.count(kind, theme) for g in games]
-            games_with = sum(1 for a, b in pairs if a or b)
-            events = sum(a + b for a, b in pairs)
-            if games_with < min_games or events < min_events:
-                continue
+        # missed, per chance: of the patterns the other side's errors left you (its "allowed"), the ones you missed;
+        # judged on the smaller side's games with a chance of it (a two-group comparison)
+        rows = [_missed_rows(g, theme) for g in games]
+        games_with = sum(1 for r in rows if r[1] or r[5])
+        events = sum(r[1] + r[5] for r in rows)
+        n = min(sum(1 for r in rows if r[1]), sum(1 for r in rows if r[5]))
+        if n >= min_games and events >= min_events:
+            rate = clustered_share_test([(r[0], r[1]) for r in rows], [(r[4], r[5]) for r in rows])
+            tests.append(MotifTest(theme, "missed", rate, ratio_contrast_test(rows), games_with, events, n))
+        # allowed, per move and as a share of the errors that were not a missed chance
+        pairs = [g.count("allowed", theme) for g in games]
+        own = [g.count(OWN_ALLOWED, theme) for g in games]
+        games_with = sum(1 for a, b in pairs if a or b)
+        events = sum(a + b for a, b in pairs)
+        if games_with >= min_games and events >= min_events:
             rate = clustered_share_test([(a, g.moves[0]) for (a, _), g in zip(pairs, games)],
                                         [(b, g.moves[1]) for (_, b), g in zip(pairs, games)])
-            share = clustered_share_test([(a, g.errors[0]) for (a, _), g in zip(pairs, games)],
-                                         [(b, g.errors[1]) for (_, b), g in zip(pairs, games)])
-            tests.append(MotifTest(theme, kind, rate, share, games_with, events))
+            share = clustered_share_test([(a, g.own_errors(0)) for (a, _), g in zip(own, games)],
+                                         [(b, g.own_errors(1)) for (_, b), g in zip(own, games)])
+            tests.append(MotifTest(theme, "allowed", rate, share, games_with, events, games_with))
     for t, p in zip(tests, bh_adjust([t.rate.p_value for t in tests])):
         t.p_rate = p
     for t, p in zip(tests, bh_adjust([t.share.p_value for t in tests])):
@@ -378,34 +534,62 @@ def _rate_ratio(x1: int, n1: int, x2: int, n2: int) -> Optional[float]:
     return ((x1 + 0.5) / n1) / ((x2 + 0.5) / n2)
 
 
+def _share(x: int, n: int) -> Optional[float]:
+    return x / n if n else None
+
+
 def _format_chart(games: Sequence[GameCounts], kind: str, theme: str, formats: dict[str, int]) -> Chart:
-    """You vs your opponents per 100 moves: all games, then each format with enough games (when there are two+)."""
+    """You vs your opponents, all games, then each format with enough games (when there are two+): the share of the
+    pattern's chances missed ("missed"), or per 100 moves ("allowed")."""
     groups: list[tuple[str, list[GameCounts]]] = [("All games", list(games))]
     split = [(tc, [g for g in games if g.time_class == tc]) for tc, n in formats.items() if n >= MIN_FORMAT_GAMES]
     if len(split) >= 2:
         groups += [(FORMAT_NAMES.get(tc, tc), gs) for tc, gs in split]
     elif len(split) == 1 and sum(1 for n in formats.values() if n) == 1:  # one format only: name it
         groups = [(FORMAT_NAMES.get(split[0][0], split[0][0]), list(games))]
+    mix = ", ".join(f"{n} {tc}" for tc, n in formats.items() if n)
+    note = f"Engine-analysed games: {mix}." if mix else f"{len(games)} engine-analysed games."
+    if len(groups) > 1:
+        note += f" Formats with fewer than {MIN_FORMAT_GAMES} analysed games have no bar of their own."
     labels, you, them, rows = [], [], [], []
+    plural = motif_name(theme, True)
+    if kind == "missed":
+        for label, gs in groups:
+            x1, c1, x2, c2 = _chances(gs, theme)
+            labels.append(label)
+            you.append(_share(x1, c1))
+            them.append(_share(x2, c2))
+            rows.append([label, len(gs), c1, x1, _share(x1, c1), c2, x2, _share(x2, c2)])
+        return comparison_chart(
+            f"{plural.capitalize()} missed, share of the chances",
+            labels,
+            [("You", you), ("Opponents", them)],
+            value_format="pct",
+            note=f"{note} A chance: the other side's mistake or blunder left the {motif_name(theme)} (the engine's "
+            "refutation of it uses one). Missed: the next move was a mistake or blunder too.",
+            table=Table(
+                title=f"{plural.capitalize()} missed by format",
+                columns=["Games", "Analysed games", "Your chances", "You missed", "You missed %", "Their chances",
+                         "They missed", "They missed %"],
+                rows=rows,
+                formats=["text", "int", "int", "int", "pct", "int", "int", "pct"],
+                key_columns=[0, 4, 7],
+            ),
+        )
     for label, gs in groups:
         x1, m1, x2, m2 = _sums(gs, kind, theme)
         labels.append(label)
         you.append(_per100(x1, m1))
         them.append(_per100(x2, m2))
         rows.append([label, len(gs), x1, _per100(x1, m1), x2, _per100(x2, m2)])
-    verb = "missed" if kind == "missed" else "allowed"
-    mix = ", ".join(f"{n} {tc}" for tc, n in formats.items() if n)
-    note = f"Engine-analysed games: {mix}." if mix else f"{len(games)} engine-analysed games."
-    if len(groups) > 1:
-        note += f" Formats with fewer than {MIN_FORMAT_GAMES} analysed games have no bar of their own."
     return comparison_chart(
-        f"{motif_name(theme, True).capitalize()} {verb}, per 100 moves",
+        f"{plural.capitalize()} allowed, per 100 moves",
         labels,
         [("You", you), ("Opponents", them)],
         value_format="float2",
         note=note,
         table=Table(
-            title=f"{motif_name(theme, True).capitalize()} {verb} by format",
+            title=f"{plural.capitalize()} allowed by format",
             columns=["Games", "Analysed games", "You", "You /100 moves", "Opponents", "Opponents /100 moves"],
             rows=rows,
             formats=["text", "int", "int", "float2", "int", "float2"],
@@ -487,8 +671,11 @@ def event_diagram(event: MotifEvent) -> Diagram:
 
 
 def _examples(events: Sequence[MotifEvent], side: str, kind: str, theme: str) -> list[MotifEvent]:
-    """The events of one side, pattern and kind, costliest first (then most recent)."""
+    """The events of one side, pattern and kind, costliest first (then most recent); for "missed", the chances the
+    other side had just left (what the claim counts) when there are any."""
     picked = [ev for ev in events if ev.side == side and ev.kind == kind and ev.motif.theme == theme]
+    if kind == "missed":
+        picked = [ev for ev in picked if ev.after_chance] or picked
     return sorted(picked, key=lambda ev: (-(ev.error.drop or 0.0), -ev.game.end_time.timestamp(), ev.error.ply))
 
 
@@ -514,6 +701,15 @@ def _study(theme: str, kind: str) -> list[str]:
     ]
 
 
+def _direction(t: MotifTest, r: float, excess: float, ratio: float) -> Optional[str]:
+    """"weakness" / "strength" when both tests agree on the direction and both ratios reach ``ratio``."""
+    if t.rate.mean > 0 and t.share.mean > 0 and r >= ratio and excess >= ratio:
+        return "weakness"
+    if t.rate.mean < 0 and t.share.mean < 0 and 1.0 / r >= ratio and 1.0 / excess >= ratio:
+        return "strength"
+    return None
+
+
 def motif_claims(
     games: Sequence[GameCounts],
     gated: Iterable[str],
@@ -525,51 +721,75 @@ def motif_claims(
     ratio: float = MOTIF_RATIO,
 ) -> tuple[list[Insight], dict[str, Any]]:
     """Strengths and weaknesses "you miss / allow <pattern> more (less) often than your opponents", and the stats
-    of every test run (for the JSON export)."""
+    of every test run (for the JSON export).
+
+    "Missed" compares the share of the pattern's chances missed (per chance, so that the other side's error rate
+    doesn't count) and must stand out against the share of the other tactical chances missed (the pattern chances
+    without it: ``GameCounts.pattern_chances``, counted by ``collect`` with the same ``gated``); "allowed" compares
+    the rate per move and the share of your own errors (not the missed chances). Neither comparison with the rest
+    is truncated at 1: erring more (or less) overall never becomes a pattern claim in the other direction."""
     formats = dict(formats or {})
     n_games = len(games)
-    e1, e2 = sum(g.errors[0] for g in games), sum(g.errors[1] for g in games)
+    k1, k2 = sum(g.pattern_chances[0] for g in games), sum(g.pattern_chances[1] for g in games)  # tactical chances
+    f1, f2 = sum(g.pattern_followups[0] for g in games), sum(g.pattern_followups[1] for g in games)  # ... missed
+    o1, o2 = sum(g.own_errors(0) for g in games), sum(g.own_errors(1) for g in games)
+    mix = format_text(formats)
+    where = f"In {n_games} engine-analysed games" + (f" ({mix})" if mix else "")
     insights: list[Insight] = []
     stats: dict[str, Any] = {}
     for t in motif_tests(games, gated, min_games, min_events):
-        x1, m1, x2, m2 = _sums(games, t.kind, t.theme)
-        ok_rate, conf_rate = significance(t.rate, min_games, t.p_rate, alpha=STRICT_ALPHA, n=t.games_with)
-        ok_share, conf_share = significance(t.share, min_games, t.p_share, alpha=STRICT_ALPHA, n=t.games_with)
-        confidence = min(conf_rate, conf_share)
-        r = _rate_ratio(x1, m1, x2, m2)
-        # compared with your other errors: more errors of every kind is the blunder-rate finding, not this one
-        rest = _rate_ratio(e1 - x1, m1, e2 - x2, m2)
-        stats[f"{t.theme}:{t.kind}"] = {
-            "count": x1, "opp_count": x2, "per100": _per100(x1, m1), "opp_per100": _per100(x2, m2),
-            "games_with": t.games_with, "p_adjusted": t.p_rate, "share_p_adjusted": t.p_share,
-        }
-        if not (ok_rate and ok_share and confidence >= MIN_CONFIDENCE) or r is None or rest is None:
-            continue
-        if t.rate.mean > 0 and t.share.mean > 0 and r >= ratio:
-            kind_word, excess = "weakness", r / max(1.0, rest)
-        elif t.rate.mean < 0 and t.share.mean < 0 and 1.0 / r >= ratio:
-            kind_word, excess = "strength", (1.0 / r) / max(1.0, 1.0 / rest)
-        else:
-            continue
-        if excess < ratio:
-            continue
         name, plural = motif_name(t.theme), motif_name(t.theme, True)
+        ok, confidence = significance(t.rate, min_games, t.p_rate, alpha=STRICT_ALPHA, n=t.n)
+        ok_share, conf_share = significance(t.share, min_games, t.p_share, alpha=STRICT_ALPHA, n=t.n)
+        ok, confidence = ok and ok_share, min(confidence, conf_share)
+        if t.kind == "missed":
+            x1, c1, x2, c2 = _chances(games, t.theme)
+            m1, _, m2, _ = _sums(games, "missed", t.theme)
+            moves1, moves2 = sum(g.moves[0] for g in games), sum(g.moves[1] for g in games)
+            r = _rate_ratio(x1, c1, x2, c2)  # share of the chances missed, you vs your opponents
+            rest = _rate_ratio(f1 - x1, k1 - c1, f2 - x2, k2 - c2)  # ... of the other tactical chances
+            excess = r / rest if r is not None and rest else None
+            share1, share2 = _share(x1, c1), _share(x2, c2)
+            record = {
+                "count": x1, "chances": c1, "rate": share1, "opp_count": x2, "opp_chances": c2, "opp_rate": share2,
+                "other_rate": _share(f1 - x1, k1 - c1), "opp_other_rate": _share(f2 - x2, k2 - c2),
+                "per100": _per100(x1, moves1), "opp_per100": _per100(x2, moves2),
+                "missed_all": m1, "opp_missed_all": m2, "share": share1, "opp_share": share2,
+            }
+            what = (
+                f"{where}, your opponents' mistakes and blunders left you {_article(name)} {name} {c1} times and you "
+                f"missed {x1} of them ({pct(share1)}): your next move was a mistake or blunder too. Your opponents "
+                f"missed {x2} of the {c2} your mistakes left them ({pct(share2)}). Of the other tactical chances "
+                f"each side left, you missed {pct(record['other_rate'])} and your opponents "
+                f"{pct(record['opp_other_rate'])}."
+            )
+        else:
+            x1, moves1, x2, moves2 = _sums(games, "allowed", t.theme)
+            y1, _, y2, _ = _sums(games, OWN_ALLOWED, t.theme)
+            r = _rate_ratio(x1, moves1, x2, moves2)  # per move
+            excess = _rate_ratio(y1, o1, y2, o2)  # share of your own errors vs theirs
+            share1, share2 = _share(y1, o1), _share(y2, o2)
+            record = {
+                "count": x1, "opp_count": x2, "per100": _per100(x1, moves1), "opp_per100": _per100(x2, moves2),
+                "share": share1, "opp_share": share2,
+            }
+            what = (
+                f"{where}, your mistakes and blunders let your opponent play {_article(name)} {name} {x1} times "
+                f"({_per100(x1, moves1):.2f} per 100 moves); your opponents' let you do it "
+                f"{_per100(x2, moves2):.2f} times per 100 moves in the same games. Leaving out the mistakes made right "
+                f"after one of the other side's (a missed chance), that is {pct(share1)} of your mistakes and "
+                f"blunders against {pct(share2)} of theirs."
+            )
+        record.update(games_with=t.games_with, p_adjusted=t.p_rate, share_p_adjusted=t.p_share)
+        stats[f"{t.theme}:{t.kind}"] = dict(record)
+        if not (ok and confidence >= MIN_CONFIDENCE) or r is None or excess is None or r <= 0 or excess <= 0:
+            continue
+        kind_word = _direction(t, r, excess, ratio)
+        if kind_word is None:
+            continue
+        size = min(r, excess) if kind_word == "weakness" else min(1.0 / r, 1.0 / excess)
         verb = "miss" if t.kind == "missed" else "allow"
         more = "more" if kind_word == "weakness" else "less"
-        mix = format_text(formats)
-        share1, share2 = (x1 / e1 if e1 else None), (x2 / e2 if e2 else None)
-        if t.kind == "missed":
-            what = (f"{_article(name)} {name} was there for you {x1} times when you made a mistake or blunder "
-                    f"({_per100(x1, m1):.2f} per 100 moves); your opponents missed one {_per100(x2, m2):.2f} times "
-                    "per 100 moves in the same games")
-        else:
-            what = (f"your mistakes and blunders let your opponent play {_article(name)} {name} {x1} times "
-                    f"({_per100(x1, m1):.2f} per 100 moves); your opponents' let you do it {_per100(x2, m2):.2f} "
-                    "times per 100 moves in the same games")
-        detail = (
-            f"In {n_games} engine-analysed games" + (f" ({mix})" if mix else "") + f", {what}. That is "
-            f"{pct(share1)} of your mistakes and blunders against {pct(share2)} of theirs."
-        )
         side = "you" if kind_word == "weakness" else "opponent"
         examples = _examples(events, side, t.kind, t.theme)
         insight = Insight(
@@ -577,15 +797,11 @@ def motif_claims(
             kind=kind_word,  # type: ignore[arg-type]
             category="tactics",
             title=f"You {verb} {plural} {more} often than your opponents",
-            detail=detail,
-            severity=clamp(excess - 1.0),
+            detail=what,
+            severity=clamp(size - 1.0),
             confidence=confidence,
-            evidence={
-                "theme": t.theme, "motif_kind": t.kind, "count": x1, "per100": _per100(x1, m1), "opp_count": x2,
-                "opp_per100": _per100(x2, m2), "share": share1, "opp_share": share2, "games": n_games,
-                "games_with": t.games_with, "p_adjusted": t.p_rate, "share_p_adjusted": t.p_share,
-                "drill": training_url(t.theme),
-            },
+            evidence={"theme": t.theme, "motif_kind": t.kind, "games": n_games, **record,
+                      "drill": training_url(t.theme)},
             study=_study(t.theme, t.kind) if kind_word == "weakness" else [
                 f"Keep your eye sharp for {plural}: a few themed puzzles a week ({training_url(t.theme)}).",
             ],
@@ -618,20 +834,26 @@ def _trim(line: Line, plies: int = PUZZLE_LINE_PLIES) -> Line:
 def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: Sequence[MotifEvent],
                   gated: frozenset[str], keys: Optional[set[str]] = None) -> None:
     """Your errors' best lines and named patterns for the puzzle export (the deeper coach lines win), for the errors
-    in ``keys`` only (``puzzles.puzzle_keys``: the ones the export can use and the explained ones; None = all)."""
+    in ``keys`` only (``puzzles.puzzle_keys``: the ones the export can use and the explained ones; None = all).
+
+    Themes come only with a line supplied here, and only the patterns that start within the moves kept, so the
+    PGN's Themes header describes the solution it prints; a key that already has a line (``fill_puzzle_lines``)
+    keeps that line's themes, or none."""
     themes: dict[str, set[str]] = {}
     for ev in events:
-        if ev.side == "you" and ev.kind == "missed" and ev.motif.theme in gated:
+        if ev.side == "you" and ev.kind == "missed" and ev.motif.theme in gated and ev.motif.ply < PUZZLE_LINE_PLIES:
             themes.setdefault(f"{ev.error.game_id}:{ev.error.ply}", set()).add(ev.motif.theme)
     for e in errors:
         if e.side != "you" or e.best_line is None or not e.best_line.moves_uci:
             continue
         key = f"{e.game_id}:{e.ply}"
-        if keys is not None and key not in keys:
+        if (keys is not None and key not in keys) or key in coaching.puzzle_lines:
             continue
-        coaching.puzzle_lines.setdefault(key, _trim(e.best_line))
+        coaching.puzzle_lines[key] = _trim(e.best_line)
         if themes.get(key):
-            coaching.puzzle_themes.setdefault(key, sorted(themes[key]))
+            coaching.puzzle_themes[key] = sorted(themes[key])
+        else:
+            coaching.puzzle_themes.pop(key, None)  # themes of another line would not describe this one
 
 
 def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleResult], cfg: CoachConfig) -> None:
@@ -648,7 +870,7 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
         coaching.notes.append("Motif profile skipped: no engine lines for the mistakes and blunders in your games.")
         return
     gated = frozenset(getattr(motifs, "GATED_THEMES", ()) or ())
-    games, events = collect(records, errors, motifs.detect_line, coaching.notes)
+    games, events = collect(records, errors, motifs.detect_line, coaching.notes, gated)
     formats = format_counts(r.game for r in records)
     named = [t for t in themes_seen(games) if t in gated]
     coaching.settings["motif_profile"] = {
@@ -658,6 +880,8 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
         "errors": [sum(g.errors[0] for g in games), sum(g.errors[1] for g in games)],
         "counts": profile_counts(games, named),
         "unnamed_themes": [t for t in themes_seen(games) if t not in gated],
+        "chances": [sum(g.chances[0] for g in games), sum(g.chances[1] for g in games)],
+        "chances_missed": [sum(g.followups[0] for g in games), sum(g.followups[1] for g in games)],
     }
     _puzzle_lines(coaching, errors, events, gated, puzzles.puzzle_keys(ctx, coaching))
     coaching.motif_profile = profile_table(games, gated, formats)
@@ -668,6 +892,8 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
             "blunders" + ("" if gated else " (no detector has passed its precision check yet)") + "."
         )
     claims, stats = motif_claims(games, gated, events, formats=formats)
+    # the counts above are observations; these are the differences that passed the claim rule (for the drills)
+    coaching.settings["motif_profile"]["findings"] = [i.id for i in claims]
     engine = _engine_module(modules)
     if engine is None:
         if claims:
