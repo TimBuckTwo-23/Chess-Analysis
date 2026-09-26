@@ -110,7 +110,7 @@ so the families are split into two tiers:
 | α | Claims | Why |
 |---|---|---|
 | **0.05** | White vs Black; opening families; scoring worse straight after a loss; scoring worse late at night (23:00–03:00 in your time zone) | The claims players most need, and the hardest to detect: effects of 5–15 points per 100 games that only part of the games carry. The last two are fixed in advance with their direction, so they use a one-sided test. |
-| **0.01** | Other times of day, time controls, opponent strength, session length, time trouble, losing on time, slow openings, clock handling, quick losses in one opening | Exploratory scans (many ways to get lucky), and clock or quick-loss habits, whose paired or mirror tests have power to spare when the habit is real. |
+| **0.01** | Other times of day, time controls, opponent strength, session length, time trouble, losing on time, slow openings, clock handling, quick losses in one opening, opening habits (castling, early queen moves, development, early pawn moves), engine findings, tactical patterns you miss or allow (the coaching's motif claims) | Exploratory scans (many ways to get lucky), and habits measured against your opponents in the same games, whose paired or mirror tests have power to spare when the habit is real. |
 
 **Late night needs your time zone.** 23:00–03:00 UTC is early evening in New York.
 Without a time zone (no `--tz`, or `--tz UTC` / `GMT`, which count as not given) the same
@@ -191,6 +191,44 @@ Several tests can pick up the same thing. The report names it once:
   block is also flagged, the report keeps the one finding with the stronger evidence.
 * **The rating trend** is always an observation: a rating is a random walk around
   your strength, and a 90-day swing of 100+ points happens by chance.
+* **Opening habits** (castling, the queen, development, pawn moves) are compared with your
+  opponent in the same game, White and Black weighted equally (next section).
+
+### Opening habits: development and king safety
+
+The "Development & king safety" section (`analysis/structure.py`) measures four habits for
+both players in every standard game, and needs no engine:
+
+| Habit | Counted | A finding needs a gap of at least |
+|---|---|---|
+| Castled by move 10 | yes / no, by each side's own 10th move | 10 percentage points of games |
+| Queen out early | a queen move in moves 1–8 that is not a capture (recapturing with the queen is often forced) | 8 percentage points of games |
+| Knights and bishops out by move 10 | 0–4 pieces off their starting squares | 0.3 pieces per game |
+| Pawn moves in moves 1–10 | 0–10 | 0.5 pawn moves per game (a weakness only: fewer pawn moves is not claimed as a strength) |
+
+* **Paired within the game.** Each game gives one difference, your count minus your
+  opponent's, so the opening, the format, the clock, the rating gap and the result are the same
+  for both sides and cancel. The game is the unit of the test.
+* **Colour-balanced.** White moves first, which changes how soon either side castles or
+  develops, so the differences are averaged within each colour first and the two colours count
+  equally: a player with more White games is not judged on a colour mix. Within a colour the
+  variance never drops below that of two independent binomial shares.
+* **One family at the strict alpha.** The four tests are Benjamini–Hochberg adjusted together
+  and judged at 0.01 under the claim rule, with at least 30 games in which both players reached
+  the window (20 plies for the habits measured by move 10, 16 for the queen), so a game that
+  ended on move 7 counts as "not castled" for neither side. Chess960 and games from a set-up
+  position are left out. Severity uses the gap shrunk toward 0 by its own noise.
+* **Associations, not causes.** "You castle later than your opponents" can come from the
+  openings you choose or from opponents who attack early.
+
+On the null world (below), the module adds no false claims: re-measured with it in the report,
+64 reports of 600 games (seeds 0–63) had 0.234 false claims per report (15 in all, at most 2 in
+one report: colour 5, habits 5, openings 4, clock 1), none of them from this section. Planted
+habits in 600-game worlds (the null player castles by move 10 in about half of the games,
+brings the queen out early in 14% and has 3.0 of 4 minor pieces out by move 10) are found in
+31 of 32 worlds (castling by move 10 in about 35% of games), 32 of 32 (the queen out early in
+about 30%) and 32 of 32 (about 0.45 fewer pieces out); `POWER_RUNS=32 pytest tests/test_power.py
+-k opening_habit` re-measures them.
 
 ### Calibration: how often the report is wrong, and what it finds
 
@@ -257,6 +295,9 @@ What this means for you:
 
 * **With 1,200+ games** the report finds effects of these sizes almost always (a
   colour imbalance of 8 points per 100 games needs about 2,000).
+* **Opening habits** (castling late, the queen out early, slow development, at the sizes
+  given in "Opening habits" above) are found in 31–32 of 32 worlds at 600 games: the paired
+  test has power to spare.
 * **With 400–600 games** it finds tilt, late night and clock habits most of the time,
   but an opening effect only a quarter to a half of the time: an opening is now
   compared with *your other openings of that colour*, which is what makes the claim
@@ -280,6 +321,19 @@ These are associations, not causes. "You score worse after 11 pm" might be
 tiredness, or it might be the different player pool at that hour. The tool
 controls for opponent rating, not for everything.
 
+### Format labels and pictures change no claim
+
+Every finding says which formats it rests on (`Insight.formats`, games per time class, shown
+as "blitz only" or "bullet, blitz and rapid"). A module sets it where it knows; otherwise
+`fill.py` takes the format its evidence names, the games that reached its position, the games
+of its opening and colour when the evidence's own counts confirm them, and else every game the
+module analysed (the engine-analysed ones for the engine sections). Every finding also gets a
+picture: its module's chart or board, or a chart built from its evidence (your score against
+the rating's expectation, your rate against your opponents' ...), or the board of its position.
+Evidence that fits no pattern gets no picture rather than one that says something the numbers
+don't. Neither step changes which findings exist, their kind, severity, confidence or wording.
+A chart split by format gives a format its own bar only from 10 games.
+
 ### Per-format views: each carries its own budget
 
 When your games cover two or more formats, every format with at least 60 games
@@ -291,7 +345,8 @@ view would be mostly "not enough data".
 A view is a separate report: its claims are tested on that format's games only, with the
 same rule, thresholds and adjustments, and they are never added to the main report's lists.
 So each view carries its own false-claim budget. On the null world, measured on the views
-(24 reports of 1,200 games, 16 of 3,000; seeds 0 upward):
+(24 reports of 1,200 games, 16 of 3,000; seeds 0 upward; re-measured with the Development &
+king safety section in the report, with the same numbers):
 
 | Null world | Main report | Bullet view | Blitz view | Rapid view | All views together |
 |---|---|---|---|---|---|
@@ -302,7 +357,8 @@ Each view is about as reliable as a report of its size, but together they are th
 chances to be wrong: across all three views of a report there is about half a false claim on
 average, where the main report has about 0.2. Read a finding that appears only in one view
 with that in mind. A finding in the main report and in a view is the same fact seen twice,
-not two pieces of evidence.
+not two pieces of evidence. The views re-run the analysis modules only: the coaching runs
+once, on all games, so its motif claims appear in the main report and never in a view.
 
 ## 3. Engine analysis (optional)
 
@@ -314,8 +370,9 @@ Lichess.
 **Which games** (`engine.select_engine_games`; the rest of the report always uses every game):
 
 * `--engine-games N`: how many (default 150; the GitHub workflow uses 300). Only standard
-  chess and Chess960 games of at least 10 moves count; a game whose moves don't replay is
-  skipped and replaced by the next one.
+  chess and Chess960 games of at least 10 plies (five moves each) count; a game whose moves
+  don't replay is skipped and replaced by the next one (of the same format, in a balanced
+  sample).
 * `--engine-sample recent` (the default on the command line): the N most recent games. A
   player who has mostly played bullet lately gets engine sections about bullet (295 of the
   300 in the report that prompted this option).
@@ -429,6 +486,8 @@ that passed the rule (section 2):
 * **Your own puzzles** (with `--engine`) are always practice material: they join the
   positions item, or make one of their own when no position is a weakness. They are facts
   about your games, not claims.
+* **Puzzle packs** (with `--coach`) become actions of the tactics and blunders items, one pack
+  per item, preferring the pack for the item's own pattern. They are practice material too.
 
 Some actions quote numbers from your games that were not tested and are not claims:
 how each of your choices at a move scored ("after 1.e4 e5 2.Nf3 Nc6: 3.Bc4 66% in 90
@@ -441,28 +500,219 @@ right place; they do not add findings.
 ## 6. The coaching layer (`--coach`)
 
 The coaching layer (`chess_insights/coach/`, see docs/ARCHITECTURE.md) explains the report's
-findings and routes you to practice. It is study material, not evidence:
+findings and routes you to practice. It is study material, not evidence. It needs the engine
+analysis (`--engine`); what it cannot do in a run (no Stockfish 16, no puzzle database, no
+token, a service down, `--offline`) it skips with one note in the report.
 
-* **It never adds, removes or changes a claim.** Every explanation points at a position or a
-  finding that is already in the report. The critical positions it explains are your
-  engine-flagged errors (a move losing 8 or more points of win chance), your repeated
-  mistakes and choice points in your main lines, costliest first, at most `--coach-max`.
-* **Explanations come from the engine's lines.** Each position is re-searched deeper
-  (`--coach-depth`, default 20) for the best line and the line that refutes your move;
-  the tactic (fork, pin, back rank ...) is named from those lines with Lichess's theme names;
-  positional terms are compared at the *ends* of the two lines, because right after a move
-  they can mislead (the move's immediate threat counts as a plus even when it loses).
-* **External facts carry their source** (the Lichess opening explorer, cloud evaluations and
-  tablebase, the chess-openings names, Wikibooks), are cached, and are optional: with
-  `--offline`, no token or a service down, the report says what it skipped.
-* **The one exception, motif claims** ("you miss forks more often than your opponents"), goes
-  through the same claim rule as everything else (`stats.significance` at the strict alpha,
-  Benjamini–Hochberg across motifs, the game as the unit) and must keep the null world's
-  false-claim rate at or below 0.3 per report.
-* **The LLM coach** (`--coach-llm`) only rewrites what the templates already say, from a packet
-  of the report's facts; any move it names must replay legally from the position along the
-  given lines, every number must be in the packet, and every finding it names must be a claim.
-  An explanation that fails keeps its template wording, and the number rejected is noted.
+### What it explains
+
+* **The positions** (`coach/critical.py`): your repeated mistakes (the same wrong move in the
+  same position, exactly as the "Positions you keep getting wrong" section finds them), then
+  every other move of yours that lost at least 8 percentage points of winning chances, costliest
+  first, then your usual move at each choice point of your main lines (the positions the
+  openings section draws). One entry per position and move, at most `--coach-max` (150); choice
+  points keep a fifth of the places left after the repeated mistakes when there are more errors
+  than places. Standard chess only. Selecting a position is not a claim about it.
+* **Deeper lines** (`coach/deep.py`): each position is searched again at `--coach-depth` (20)
+  with three lines before your move (the best line and two alternatives) and one line after it
+  (the refutation of your move), both scored from your side. Each search is capped at 8 seconds
+  before your move and 4 after it (`--coach-seconds`), and a search that stopped short of the
+  depth is counted in the notes.
+* **Wording.** When the deeper search finds your move less than 5 percentage points of winning
+  chances **and** less than 1 pawn behind its first choice (less than an inaccuracy), the text
+  says your move is close to Stockfish's first choice instead of explaining an error; the pawn
+  condition matters in lopsided positions, where −10 against −6 is only a few points of winning
+  chances. At a choice point, your usual move is explained as a mistake only when it lost at
+  least 5 points on average in the analysed games (the openings section's bar): in the opening
+  several moves are often about equally good. Evaluations beyond 10 pawns are named in words ("a
+  winning position for you"); a number that size means nothing. Material is said to be lost or
+  won only when the engine's verdict on the lines backs it. At most three sentences: what the
+  refutation does, what it wins (material or a concept), and what to check next time.
+
+### Tactical patterns (motifs)
+
+`coach/motifs.py` names patterns with Lichess's puzzle-theme names (fork, pin, skewer,
+hangingPiece, discoveredAttack, backRankMate, discovered and double check, trapped piece,
+smothered mate, mate in N, deflection, attraction, advanced pawn), using python-chess attack
+maps along the engine's lines: the refutation's patterns carried out by your opponent (what your
+move allowed) and the best line's patterns carried out by you (what you missed). Patterns are
+looked for in the first 8 plies of a line and a mate in the first 10.
+
+**Forcing only.** An engine line is not a puzzle: past its first quiet move the other side's
+replies are the engine's best defence, not forced moves. A pattern is kept only when it comes on
+the carrier's first move of the line, or when every earlier move of the carrier was a check or a
+capture (the reply to the first quiet move is still in reach). Mates are kept always.
+
+**The precision gate.** A pattern is named only when its detector passed a gate on real Lichess
+puzzles (`tests/fixtures/lichess_puzzles_sample.csv`: 1,573 puzzles from the CC0 puzzle
+database): at least 20 puzzles tagged and at least 80% of them carrying Lichess's own tag.
+Otherwise the text says "a tactic" and the board marks nothing. For the six core themes
+(`python scripts/motif_precision.py`; the solver's patterns, from the position after the
+opponent's first move):
+
+| Theme | Tagged by us | Precision | Tagged by Lichess | Recall |
+|---|---|---|---|---|
+| fork | 209 | 0.99 | 207 | 1.00 |
+| pin | 141 | 1.00 | 141 | 1.00 |
+| skewer | 93 | 1.00 | 93 | 1.00 |
+| hangingPiece | 93 | 0.96 | 113 | 0.79 |
+| discoveredAttack | 102 | 1.00 | 199 | 0.51 |
+| backRankMate | 102 | 1.00 | 102 | 1.00 |
+
+Every other theme listed above passes too (discovered check 0.94, the rest 0.99–1.00), except
+mate in 5 (2 puzzles in the sample) and overloading (Lichess no longer tags it, so there is
+nothing to measure against); those two are never named. hangingPiece needs the move before the
+line to tell a free piece from the end of a trade: when the position before your opponent's last
+move is passed, as the coaching does along best lines, it scores 1.00 / 1.00
+(`--previous`). The low recall for discovered attacks means about half of them go unnamed: the
+profile undercounts that pattern rather than inventing it.
+
+Two limits of this check:
+
+* **Lichess's labels come from its own tagger** (lichess-puzzler), and our definitions follow its
+  definitions. Near-perfect agreement shows that we implement those definitions faithfully, not
+  that a human coach would describe every position the same way.
+* **Engine lines run on after the tactic is over.** Continuing each puzzle with Stockfish 16's
+  principal variation (one 30,000-node search from the end of the solution) and counting every
+  pattern along the longer line lowers precision on
+  the core themes to 0.89–1.00 at 8 plies (the length the coaching reads), 0.84–1.00 at 10 and
+  0.81–1.00 at 12, fork the lowest (`scripts/motif_precision.py --extend 8`). These numbers are
+  pessimistic: the stress test does not apply the forcing-only rule, and some of the later
+  patterns are real ones Lichess had no reason to tag.
+
+### Positional concepts
+
+`coach/concepts.py` compares the two lines where they have played out, not right after your
+move: right after 5...e5, Stockfish counts the pawn's attack on the d4 knight as a plus even when
+the move loses. Each line is read about 3 moves in (6 plies from the position before your move),
+at the first quiet position from there (not in check, nothing left to recapture on the square
+of the last move) up to 4 plies later, else the last quiet one before it.
+
+* **Stockfish 16's classical evaluation terms** (material, pawns, mobility, king safety,
+  threats, passed pawns, space ...) at the two ends, each blended by its position's material
+  phase; the refutation's end minus the best line's end, from your side, in pawns. Differences
+  under 0.15 pawns are dropped. When both ends have the same material, a Material difference is
+  called piece placement. Stockfish 16 is the last version that prints these terms; with another
+  version this step is skipped with a note.
+* **Board facts** from python-chess (the bishop pair, castling rights, a king left in the centre
+  after move 12 with queens on, isolated, doubled and backward pawns, holes while you have five or
+  more pawns and your opponent a knight or bishop): named only when worse for you at the
+  refutation's end than at the best line's end and not already true before your move.
+* An explanation links a short note on its main concept (`data/concepts.json`, written for this
+  project) with the chapter of Capablanca's *Chess Fundamentals* or Lasker's *Chess Strategy*
+  that explains it.
+
+### The only claims: motif claims
+
+The motif profile (`coach/profile.py`) counts, for every mistake or blunder by either side in the
+engine-analysed games (a short line at depth 10 before and after each move), the patterns missed
+(in the best line, for the player who went wrong) and allowed (in the refutation, for the other
+side), each error once per pattern. Its table and chart ("Patterns in the mistakes", per 100
+moves, you against your opponents in the same games) are observations. The claims "you miss
+(allow) forks more (less) often than your opponents" must pass:
+
+* **Two tests, both significant.** Your rate per move against your opponents' in the same games,
+  and the pattern's share of your errors against its share of theirs, each a game-clustered test
+  (the unit is the game, you and your opponent paired within it, as in the Engine review). The
+  share test keeps "you make more errors of every kind" as one finding (the blunder rate), not six.
+* **Benjamini–Hochberg** across every named pattern and both kinds, for each of the two tests,
+  and `stats.significance` at the strict alpha (0.01), with a confidence of at least 0.5.
+* **Big enough:** a rate ratio of at least 1.3 (its inverse for a strength), and still 1.3 after
+  dividing by the ratio of your other errors to theirs.
+* **Enough data:** at least 30 games in which either side had the pattern and 20 occurrences.
+* **Named patterns only:** only gated themes are tested, and only patterns the line forces are
+  counted.
+
+The null world has no engine lines, so these claims are calibrated on simulated counts
+(`tests/test_profile.py`): in 200 simulated 300-game sets in which both sides share the same
+pattern rates, with game-level clustering, no claim was made (the test allows 0.05 per set);
+when you make 60% more errors of every kind, none either (30 sets). A fork missed twice as often
+per error as your opponents miss it is found in 17 of 20 simulated 300-game sets (the test asks
+for 16), never the other way round. `--no-motif-profile` turns the profile and its claims off.
+
+### External facts, drills and progress
+
+* **External facts carry their source** and are optional: the Lichess opening explorer
+  (masters, and Lichess blitz and rapid games of players one or two rating groups above you;
+  needs a token), Lichess cloud evaluations, the Lichess tablebase (positions with 7 pieces or
+  fewer: wins you let slip and draws you lost, by ending type), the bundled chess-openings names
+  and Wikibooks. They are cached, limited per report, and never change a claim. The tablebase
+  endings are observations: the conversion claim stays with the Engine review's own test.
+* **Drills** (`coach/drills.py`): up to three packs of 30 puzzles for the patterns you miss most
+  (from the motif profile; failing that, from the explained positions, then from the engine's
+  own tags) and one pack from your openings, from the filtered Lichess puzzle database, in the
+  `--drill-rating` window (default 1200–1600, not adjusted to your rating), most popular first.
+* **Review schedule:** your ten costliest mistakes and the first five puzzles of each pack come
+  back 1, 3, 7 and 21 days after the report; items from the previous report's JSON that are due
+  move to their next step.
+* **Progress** (`coach/progress.py`): each study-plan target next to the previous report's
+  number, with the direction that counts as better. It is an observation: two reports usually
+  share most of their games, so a change here is not a test of anything.
+* **Maia-2** (`--maia`, optional): how often players at your rating find the better move and play
+  yours (the blitz model for bullet and blitz, the rapid model for rapid and daily); it orders the
+  explanations by cost × chance of finding the better move. It changes no claim.
 * **Format views** get the explanations of their own format's positions; drills, the motif
   profile and the review schedule stay with the main report (they are practice for every
   format).
+
+### The rating map
+
+The opening explorer's rating groups and Maia-2 work on the Lichess scale, so a chess.com rating
+is converted first (`coach/rating_map.py`): piecewise linear between the rows of a small table per
+format, rounded to 5, shown as "about 1390". The table follows the ChessGoals rating comparison
+(July 2026), but only two rows were checked against that page (chess.com blitz 900 ≈ Lichess
+1360, 1000 ≈ 1425); the other rows are rough estimates, and the gap between the sites moves by
+about 30 points a year. Daily games use the rapid rows. So "players one or two groups above you"
+and Maia's "at your rating" are approximate. The drill window does not use this map.
+
+### The LLM coach and its verifier
+
+With `--coach-llm` and an API key, Claude gets a packet of what the report already established
+(`coach/packet.py`: every claim with its evidence, the claims of each format view, the study plan
+with its targets, and up to 20 explained positions with their lines, evaluations, motifs, concept
+differences and sources) and returns rewritten explanations and a weekly plan. The packet is
+passed as data; the instructions tell the model that text inside it is never an instruction.
+`coach/verify.py` checks every text before it replaces a template:
+
+* **Moves:** every move it names is replayed with python-chess from the position along the lines
+  the packet gives for it (the best line, the refutation, cloud-evaluation lines, opening-database
+  moves, the tablebase move), with the right move number; moves written one after another must
+  follow each other in one of those lines. Computer notation ("e6e5") is refused.
+* **Material:** "wins your queen" needs a line of that position that captures a queen (yours,
+  when it says "your").
+* **Numbers:** every number must be in the packet (within 0.1, or the rounding of the digits
+  written); percentages are compared with shares and win-% points, evaluations in pawns; a signed
+  number needs that sign in the packet unless its sentence names White or Black; "you stand 1.5
+  pawns better" must point the way the engine's evaluation does. Links and dates must be in the
+  packet too.
+* **Claims:** a claim id it cites must be one of the report's; wording that calls something your
+  strength, weakness or habit needs a claim of that kind on the same subject.
+* **Formats:** a sentence may name its game's format and the formats of the claims it relies on.
+* **Style:** at most three sentences per position, pawns rather than centipawns, plain text
+  without markup or internal ids.
+
+A text that fails keeps its template wording, and the report counts how many were reworded and
+how many failed (the rejected texts and the reasons are kept in the JSON, up to 20). Weekly-plan
+entries that name no study-plan item are dropped, and the plan is trimmed to
+`--practice-minutes` a day. `chess-insights ask` answers questions through the same checks (at
+most eight sentences); when there is no checked answer it quotes what the report says instead.
+
+What the verifier cannot check: evaluations in words without a number ("you were winning"),
+whose move a piece move is when it has no move number ("White plays Bxd6"), and chess ideas said
+in words only ("the knight beats the bishop"). Those can be wrong in an accepted text. It has not
+yet been run against the real API (see PLAN.md).
+
+### Sources and licences
+
+| Source | Used for | Licence and handling |
+|---|---|---|
+| Lichess puzzle database | Drill packs; the motif precision gate (a 1,573-puzzle sample in the tests) | CC0; downloaded by `chess-insights puzzles-db`, filtered subset kept in the cache |
+| lichess-org/chess-openings | Opening names by position | CC0; bundled as `data/openings.tsv` |
+| Lichess opening explorer, cloud eval, tablebase | Facts on explained positions | Public API answers, shown with their source, cached locally; never bundled |
+| Wikibooks, Chess Opening Theory | Two sentences on the opening of an explained position | CC BY-SA 4.0: at most two sentences, shown with "Wikibooks, CC BY-SA 4.0" and a link to the page; only the extract is cached |
+| Capablanca, *Chess Fundamentals* (1921); Lasker, *Chess Strategy* (1915) | Chapter pointers in the concept notes | Public domain in the USA (Project Gutenberg #33870, #5614); only chapter and section titles are cited, the notes are this project's own words |
+| Stockfish (16 for the concept terms) | Game analysis and the coaching's searches | GPL-3.0; a separate program you install (Ubuntu's package on GitHub), run over UCI, not bundled |
+| Maia-2 (optional) | Move probabilities by rating | MIT; installed with `pip install maia2`, downloads its weights on first use |
+| Claude (optional) | Rewording and the weekly plan | Anthropic API with your key; receives the packet above |
+
+Details on the bundled files: `src/chess_insights/data/NOTICE.md`.

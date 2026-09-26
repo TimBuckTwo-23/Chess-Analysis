@@ -24,10 +24,23 @@ its own words. Each note points to the chapter or section of a public-domain boo
 Both books are in the public domain in the USA. No text from them is bundled; only chapter and section titles
 are cited.
 
-## Not bundled
+## Not bundled: downloaded when needed
 
-Answers from the Lichess opening explorer, cloud eval and tablebase APIs and short extracts from
-[Wikibooks Chess Opening Theory](https://en.wikibooks.org/wiki/Chess_Opening_Theory) are downloaded when a
-report is built and kept only in the local cache (`<cache>/sources/`). Wikibooks text is
-[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/): the report quotes at most two sentences and
-credits "Wikibooks, CC BY-SA 4.0" with a link to the page.
+- **The Lichess puzzle database** ([database.lichess.org](https://database.lichess.org),
+  [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/)): `chess-insights puzzles-db` downloads it and
+  keeps a filtered subset in the cache folder; the drill packs written next to a report are taken from it. The
+  tests use a 1,573-puzzle sample of it (`tests/fixtures/lichess_puzzles_sample.csv`).
+- **Answers from the Lichess opening explorer, cloud eval and tablebase APIs** are downloaded when a report is
+  built, kept in the local cache (`<cache>/sources/`) and shown in the report with their source.
+- **Short extracts from [Wikibooks Chess Opening Theory](https://en.wikibooks.org/wiki/Chess_Opening_Theory)**
+  are downloaded the same way. Wikibooks text is [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/):
+  the report quotes at most two sentences and credits "Wikibooks, CC BY-SA 4.0" with a link to the page. The
+  extract is part of the report files (HTML, Markdown and JSON), so keep the credit when you share a report.
+
+## Programs the report uses but does not include
+
+- **Stockfish** ([stockfishchess.org](https://stockfishchess.org), GPL-3.0) is a separate program that you
+  install (the GitHub workflow installs Ubuntu's package) and that chess-insights runs over UCI. Stockfish 16 is
+  the version the explanations' evaluation terms need.
+- **Maia-2** (optional, `pip install maia2`, MIT) downloads its model weights on first use.
+- **python-chess** (a dependency, GPL-3.0-or-later) draws the chess pieces that every HTML report embeds.

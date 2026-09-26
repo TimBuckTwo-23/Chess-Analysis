@@ -637,7 +637,9 @@ class Coaching:
     weekly_plan: list[PlanEntry] = field(default_factory=list)  # C4
     progress: list[ProgressItem] = field(default_factory=list)  # C4
     llm: dict[str, Any] = field(default_factory=dict)  # {"model", "accepted", "rejected"} when the LLM ran
-    # For the puzzle export (--puzzles): your errors' best lines (up to 8 plies) and motif themes, keyed
-    # "<game_id>:<ply>". Filled from the deep and profile passes; empty when they did not run.
+    # For the puzzle export (--puzzles): your errors' best lines (up to 8 plies) and gated motif themes, keyed
+    # "<game_id>:<ply>", only for the errors that export can use (mistakes.build_puzzles: at most 300, costliest
+    # first, standard chess) plus your errors in the explained positions (coach.puzzles.puzzle_keys), so the JSON
+    # stays small. From the deep pass, else the profile pass; empty when neither ran.
     puzzle_lines: dict[str, Line] = field(default_factory=dict)
     puzzle_themes: dict[str, list[str]] = field(default_factory=dict)
