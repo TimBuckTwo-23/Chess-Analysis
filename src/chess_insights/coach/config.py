@@ -41,7 +41,7 @@ class CoachConfig:
     offline: bool = False  # no network sources at all
     lichess_token: Optional[str] = field(default=None, repr=False)  # LICHESS_TOKEN / --lichess-token (explorer)
     puzzle_db: Optional[Path] = None  # filtered Lichess puzzle subset from `chess-insights puzzles-db`
-    drill_rating: tuple[int, int] = DEFAULT_DRILL_RATING
+    drill_rating: Optional[tuple[int, int]] = None  # None = around your Lichess-equivalent rating (+-200)
     drill_size: int = DEFAULT_DRILL_SIZE
     out_stem: Optional[Path] = None  # report path stem: drill PGNs are written as <stem>-drill-<theme>.pgn
     practice_minutes: int = DEFAULT_PRACTICE_MINUTES

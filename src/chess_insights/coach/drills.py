@@ -309,7 +309,7 @@ def build_packs(
     """The motif packs and the openings pack (not written yet)."""
     themes = pick_themes(ctx, coaching, gated)
     families = top_families(ctx.games)
-    lo, hi = cfg.drill_rating
+    lo, hi = cfg.drill_rating or DEFAULT_DRILL_RATING
     size = max(0, int(cfg.drill_size))
     by_theme, by_family = collect_candidates(Path(cfg.puzzle_db), [t for t, _ in themes], families, (lo, hi))
     used: set[str] = set()
@@ -487,11 +487,12 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
             meta = puzzles_db.read_meta(path)
             coaching.settings["puzzle_db"] = {
                 "downloaded": meta.get("downloaded", ""), "rows": meta.get("rows"),
-                "license": meta.get("license", "CC0"), "rating": list(cfg.drill_rating), "size": cfg.drill_size,
+                "license": meta.get("license", "CC0"), "rating": list(cfg.drill_rating or DEFAULT_DRILL_RATING), "size": cfg.drill_size,
             }
             if not packs:
                 coaching.notes.append("No drill packs: the puzzle database has no puzzles for your patterns and "
-                                      f"openings in the {cfg.drill_rating[0]}-{cfg.drill_rating[1]} rating range.")
+                                      f"openings in the {(cfg.drill_rating or DEFAULT_DRILL_RATING)[0]}-"
+                                      f"{(cfg.drill_rating or DEFAULT_DRILL_RATING)[1]} rating range.")
     coaching.drills = packs
     done = done_items(cfg.previous, today)
     new = own_items(ctx, skip=done) + drill_items(packs, skip=done)

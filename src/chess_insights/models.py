@@ -547,6 +547,10 @@ class Explanation:
     drop: float = 0.0
     time_class: str = ""
     color: Color = "white"
+    # What the deeper search says about the move played: "error" (it confirms the mistake), "close" (under an
+    # inaccuracy and under a pawn behind its first choice) or "fine" (its own first choice). A repeated-mistake
+    # finding whose move the deeper search clears is not kept as a weakness (pipeline.apply_deep_verdicts).
+    verdict: str = "error"
     game_url: str = ""
     games: list[str] = field(default_factory=list)
     repeats: int = 1
