@@ -27,13 +27,16 @@ What you get:
   rates by game phase, blunders under time pressure, converting winning
   positions, missed tactics, and how you come out of each opening.
 * **Positions you keep getting wrong** (with Stockfish): the exact positions
-  where you have played the same bad move in several games, with the engine's
-  move drawn on the board.
+  where you have played the same bad move in several games, each drawn as a board with
+  the engine's move. With `--coach`, a deeper search checks each one again, and a move it
+  clears is shown as an observation that says so, not as a weakness.
 * **Personal puzzles** (`--puzzles`): your costliest mistakes exported as a PGN.
   You can import it into a Lichess study.
 * **Bullet, blitz and rapid apart**: every finding says which formats it rests on
   ("blitz only", "bullet, blitz and rapid"), and the report has a separate view for each
-  format you play often enough (60+ games), with its own findings, sections and study plan.
+  format you play often enough (60+ games), with its own sections and study plan. A view
+  claims nothing the main report doesn't: a pattern that only shows in one format is shown
+  there as an observation ("Seen in your blitz games only … it may be chance").
 * **Coaching** (`--coach`, with Stockfish): for your costliest mistakes, your repeated ones and
   your usual move at the choice points of your main lines (up to 150 positions), the engine's
   better line and the line that refutes your move, drawn as boards; the tactic behind it (fork,
@@ -41,18 +44,22 @@ What you get:
   piece activity, pawn structure ...); two or three plain sentences on why; and a pointer to
   the chapter of a classic (Capablanca, Lasker) on the main idea. Opening names, Lichess cloud
   evaluations, tablebase results and short credited Wikibooks extracts are added where they
-  exist. Puzzle packs from the Lichess puzzle database for the patterns you miss most, a review
-  schedule, and, with a previous report, your progress against its targets. The coaching
+  exist. Puzzle packs from the Lichess puzzle database for the patterns you miss most, at your
+  level, a review schedule, and, with a previous report, your progress against its targets
+  ("Improved" or "Not yet" only where a test on your new games supports it). The coaching
   explains and routes to practice. The only claims it can add ("you miss forks more often than
-  your opponents") go through the same claim rule as every other finding.
+  your opponents", judged per fork their mistakes left you) go through the same claim rule as
+  every other finding.
 
 Every insight is compared with a benchmark: what your rating predicts, your other
 games, or your opponents in the same games. Findings that could be chance are
 held back. On simulated players with no real strengths or weaknesses, a whole report
 (its lists and every section) contains on average about 0.2 false strengths or
 weaknesses (0.23 at 600 games), and fewer than 0.3 in every setting tested
-(`tests/test_null_calibration.py`). Each format's view is tested as a report of its own, so
-it has its own budget: across all the views of one report, about 0.5 more
+(`tests/test_null_calibration.py`). The format views add none of their own: a view keeps a
+strength or weakness only when the main report claims it too, so the whole page, views
+included, carries the main report's false claims and no more: on the null world about 0.2 per
+page at 400 games and 0.1 at 1,200, where the views used to add another 0.3 to 0.5
 ([docs/METHODOLOGY.md](docs/METHODOLOGY.md), section 2).
 
 The report is built to be read on a phone:
@@ -68,22 +75,35 @@ The report is built to be read on a phone:
    remembers, a target for your next report ("use at most 30% of your clock on your
    first 15 moves (now 50%)"), and labelled example games ("Loss · 5+0 · vs 1512 · 12 Aug").
 4. **One section per topic**: a short summary, key numbers and findings; the charts and
-   tables fold away under "Show …", and wide tables show their key columns first.
+   tables fold away under "Show …", and wide tables show their key columns first. A finding
+   that passed the tests shows its confidence; one that didn't is labelled "Observation · not
+   tested".
 5. **A picture for every finding**: a small chart of the numbers behind it (you against
    the rating's expectation or against your opponents in the same games, split by format
    where there are enough games), or the board it is about. When a finding's numbers fit
    no chart, it keeps its text alone rather than get a chart that says something else.
 6. **A board for every position**: your side at the bottom, your move as a red arrow, the
-   better move green, a threat orange, and a line of play as a strip of small boards.
-   Boards link to the game they come from.
-7. **A view per format**: when your games cover two or more formats, a switcher at the top
-   shows "All formats" and one view for each format with 60 or more games (Bullet, Blitz,
-   Rapid, Daily): the same report run on that format's games alone.
-8. **Why these moves go wrong** (with `--coach`): one card per explained position (ten open,
-   the rest folded away) with the board, both engine lines, the pattern, what the move changes
-   and where each fact comes from; the patterns in your mistakes against your opponents'; where
-   you leave opening theory; and endgames checked with the tablebase. A finding with an
-   explanation links to it.
+   engine's move green (green means the engine's move and nothing else), a move that has
+   scored best for you in your own games blue, a threat orange, and a line of play as a
+   strip of small boards. Every repeated mistake listed gets its board. Each position is
+   drawn once per view: further down, a position already shown becomes its caption and a
+   "Board shown above" link. Boards link to the game they come from, and "Analyse on
+   Lichess" opens the position from your side.
+7. **A view per format**: when your games cover two or more formats, tabs that stay at the
+   top of the screen show "All formats" and one view for each format with 60 or more games
+   (Bullet, Blitz, Rapid, Daily): the same report run on that format's games alone, every
+   section head saying which format ("Blitz only"). A line under the tabs names the formats
+   with too few games for a view of their own. A view's strengths and weaknesses are the main
+   report's; anything else it finds is an observation there.
+8. **Why these moves go wrong** (with `--coach`): one card per explained position with the
+   board, both engine lines, the pattern, what the move changes and where each fact comes
+   from; the patterns in your mistakes against your opponents'; where you leave opening
+   theory; and endgames checked with the tablebase. A finding with an explanation links to
+   it. When the deeper search clears your move, its card says "Deeper check: not a mistake at
+   depth N". To keep the page light, it holds at most 12 cards (5 open, the ones findings
+   link to first) and 3 in each format's view; the Markdown report and the JSON have every
+   explanation. With 150 explanations (the default `--coach-max`), the demo player's page is
+   about 1.4 MB (4.4 MB before this limit).
 9. **Practice** (with `--coach`): progress since your last report, positions due for review,
    the puzzle packs, a weekly plan (with the optional AI coach), and the positions coming up
    for review 1, 3, 7 and 21 days after the report.
@@ -106,7 +126,10 @@ You can edit it in the GitHub app too.
 GitHub's machines download your games and run Stockfish (16, from Ubuntu's package), and they
 keep what they already downloaded and analysed: the games, the engine results, the coaching's
 lines and the answers from Lichess and Wikibooks. A re-run a week later only fetches and
-analyses the new games.
+analyses the new games. That cache is saved right after the analysis even when the analysis
+fails or runs out of time (Stockfish's results are kept game by game), so running the workflow
+again carries on where it stopped. It is kept per player under the lowercase username; caches
+saved under the older key still restore once.
 
 What a GitHub run includes by default (the options on the Run workflow form):
 
@@ -114,8 +137,9 @@ What a GitHub run includes by default (the options on the Run workflow form):
   `depth` 12): 300 games split evenly between bullet, blitz and rapid, the most recent in each,
   so the engine sections are not all about your bullet. Choose `recent` for your latest games
   whatever the format. The run also writes your puzzle file (`--puzzles`).
-* **A view per format**: bullet, blitz and rapid each get their own findings and study plan
-  when you have 60 or more games in them.
+* **A view per format**: bullet, blitz and rapid each get their own sections and study plan
+  when you have 60 or more games in them (their strengths and weaknesses are the main
+  report's; the rest are observations).
 * **Coaching** (`coach` on; `coach_depth` 20, `coach_max` 150 positions): the explained
   mistakes, the review schedule and the puzzle packs (`<username>-drill-<theme>.pgn` next to
   the report). The previous report on the `reports` branch (`<username>/latest/<username>.json`)
@@ -134,18 +158,23 @@ What a GitHub run includes by default (the options on the Run workflow form):
     two rating groups above you play, in your explained opening positions and at your choice
     points, with where your own move ranks. Everything else from Lichess (cloud evaluations,
     the tablebase) and Wikibooks needs no token.
-  * `ANTHROPIC_API_KEY`: the run adds `--coach-llm`. Claude rewrites up to 20 explanations in
-    plainer words and drafts a weekly plan from the report's facts. Every move, number and
-    claim it writes is checked against the engine's lines and the report; a text that fails
-    keeps the built-in wording. The workflow does not yet install the Anthropic SDK (the `llm`
-    extra), so for now the key has no effect and the report notes that the AI coach was
-    skipped (see [PLAN.md](PLAN.md)).
+  * `ANTHROPIC_API_KEY`: the run installs the Anthropic SDK (the `llm` extra; the install step
+    sees only whether the secret is set, never the key) and adds `--coach-llm`. Claude rewrites
+    up to 20 explanations in plainer words and drafts a weekly plan from the report's facts.
+    Every move, number and claim it writes is checked against the engine's lines and the
+    report; a text that fails keeps the built-in wording. This path has not run on GitHub or
+    against the real API yet (see [PLAN.md](PLAN.md)).
 
 How long a GitHub run takes, measured on the reports of a 3,354-game history on 26 September
 2026, before coaching existed: the first run, with the whole archive to download and 300 games
 at depth 12, spent 4¼ minutes downloading and analysing (6 minutes 20 seconds for the whole
 run); a run with 1,000 games at depth 15 spent 32 minutes. Coaching adds its own searches and
-requests (see [How long it takes](#how-long-it-takes)); a run is stopped after 120 minutes.
+requests (see [How long it takes](#how-long-it-takes)); a full coached run on GitHub has not
+been timed yet. The analysis step is stopped after 80 minutes, which leaves the job's 120
+minutes room for the setup, the monthly puzzle download and saving the cache; when an engine
+run looks too long for that (`all` games above depth 12, or more than an hour of Stockfish), the
+run warns before it starts, and a run that stops says that running it again carries on. When
+two runs publish at once, the second puts its report on top of the first and tries again.
 
 ## Quick start
 
@@ -240,8 +269,18 @@ chess-insights report YOUR_USERNAME --engine --coach --tz America/New_York
 
 `puzzles-db` streams the Lichess puzzle database (CC0, a few hundred MB compressed) once and
 keeps a filtered subset in the cache folder (puzzles rated 800–2200, well liked and often
-played); without it the drills link to Lichess's puzzle themes instead. The packs come from
-a fixed rating window, 1200–1600 by default: set `--drill-rating` to your level.
+played); without it the drills link to Lichess's puzzle themes instead. The packs are rated
+around your level: your chess.com rating in your most-played rated format among blitz and
+rapid (else bullet), converted to the Lichess scale with an approximate table, ±200, kept
+inside 800–2200. A note in the report says which window was used and why; `--drill-rating
+1300-1700` chooses another one.
+
+With a previous report, the Practice part shows your progress against its targets. For
+targets that count games (late-night games, quick losses in an opening, games with the same
+wrong move), the share among your games since that report is tested against the share before
+(from 20 new games on; games of one session count together); "Improved" or "Not yet" appears
+only when that test passes, else "no clear change yet". Other targets show both numbers side by
+side without a verdict: most of their games are in both reports.
 
 Stockfish 16 is the version to use for the coaching: it is the last one that reports its
 evaluation term by term (king safety, mobility, pawns ...), which the explanations compare.
@@ -256,8 +295,10 @@ pip install -e ".[llm]"                            # the Anthropic SDK
 chess-insights ask YOUR_USERNAME "why do I lose with the Alapin?"
 ```
 
-It needs `ANTHROPIC_API_KEY` in the environment; without the key or the SDK, or when the
-answer fails the check, it quotes what the report itself says on the subject.
+It needs `ANTHROPIC_API_KEY` in the environment; without the key or the SDK, when the answer
+fails the check, or with `--offline` (nothing is sent to Claude), it quotes what the report
+itself says on the subject. Neither `ask` nor `--coach-llm` has been run against the real API
+yet: only against a mocked client.
 
 ## How long it takes
 
@@ -310,7 +351,7 @@ command, and `chess-insights --version` prints the version.
 | `--since 2025-01` | First month to include; also `--since 2024` or `--since 2025-03-15` |
 | `--until 2025-12` | Last month to include, in the same forms |
 | `--contact you@example.com` | Added to the User-Agent, as chess.com asks API users to do (default: `CHESS_INSIGHTS_CONTACT`) |
-| `--offline` | Use the local cache only: no chess.com requests and, with `--coach`, no Lichess or Wikibooks requests and no Maia-2 download (`--coach-llm` still calls Claude) |
+| `--offline` | Use the local cache only: no chess.com requests and, with `--coach`, no Lichess or Wikibooks requests and no Maia-2 download; `--coach-llm` sends nothing to Claude (the report notes that the AI coach was skipped) |
 | `--pgn games.pgn` | Analyse PGN files, a folder of them or a wildcard (`C:\games\*.pgn`) instead of the API; PGNs from other sites or over-the-board games work too |
 | `--json archive.json` | Analyse saved chess.com API responses (files, a folder or a wildcard) |
 | `--time-class blitz,rapid` | Only these time controls (bullet, blitz, rapid, daily; repeat the option or separate with commas) |
@@ -324,7 +365,7 @@ command, and `chess-insights --version` prints the version.
 | `--engine-time-class blitz,rapid` | Send only these formats to Stockfish; the rest of the report still uses every game |
 | `--engine-sample balanced` | Which games Stockfish analyses: `recent` (default: your latest, whatever the format) or `balanced` (the same number of bullet, blitz and rapid games, most recent in each; daily only with `--engine-time-class`) |
 | `--workers 3` | Stockfish processes in parallel, for the game analysis and the coaching (default: CPUs − 1) |
-| `--puzzles` | With `--engine`: write your mistakes as a PGN puzzle file next to the report; with `--coach`, a solution becomes the engine's line, with its pattern and explanation where the coaching has them |
+| `--puzzles` | With `--engine`: write your mistakes as a PGN puzzle file next to the report (written atomically, like the report files); with `--coach`, a solution becomes the engine's line, with the patterns along that solution and the explanation where the coaching has them |
 | `--coach` | With `--engine`: explain your costliest and repeated mistakes and your choice points; puzzle packs, a review schedule, progress against the previous report |
 | `--coach-depth 20` | Stockfish depth for the positions the coaching explains (default 20) |
 | `--coach-max 150` | Explain at most this many positions, costliest first (default 150) |
@@ -332,9 +373,9 @@ command, and `chess-insights --version` prints the version.
 | `--no-motif-profile` | Skip the pattern profile over every mistake (you against your opponents) and the pattern findings it can make |
 | `--lichess-token TOKEN` | Lichess personal access token for the opening explorer (default: `LICHESS_TOKEN`; never printed) |
 | `--puzzle-db PATH` | The puzzle file for the drills, or the folder `puzzles-db --cache-dir` wrote it to (default: the one in the cache folder) |
-| `--drill-rating 1200-1600` | Puzzle rating window for the drill packs (default 1200-1600; the downloaded subset holds 800–2200) |
+| `--drill-rating 1300-1700` | Puzzle rating window for the drill packs (default: your level, about 200 either side of your Lichess-equivalent rating in your most-played rated format; 1200–1600 without a rated game to read it from). The puzzle subset holds 800–2200: a window outside it is a usage error, one that overlaps it is cut to it with a note |
 | `--practice-minutes 20` | Minutes of practice a day the weekly plan is sized for (default 20) |
-| `--coach-llm` | Claude rewrites the explanations and drafts a weekly plan, every move and number checked (needs `ANTHROPIC_API_KEY` and `pip install -e ".[llm]"`) |
+| `--coach-llm` | Claude rewrites the explanations and drafts a weekly plan, every move and number checked (needs `ANTHROPIC_API_KEY` and `pip install -e ".[llm]"`; not with `--offline`) |
 | `--llm-model claude-opus-5-5` | The Claude model for `--coach-llm` (default `claude-opus-5-5`) |
 | `--maia` | How often players at your rating find the better move and play yours (Maia-2; needs `pip install maia2`, which brings PyTorch, and downloads its weights on first use) |
 | `--previous reports/old.json` | The previous report's JSON, for progress and the positions due for review (default: the JSON report already at the output path, read before it is replaced) |
@@ -357,7 +398,7 @@ command, and `chess-insights --version` prints the version.
 
 * `--out reports/me`: the report's path stem, as given to `report --out` (default `reports/<username>`).
 * `--cache-dir DIR`: cache folder (default as above).
-* `--offline`: no Lichess or Wikibooks requests (the answer still needs Claude).
+* `--offline`: send nothing to Claude: the answer quotes what the report itself says about the question.
 * `--llm-model MODEL`: the Claude model (default: the coaching's, `claude-opus-5-5`).
 
 Exit codes: `0` done, `1` no games to analyse (or the report or the game cache could not be
@@ -411,8 +452,8 @@ to prove at 400 games. It also lists the claims that match no planted trait.
   the report is still written, without the engine sections.
 * **The coaching skipped something.** Every coaching step that cannot run (no Stockfish 16
   for the evaluation terms, no puzzle database, no Lichess token, a service that did not
-  answer, no API key) leaves one note under "Why these moves go wrong" and in the console
-  summary; the rest of the report is unaffected.
+  answer, no API key, `--offline`) leaves one note under "Why these moves go wrong" and in
+  the console summary; the rest of the report is unaffected.
 * **Unknown time zone on Windows.** Windows has no time zone database of its own; the
   install already adds the `tzdata` package for that. If it still fails (an old install),
   `pip install tzdata`.
@@ -428,9 +469,10 @@ to prove at 400 games. It also lists the claims that match no planted trait.
 ## How it works
 
 `fetch` → `parse` → `filter` → optional `engine` → analysis modules → optional coaching
-(`--coach`) → formats and a picture for every finding → ranked insights and study plan →
-the coaching steps that need the finished report (progress, Maia-2, the AI coach) → the same
-analysis per format → HTML, Markdown and JSON report. See
+(`--coach`) → the deeper search's verdicts (a cleared repeated mistake becomes an observation)
+→ formats and a picture for every finding → ranked insights and study plan → the coaching
+steps that need the finished report (progress, Maia-2, the AI coach) → the same analysis per
+format, kept to the main report's claims → HTML, Markdown and JSON report. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map,
 [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for how every number is computed,
 [PLAN.md](PLAN.md) for the roadmap and what has not been run for real yet, and
@@ -446,3 +488,20 @@ py -m pytest            # engine tests are skipped automatically if Stockfish is
 
 `python scripts/motif_precision.py` prints how well the pattern detectors agree with
 Lichess's puzzle themes (docs/METHODOLOGY.md, section 6).
+
+What has been checked, and what not yet: the test suite (about 1,540 tests) runs offline,
+against recorded answers. From this project's development sandbox, chess.com, Lichess and
+Wikibooks cannot be reached; the chess.com downloader has run on GitHub's machines, and the
+Lichess and Wikibooks answers the tests use were recorded there by the `fixtures` workflow.
+The Claude API (`--coach-llm`, `ask`) has only met a mocked client, Maia-2 only a stub, and
+the report workflow's newest steps (the cache saved after a failed analysis, the 80-minute
+limit, the SDK installed with the secret, the retried publish) have not run yet. The list is
+kept in [PLAN.md](PLAN.md).
+
+## Licence
+
+`pyproject.toml` declares the MIT licence, but the package depends on
+[python-chess](https://github.com/niklasf/python-chess), which is GPL-3.0-or-later, and every
+HTML report embeds python-chess's piece drawings. Whether that combination works as intended,
+and under which licence the package and the reports should be shared, is an open decision for
+the owner before the package is published (see [PLAN.md](PLAN.md), Known limitations).

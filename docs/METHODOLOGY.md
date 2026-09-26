@@ -65,7 +65,8 @@ either group alone.
 ### The claim rule
 
 Something becomes a **strength or weakness** only if all three hold; otherwise it
-is at most an *observation* (shown in its section, marked "i", never in the lists at
+is at most an *observation* (shown in its section, marked "i" and labelled
+"Observation · not tested" where a claim shows its confidence, never in the lists at
 the top or the study plan):
 
 1. **Enough games** in *both* groups compared (module minimums, e.g. 8 rated games
@@ -192,7 +193,8 @@ Several tests can pick up the same thing. The report names it once:
 * **The rating trend** is always an observation: a rating is a random walk around
   your strength, and a 90-day swing of 100+ points happens by chance.
 * **Opening habits** (castling, the queen, development, pawn moves) are compared with your
-  opponent in the same game, White and Black weighted equally (next section).
+  opponent in the same game, White and Black weighted equally, and must still hold without the
+  one or two opening groups that make most of the gap when those stand out (next section).
 
 ### Opening habits: development and king safety
 
@@ -218,17 +220,43 @@ both players in every standard game, and needs no engine:
   the window (20 plies for the habits measured by move 10, 16 for the queen), so a game that
   ended on move 7 counts as "not castled" for neither side. Chess960 and games from a set-up
   position are left out. Severity uses the gap shrunk toward 0 by its own noise.
+* **The fold rule: your repertoire is not a habit.** The opening is the same game for both
+  sides but not the same side of it: you choose your side of an asymmetric line (in the
+  Caro-Kann Black usually castles later than White, in the Queen's Gambit Declined earlier), so
+  a repertoire alone can open a gap to your opponents. For every would-be finding, the (colour,
+  opening family) group that contributes most to the gap is checked first: when its own gap
+  stands out from your other games with that colour (a two-sample test at the claim's alpha,
+  0.01), those games are left out and the habit is tested again (the family's other p-values
+  unchanged, Benjamini–Hochberg again); while it still passes, the same is done with the next
+  biggest part, up to two groups (a main line with each colour). An opening group that looks
+  like your other games is never left out: it is no reason to doubt a habit. When the finding no
+  longer passes without those groups, it becomes an observation worded "Mostly your
+  <family> games: …", with a chart of those games against the rest, a board from one of them and
+  a first study step that points at the opening's main lines ("if they castle as late as your
+  games do, the gap comes from the opening"). It is never a strength or weakness.
 * **Associations, not causes.** "You castle later than your opponents" can come from the
   openings you choose or from opponents who attack early.
 
 On the null world (below), the module adds no false claims: re-measured with it in the report,
 64 reports of 600 games (seeds 0–63) had 0.234 false claims per report (15 in all, at most 2 in
-one report: colour 5, habits 5, openings 4, clock 1), none of them from this section. Planted
-habits in 600-game worlds (the null player castles by move 10 in about half of the games,
-brings the queen out early in 14% and has 3.0 of 4 minor pieces out by move 10) are found in
-31 of 32 worlds (castling by move 10 in about 35% of games), 32 of 32 (the queen out early in
-about 30%) and 32 of 32 (about 0.45 fewer pieces out); `POWER_RUNS=32 pytest tests/test_power.py
--k opening_habit` re-measures them.
+one report: colour 5, habits 5, openings 4, clock 1), none of them from this section. The fold
+rule only ever turns a claim of this section into an observation, so that figure stands.
+
+The null world also has a variant for the repertoire (`"line_habits"` in `tests/null_world.py`):
+the opening line, not the player, sets when each side castles, how soon it develops and how
+many early pawn moves it makes, for the player and the opponent alike (in the Ruy Lopez White
+castles on moves 4–6 and Black on 7–11, in the Caro-Kann Black on 9–14 …). Over 8 worlds of
+600 games for each of ten repertoires (every opening equally; 60% Caro-Kann, French or King's
+Indian with Black; 60% Sicilian or Ruy Lopez with White; two main lines, one with each colour,
+four ways), none of the 80 reports had a claim from this section; without the fold rule 36 of
+the 80 had one (all 16 in which the two main lines pulled the same way).
+
+Planted habits in 600-game worlds (the null player castles by move 10 in about half of the
+games, brings the queen out early in 14% and has 3.0 of 4 minor pieces out by move 10) are still
+found with the fold rule in place: in 31 of 32 worlds (castling by move 10 in about 35% of
+games), 32 of 32 (the queen out early in about 30%) and 32 of 32 (about 0.45 fewer pieces out).
+A planted habit shows in every opening, so it still holds without the group that contributes
+most to it. `POWER_RUNS=32 pytest tests/test_power.py -k opening_habit` re-measures them.
 
 ### Calibration: how often the report is wrong, and what it finds
 
@@ -334,31 +362,44 @@ Evidence that fits no pattern gets no picture rather than one that says somethin
 don't. Neither step changes which findings exist, their kind, severity, confidence or wording.
 A chart split by format gives a format its own bar only from 10 games.
 
-### Per-format views: each carries its own budget
+### Per-format views claim nothing the main report doesn't
 
 When your games cover two or more formats, every format with at least 60 games
 (`pipeline.MIN_FORMAT_GAMES`) also gets a view of its own: the same analysis run on that
-format's games alone, with its own strengths, weaknesses and study plan. Below 60 games most
+format's games alone, with its own sections, study plan and engine note. Below 60 games most
 tests could not say anything (they need 8 games per opening and colour, 25 per split), and the
 view would be mostly "not enough data".
 
-A view is a separate report: its claims are tested on that format's games only, with the
-same rule, thresholds and adjustments, and they are never added to the main report's lists.
-So each view carries its own false-claim budget. On the null world, measured on the views
-(24 reports of 1,200 games, 16 of 3,000; seeds 0 upward; re-measured with the Development &
-king safety section in the report, with the same numbers):
+A view tests its findings on that format's games only, with the same rule, thresholds and
+adjustments. On its own that would make each view one more set of chances to be wrong on the
+same page: on the null world, before the rule below, a page (the main report and its views)
+showed about 0.62 false claims at 400 and at 1,200 games, counting every view's claims (0.50
+and 0.58 distinct ones; 60 reports of 400 games and 40 of 1,200, seeds 0 upward), against 0.2
+and 0.1 for the main report alone. So a view keeps a strength or weakness only
+when the main report claims it too (`pipeline.view_only_observations`, matched by finding id,
+before the view's ranking and study plan). Any other strength or weakness of the view stays in
+its section as an observation, with its card, chart, board and title, and a first sentence that
+says why: "Seen in your blitz games only, and not strong enough across all your games to call
+it a finding: it may be chance." The section's summary, written while it was still a claim, says
+how many findings of the view are shown that way, and a repeated mistake shown that way no
+longer calls the move "a habit, not bad luck". `tests/test_null_calibration.py` checks that no
+view of a null report claims anything its main report doesn't, and counts every distinct claim
+on the page against the same limits as a report.
 
-| Null world | Main report | Bullet view | Blitz view | Rapid view | All views together |
-|---|---|---|---|---|---|
-| 1,200 games (views of about 180 / 730 / 300 games) | 0.17 | 0.08 | 0.17 | 0.29 | 0.54 |
-| 3,000 games (views of about 450 / 1,810 / 740 games) | 0.00 | 0.19 | 0.13 | 0.19 | 0.50 |
+Re-measured with the rule on the same null worlds, a page carries 0.20 distinct false claims at
+400 games and 0.10 at 1,200: the main report's own, since no view adds one (0.32 and 0.15
+counting every view's claims). A view can still show a false claim of the main report; that is
+the same claim seen again, not a second one. On
+the null world that happened 0.000 times per bullet view, 0.067 per blitz view and 0.050 per
+rapid view at 400 games (views of about 65, 240 and 100 games), and 0.000, 0.000 and 0.050 at
+1,200.
 
-Each view is about as reliable as a report of its size, but together they are three more
-chances to be wrong: across all three views of a report there is about half a false claim on
-average, where the main report has about 0.2. Read a finding that appears only in one view
-with that in mind. A finding in the main report and in a view is the same fact seen twice,
-not two pieces of evidence. The views re-run the analysis modules only: the coaching runs
-once, on all games, so its motif claims appear in the main report and never in a view.
+A real effect that shows in one format only is therefore at most an observation in its view,
+however strong it is there: the price of one error budget per page. A finding in the main
+report and in a view is the same fact seen twice, not two pieces of evidence. The views re-run
+the analysis modules only: the coaching runs once, on all games, so its motif claims appear in
+the main report and never in a view; the deeper search's verdicts (section 6) apply to the
+views' findings as to the main report's.
 
 ## 3. Engine analysis (optional)
 
@@ -441,8 +482,9 @@ never mixes it with engine accuracy.
 move losing ≥ 8 points of win chance) is keyed by its EPD: the board, side to move,
 castling and en-passant rights. Transpositions are therefore counted together.
 * A position where you played the *same* wrong move in two or more games is listed
-  in the table with the engine's preferred move. Games you didn't send to the engine
-  count too, when they reached the position and repeated the move.
+  in the table with the engine's preferred move (up to 15 positions, each with its board).
+  Games you didn't send to the engine count too, when they reached the position and
+  repeated the move.
 * It becomes a weakness only after at least three such games, and only if that is
   more often than your ordinary error rate explains. That is a one-sided binomial
   test, Benjamini–Hochberg adjusted over the positions tested, at the strict alpha.
@@ -450,9 +492,25 @@ castling and en-passant rights. Transpositions are therefore counted together.
   earlier in the same line (9.Nxg5, then 11.Kh1 in the same three games) is folded
   into the earlier one: one habit, one finding. Folding never turns an observation
   into a claim or drops a claim.
+* **A deeper search can clear the move** (with `--coach`, section 6). The finding rests on the
+  quicker game analysis (depth 12 by default); the coaching searches the same position again
+  at `--coach-depth` (20). When that search makes your move its own first choice
+  (`Explanation.verdict` "fine") or finds it close to its choice ("close": under an
+  inaccuracy and under a pawn behind), the finding is shown as an observation
+  (`pipeline.apply_deep_verdicts`, before ranking, in the main report and every view). Its
+  detail starts with the deeper search's result ("A deeper Stockfish search (depth 20) rates
+  5.d3 about as good as 5.d4, so it is not listed as a weakness; the numbers below come from
+  the quicker game analysis"), "… is better" leaves its title, the habit sentence and the
+  study step that says the engine's move beats yours go, its board loses the green arrow and
+  says what the deeper check found, and the section's summary names the moves it clears. Only
+  an explanation of the same position and move counts (a follow-up move folded into the habit
+  has a verdict of its own). This check can only turn a claim into an observation, never the
+  reverse.
 * `--puzzles` exports your costliest mistakes (up to 300, worst first) as a PGN you
   can import into a Lichess study (64 chapters per study) or any chess GUI. The report
-  lists the ten costliest, each with a link to the position on a Lichess analysis board.
+  lists the ten costliest, each with a link that opens the position on a Lichess analysis
+  board from your side. In a format view, the practice action says how many of the file's
+  puzzles are from that format (the file holds every format's).
 
 ## 4. What is excluded
 
@@ -482,10 +540,14 @@ that passed the rule (section 2):
   advice only fills an empty place, and never when it repeats an action already there.
 * **A target with today's number** ("use at most 30% of your clock on your first 15
   moves (now 50%)"), also stored in the JSON (`study_plan[].baseline`) for comparing
-  with the next report.
+  with the next report. A missed-pattern target is per chance, like its claim (section 6):
+  "Miss no more of the forks your opponents leave you than they miss of yours: 35% (now
+  70%)".
 * **Your own puzzles** (with `--engine`) are always practice material: they join the
   positions item, or make one of their own when no position is a weakness. They are facts
-  about your games, not claims.
+  about your games, not claims. There is one puzzle file for every format, so in a format's
+  view the action says how many of its puzzles are from that format ("63 of the 84 puzzles in
+  me-puzzles.pgn are from your blitz games"), and the target is to solve those.
 * **Puzzle packs** (with `--coach`) become actions of the tactics and blunders items, one pack
   per item, preferring the pack for the item's own pattern. They are practice material too.
 
@@ -500,9 +562,12 @@ right place; they do not add findings.
 ## 6. The coaching layer (`--coach`)
 
 The coaching layer (`chess_insights/coach/`, see docs/ARCHITECTURE.md) explains the report's
-findings and routes you to practice. It is study material, not evidence. It needs the engine
-analysis (`--engine`); what it cannot do in a run (no Stockfish 16, no puzzle database, no
-token, a service down, `--offline`) it skips with one note in the report.
+findings and routes you to practice. It is study material, not evidence. It touches the
+findings in two ways only: its motif claims go through the claim rule like every other finding
+(below), and its deeper search can turn a repeated-mistake finding into an observation when it
+clears the move (section 3), never the reverse. It needs the engine analysis (`--engine`); what
+it cannot do in a run (no Stockfish 16, no puzzle database, no token, a service down,
+`--offline`) it skips with one note in the report.
 
 ### What it explains
 
@@ -518,16 +583,33 @@ token, a service down, `--offline`) it skips with one note in the report.
   (the refutation of your move), both scored from your side. Each search is capped at 8 seconds
   before your move and 4 after it (`--coach-seconds`), and a search that stopped short of the
   depth is counted in the notes.
-* **Wording.** When the deeper search finds your move less than 5 percentage points of winning
-  chances **and** less than 1 pawn behind its first choice (less than an inaccuracy), the text
-  says your move is close to Stockfish's first choice instead of explaining an error; the pawn
+* **The deeper verdict** (`Explanation.verdict`). "fine": the deeper search's first choice is
+  the move you played. "close": it finds your move less than 5 percentage points of winning
+  chances **and** less than 1 pawn behind its first choice (less than an inaccuracy; the pawn
   condition matters in lopsided positions, where −10 against −6 is only a few points of winning
-  chances. At a choice point, your usual move is explained as a mistake only when it lost at
-  least 5 points on average in the analysed games (the openings section's bar): in the opening
-  several moves are often about equally good. Evaluations beyond 10 pawns are named in words ("a
-  winning position for you"); a number that size means nothing. Material is said to be lost or
-  won only when the engine's verdict on the lines backs it. At most three sentences: what the
-  refutation does, what it wins (material or a concept), and what to check next time.
+  chances), or, at a choice point, your usual move lost less than 5 points on average in the
+  analysed games (the openings section's bar: in the opening several moves are often about
+  equally good). "error": anything else. For "fine" and "close" the text says so instead of
+  explaining an error, the card's kicker reads "Deeper check: not a mistake at depth N" without
+  the winning chances lost, links to it read "What a deeper check says", and the green arrow of
+  the quicker analysis is keyed as the "quick check's choice". A repeated-mistake finding whose
+  move is cleared this way becomes an observation (section 3).
+* **Wording.** At most three sentences: what the refutation does, what it wins, and what to
+  check next time, with evaluations in pawns. A forced mate for you comes first ("You had mate
+  in 3"). Evaluations beyond 10 pawns are named in words ("a winning position for you"); a number
+  that size means nothing. The point of the line is named when the board shows it: a capture of
+  a pawn or piece that more enemy pieces attack than yours defend, a piece of yours chased by a
+  pawn so that it has to move again, an enemy piece landing on a square no pawn of yours can
+  cover, a recapture your move skipped.
+* **What changes hands.** Material is counted at the lines' settled comparison points (next
+  section: no capture left that wins material), in pawns (knight and bishop 3, rook 5, queen 9),
+  from before your opponent's last capture while you can still take it back, so taking back a
+  piece is a recapture, not a win. The text names what changes hands ("you lose a knight for two
+  pawns", "your queen for a rook and a knight"), counted against the better line when that line
+  loses material too, so a pawn you lose either way is not blamed on your move. A loss or a win
+  is named only when the engine's verdict on the line backs it; a pawn taken in a line that
+  Stockfish still rates more than a pawn below the material count (a gambit: the other side has
+  play for it) is not "won".
 
 ### Tactical patterns (motifs)
 
@@ -542,6 +624,15 @@ looked for in the first 8 plies of a line and a mate in the first 10.
 replies are the engine's best defence, not forced moves. A pattern is kept only when it comes on
 the carrier's first move of the line, or when every earlier move of the carrier was a check or a
 capture (the reply to the first quiet move is still in reach). Mates are kept always.
+
+**Only what is new.** A pattern is blamed on your move only when your move made it possible:
+along the refutation, a pin whose pinner, pinned piece and king already stood that way before
+your move is left out, and a pattern your opponent also has along the better line was not
+allowed by your move; along the better line, a pattern you carry out after your move anyway was
+not missed. When several patterns come on the same move, the plainer one leads the text (taking
+an undefended piece before the pin that comes with it, a double check before the discovered
+check it also is), and a pawn that reaches the seventh rank and is taken at once is a trade, not
+an advanced pawn.
 
 **The precision gate.** A pattern is named only when its detector passed a gate on real Lichess
 puzzles (`tests/fixtures/lichess_puzzles_sample.csv`: 1,573 puzzles from the CC0 puzzle
@@ -585,22 +676,36 @@ Two limits of this check:
 `coach/concepts.py` compares the two lines where they have played out, not right after your
 move: right after 5...e5, Stockfish counts the pawn's attack on the d4 knight as a plus even when
 the move loses. Each line is read about 3 moves in (6 plies from the position before your move),
-at the first quiet position from there (not in check, nothing left to recapture on the square
-of the last move) up to 4 plies later, else the last quiet one before it.
+at the first **settled** position from there up to 6 plies later, else the last settled one
+before it: not in check, and no capture left that wins material for the side to move, by a
+static exchange count (`concepts.see`: what a capture takes minus what the other side wins back
+on that square, each side taking with its cheapest piece and free to stop). A position in the
+middle of a combination (a fork with the queen still to be taken, an exchange half done) is
+never a comparison point. When pawns hang on both sides for the whole stretch (a pawn race), a
+position where at most a pawn can still be taken will do: material is then read to within a
+pawn, pieces exactly.
 
-* **Stockfish 16's classical evaluation terms** (material, pawns, mobility, king safety,
-  threats, passed pawns, space ...) at the two ends, each blended by its position's material
-  phase; the refutation's end minus the best line's end, from your side, in pawns. Differences
-  under 0.15 pawns are dropped. When both ends have the same material, a Material difference is
-  called piece placement. Stockfish 16 is the last version that prints these terms; with another
-  version this step is skipped with a note.
+* **Stockfish 16's classical evaluation terms** (pawns, mobility, king safety, threats, passed
+  pawns, space ...) at the two ends, each blended by its position's material phase; the
+  refutation's end minus the best line's end, from your side, in pawns. Differences under 0.15
+  pawns are dropped. Material is not a concept: when the two ends differ in material, the
+  Material and Imbalance terms are left out of the chart and the text says what changes hands
+  instead (previous section); when both ends have the same material, a Material difference is
+  called piece placement and an Imbalance difference piece balance. The Winnable term (how
+  Stockfish scales its evaluation towards a draw) is never shown: "winning chances" would read
+  like the game's result. Stockfish 16 is the last version that prints these terms; with
+  another version this step is skipped with a note.
 * **Board facts** from python-chess (the bishop pair, castling rights, a king left in the centre
   after move 12 with queens on, isolated, doubled and backward pawns, holes while you have five or
   more pawns and your opponent a knight or bishop): named only when worse for you at the
   refutation's end than at the best line's end and not already true before your move.
-* An explanation links a short note on its main concept (`data/concepts.json`, written for this
-  project) with the chapter of Capablanca's *Chess Fundamentals* or Lasker's *Chess Strategy*
-  that explains it.
+* An explanation links a short note on the concept your move made worst
+  (`data/concepts.json`, written for this project) with the chapter of Capablanca's *Chess
+  Fundamentals* or Lasker's *Chess Strategy* that explains it. Only a concept that got worse
+  for you gets a note (a note on one that got better would teach the opposite of what the line
+  shows), never Material, Imbalance or Winnable, and king safety only when your move touched
+  your king's shelter (a king move or castling, a pawn on or next to the king's file, a piece
+  leaving a square next to the king).
 
 ### The only claims: motif claims
 
@@ -608,27 +713,53 @@ The motif profile (`coach/profile.py`) counts, for every mistake or blunder by e
 engine-analysed games (a short line at depth 10 before and after each move), the patterns missed
 (in the best line, for the player who went wrong) and allowed (in the refutation, for the other
 side), each error once per pattern. Its table and chart ("Patterns in the mistakes", per 100
-moves, you against your opponents in the same games) are observations. The claims "you miss
-(allow) forks more (less) often than your opponents" must pass:
+moves, you against your opponents in the same games) are observations, and say so: a difference
+there counts only when the section lists it as a finding. They are shown once, under "Why these
+moves go wrong" (the Engine review links there).
 
-* **Two tests, both significant.** Your rate per move against your opponents' in the same games,
-  and the pattern's share of your errors against its share of theirs, each a game-clustered test
-  (the unit is the game, you and your opponent paired within it, as in the Engine review). The
-  share test keeps "you make more errors of every kind" as one finding (the blunder rate), not six.
-* **Benjamini–Hochberg** across every named pattern and both kinds, for each of the two tests,
-  and `stats.significance` at the strict alpha (0.01), with a confidence of at least 0.5.
-* **Big enough:** a rate ratio of at least 1.3 (its inverse for a strength), and still 1.3 after
-  dividing by the ratio of your other errors to theirs.
-* **Enough data:** at least 30 games in which either side had the pattern and 20 occurrences.
+A pattern is mostly there to be missed because the other side's last move allowed it (a piece
+left hanging, a fork let in), so a player who errs more hands their opponents more patterns to
+miss. Counted per move, "missed" turned a higher error rate into pattern claims ("you miss
+hanging pieces less often than your opponents" beside a higher blunder rate): in simulated worlds
+where both sides miss a pattern they are left with the same probability, the old per-move test
+made 0.9 to 12 false claims per report at 300 analysed games and 5 to 26 at 1,000. The claims
+"you miss (allow) forks more (less) often than your opponents" are now judged like this:
+
+* **Missed, per chance.** Of the forks your opponents' mistakes and blunders left you (their
+  errors whose refutation carries a fork), the share you missed (your next move was a mistake
+  or blunder too), against the same share for your opponents; a game-clustered test of the two
+  shares, judged on the smaller side's number of games with such a chance. The share must also
+  stand out against the other tactical chances each side was left, more for you than for your
+  opponents (a clustered test of the log-ratio contrast, `profile.ratio_contrast_test`): missing
+  more chances of every kind, or a pattern that merely comes with another one, is not one claim
+  per pattern.
+* **Allowed, per move and as a share of your errors.** Your rate per move against your
+  opponents' in the same games, and the pattern's share of your own mistakes and blunders against
+  its share of theirs, leaving out of both the errors made right after one of the other side's (a
+  missed chance, whose number depends on the other side's errors).
+* **Games as the unit** in every test (you and your opponent paired within each game, as in the
+  Engine review); **Benjamini–Hochberg** across every named pattern and both kinds, for each of
+  the two tests; `stats.significance` at the strict alpha (0.01) for both, with a confidence of at
+  least 0.5.
+* **Big enough:** both ratios at least 1.3 (their inverses for a strength), in the same
+  direction. Neither comparison with the rest is truncated at 1, so erring more (or less)
+  overall never becomes a pattern claim in the other direction.
+* **Enough data:** at least 30 games (for "missed", on each side: games with a chance of the
+  pattern) and 20 occurrences.
 * **Named patterns only:** only gated themes are tested, and only patterns the line forces are
   counted.
 
 The null world has no engine lines, so these claims are calibrated on simulated counts
-(`tests/test_profile.py`): in 200 simulated 300-game sets in which both sides share the same
-pattern rates, with game-level clustering, no claim was made (the test allows 0.05 per set);
-when you make 60% more errors of every kind, none either (30 sets). A fork missed twice as often
-per error as your opponents miss it is found in 17 of 20 simulated 300-game sets (the test asks
-for 16), never the other way round. `--no-motif-profile` turns the profile and its claims off.
+(`tests/test_profile.py`, `MOTIF_RUNS=<n>` to re-measure): measured over 200 worlds of 300
+analysed games and 60 of 1,000 in each kind of world (both sides with the same pattern rates;
+coupled worlds in which a side that errs more, 0.8 or 1.25 times as often per move, hands the
+other side more patterns to miss; a player who misses every kind of chance 25% less or 30% more
+often than the opponents), 0 to 0.033 false claims per report. A fork missed twice as often per
+chance as your opponents miss it (0.7 of the forks they leave you against 0.35) is found in 30
+of 40 worlds of 300 analysed games, 39 of 40 at 600 and 40 of 40 at 1,000; 1.5 times as often
+in 14, 26 and 35 of 40; never the other way round. Allowing a fork twice as often per error (0.2
+of your errors against 0.1) is found in 38 of 40 worlds at 300 games and 40 of 40 at 600 and
+1,000. `--no-motif-profile` turns the profile and its claims off.
 
 ### External facts, drills and progress
 
@@ -640,20 +771,52 @@ for 16), never the other way round. `--no-motif-profile` turns the profile and i
   endings are observations: the conversion claim stays with the Engine review's own test.
 * **Drills** (`coach/drills.py`): up to three packs of 30 puzzles for the patterns you miss most
   (from the motif profile; failing that, from the explained positions, then from the engine's
-  own tags) and one pack from your openings, from the filtered Lichess puzzle database, in the
-  `--drill-rating` window (default 1200–1600, not adjusted to your rating), most popular first.
+  own tags) and one pack from your openings, from the filtered Lichess puzzle database, most
+  popular first. A pack's reason quotes the profile's counts and says "(counts from the tactical
+  patterns table, not a tested finding)" unless the pattern is a motif claim. The puzzles' rating
+  window is your level unless you choose one: your latest chess.com rating in your most-played
+  rated format among blitz and rapid (else bullet), converted to the Lichess scale with the
+  rating map below, ±200, kept inside the collection's 800–2200 and at least 200 wide; a note in
+  the report says which window was used and why. Without a rated game in those formats it is
+  1200–1600. `--drill-rating LO-HI` chooses the window: one that misses 800–2200 entirely is a
+  usage error, one that overlaps it is cut to it with a note. The packs are written atomically,
+  like the report files.
 * **Review schedule:** your ten costliest mistakes and the first five puzzles of each pack come
   back 1, 3, 7 and 21 days after the report; items from the previous report's JSON that are due
   move to their next step.
+* **The richer `--puzzles` file:** a puzzle's solution is the engine's line, and its `Themes`
+  header names only the patterns you carry out along the solution printed (not what your
+  opponent's refutation did). A move the deeper search makes its own first choice gets no line
+  and no themes from the shorter profile search either.
 * **Progress** (`coach/progress.py`): each study-plan target next to the previous report's
-  number, with the direction that counts as better. It is an observation: two reports usually
-  share most of their games, so a change here is not a test of anything.
+  number, with the direction that counts as better. An "Improved" or "Not yet" badge comes only
+  from a test; everything else is shown without one. Progress badges are not strengths or
+  weaknesses and never enter the lists or the study plan.
+  * *Count metrics* (rated games started late at night, quick losses in an opening, games with
+    the same wrong move in a position) are counts over all the report's games. When this
+    report's games are the previous report's games plus newer ones (the same player, and the games
+    up to the previous report's last one are as many as it had, starting with the same game), the
+    newer games' count is the difference, and the share among the games since
+    the previous report's last game is compared with the share among the earlier games ("rated
+    games started 23:00–03:00: 31% of your 600 games before 12 Sep → 7% of your 100 games
+    since"). The test is a two-proportion z-test on each period's *effective* number of games:
+    games in one session share their time of day and much else, so each period counts as Kish's
+    effective sample size of its sessions, (sum of sizes)² / (sum of squared sizes), a new
+    session after a 30-minute pause. It needs at least 20 new games, and the tested lines are
+    Benjamini–Hochberg adjusted together and judged at 0.05. A line that passes gets its badge;
+    one that doesn't says "no clear change yet".
+  * *Every other metric* (the share of the clock, the score against your rating, errors per 100
+    moves ...) is computed over all the report's games, most of them in both reports, so its two
+    numbers are shown side by side with the number of new games, and no badge.
+  * The test's false-badge rate and power on realistic schedules are not recorded beside its
+    tests yet (`tests/test_progress.py` checks the mechanics: sessions, Kish weights, the minimum,
+    the adjustment).
 * **Maia-2** (`--maia`, optional): how often players at your rating find the better move and play
   yours (the blitz model for bullet and blitz, the rapid model for rapid and daily); it orders the
   explanations by cost × chance of finding the better move. It changes no claim.
-* **Format views** get the explanations of their own format's positions; drills, the motif
-  profile and the review schedule stay with the main report (they are practice for every
-  format).
+* **Format views** get the explanations of their own format's positions, of positions reached in
+  their format's games, and of their own findings (those first); drills, the motif profile and
+  the review schedule stay with the main report (they are practice for every format).
 
 ### The rating map
 
@@ -663,7 +826,8 @@ format, rounded to 5, shown as "about 1390". The table follows the ChessGoals ra
 (July 2026), but only two rows were checked against that page (chess.com blitz 900 ≈ Lichess
 1360, 1000 ≈ 1425); the other rows are rough estimates, and the gap between the sites moves by
 about 30 points a year. Daily games use the rapid rows. So "players one or two groups above you"
-and Maia's "at your rating" are approximate. The drill window does not use this map.
+and Maia's "at your rating" are approximate, and so is the drill packs' automatic rating window,
+which is centred on this conversion (the report's note names the table it came from).
 
 ### The LLM coach and its verifier
 
@@ -697,6 +861,10 @@ entries that name no study-plan item are dropped, and the plan is trimmed to
 `--practice-minutes` a day. `chess-insights ask` answers questions through the same checks (at
 most eight sentences); when there is no checked answer it quotes what the report says instead.
 
+`--offline` sends nothing to Claude, whatever the key: `report --offline --coach-llm` keeps the
+built-in texts and notes that the AI coach was skipped, and `ask --offline` answers with the
+quote from the report alone.
+
 What the verifier cannot check: evaluations in words without a number ("you were winning"),
 whose move a piece move is when it has no move number ("White plays Bxd6"), and chess ideas said
 in words only ("the knight beats the bishop"). Those can be wrong in an accepted text. It has not
@@ -712,6 +880,7 @@ yet been run against the real API (see PLAN.md).
 | Wikibooks, Chess Opening Theory | Two sentences on the opening of an explained position | CC BY-SA 4.0: at most two sentences, shown with "Wikibooks, CC BY-SA 4.0" and a link to the page; only the extract is cached |
 | Capablanca, *Chess Fundamentals* (1921); Lasker, *Chess Strategy* (1915) | Chapter pointers in the concept notes | Public domain in the USA (Project Gutenberg #33870, #5614); only chapter and section titles are cited, the notes are this project's own words |
 | Stockfish (16 for the concept terms) | Game analysis and the coaching's searches | GPL-3.0; a separate program you install (Ubuntu's package on GitHub), run over UCI, not bundled |
+| python-chess | Parsing, move replay, the motif detectors and board facts; its piece drawings are the piece sprite embedded in every HTML report | GPL-3.0-or-later; a required dependency. The project itself declares MIT (`pyproject.toml`): whether that fits, and under which licence the package and the reports are shared, is an open decision for the owner (PLAN.md, Known limitations) |
 | Maia-2 (optional) | Move probabilities by rating | MIT; installed with `pip install maia2`, downloads its weights on first use |
 | Claude (optional) | Rewording and the weekly plan | Anthropic API with your key; receives the packet above |
 
