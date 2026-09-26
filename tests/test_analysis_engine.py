@@ -4,11 +4,12 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 
+import chess
 import pytest
 
 from chess_insights.analysis import engine_stats
 from chess_insights.context import AnalysisContext
-from chess_insights.models import CATEGORIES, VALUE_FORMATS, ModuleResult
+from chess_insights.models import ARROW_KINDS, CATEGORIES, TIME_CLASSES, VALUE_FORMATS, ModuleResult
 from factories import make_game, make_game_eval, make_ply_eval, all_tables
 
 SANS = ["e4", "Nf6", "Qd1", "O-O", "exd5", "Rb8", "Bc4", "Kh8", "Ne2", "a6"]
@@ -33,6 +34,32 @@ def assert_consistent(mr: ModuleResult) -> None:
         assert len(set(ins.example_games)) == len(ins.example_games)
     assert len({i.id for i in mr.insights}) == len(mr.insights)
     json.dumps(mr.stats, default=str, allow_nan=False)
+    for ins in mr.insights:
+        assert_pictured(ins, mr.stats.get("games", 0))
+
+
+def assert_pictured(ins, games: int) -> None:
+    """Every finding says which formats its games come from and carries a small chart and/or a board."""
+    assert ins.formats and all(tc in TIME_CLASSES and n > 0 for tc, n in ins.formats.items()), ins.id
+    assert sum(ins.formats.values()) <= games, ins.id
+    assert ins.chart is not None or ins.diagram is not None, ins.id
+    if ins.chart is not None:
+        c = ins.chart
+        assert c.title and c.value_format in VALUE_FORMATS and c.kind in ("bar", "hbar", "line", "stacked_bar")
+        assert 1 <= len(c.labels) <= 6 and 1 <= len(c.series) <= 3, (ins.id, c.labels, len(c.series))
+        assert all(len(x.values) == len(c.labels) for x in c.series), ins.id
+        assert all(v is None or math.isfinite(v) for x in c.series for v in x.values), ins.id
+    if ins.diagram is not None:
+        d = ins.diagram
+        assert d.svg == "" and d.link.startswith("https://") and d.time_class in TIME_CLASSES
+        board = chess.Board(d.fen)
+        assert d.arrows and d.arrows[0].kind == "played" and all(a.kind in ARROW_KINDS for a in d.arrows)
+        assert board.piece_at(chess.parse_square(d.arrows[0].start)) is not None
+        assert d.strips and 1 <= len(d.strips[0].frames) <= 4
+
+
+def series(chart, name: str) -> list:
+    return next(s.values for s in chart.series if s.name == name)
 
 
 def run(pairs, games=None, **options) -> ModuleResult:
@@ -148,6 +175,9 @@ def test_blunder_rate_weakness_and_equal_rates_make_no_claims():
     ins = insight(mr, "engine.weakness.blunder-rate")
     assert ins and ins.category == "blunders" and ins.evidence["per100"] == pytest.approx(15.0)
     assert ins.evidence["opp_per100"] == pytest.approx(5.0)
+    # one format: a single bar pair named after it, with the numbers of the detail text
+    assert ins.formats == {"blitz": 20} and ins.chart.labels == ["Blitz"]
+    assert series(ins.chart, "You") == [pytest.approx(15.0)] and series(ins.chart, "Opponents") == [pytest.approx(5.0)]
 
     def equal(i, user):
         return {"judgement": "blunder" if i % 10 in (4, 5) else "mistake" if i % 10 in (6, 7) else None}
@@ -176,6 +206,10 @@ def test_phase_comparison_picks_the_endgame():
     weak = [i for i in mr.insights if i.category == "phases"]
     assert [i.id for i in weak] == ["engine.weakness.phase-endgame"]
     assert weak[0].evidence["per100"] == pytest.approx(30.0) and weak[0].evidence["opp_per100"] == pytest.approx(10.0)
+    assert series(weak[0].chart, "You")[0] == pytest.approx(30.0)
+    assert series(weak[0].chart, "Opponents")[0] == pytest.approx(10.0)
+    assert "rest of the game: 10.0 for you vs 10.0 for them" in weak[0].detail
+    assert "rest of the game: 10.0 for you, 10.0 for your opponents" in weak[0].chart.note
     assert "endgame" in weak[0].title and 2 <= len(weak[0].study) <= 4
     rows = {r[0]: r for r in table(mr, "Game phases").rows}
     assert rows["Endgame"][1] == 200 and rows["Endgame"][3] == pytest.approx(30.0)
@@ -234,6 +268,10 @@ def test_time_pressure_blunders_vs_your_opponents():
     assert ins.evidence["per100_low"] == pytest.approx(100 * 40 / 180)
     assert ins.evidence["per100_ok"] == pytest.approx(100 * 5 / 220)
     assert ins.evidence["opp_per100_low"] == pytest.approx(100 * 5 / 180)
+    assert ins.formats == {"blitz": 20} and ins.chart.labels == ["Short of time", "More time"]
+    assert series(ins.chart, "You") == [pytest.approx(ins.evidence["per100_low"]), pytest.approx(ins.evidence["per100_ok"])]
+    assert series(ins.chart, "Opponents") == [pytest.approx(ins.evidence["opp_per100_low"]),
+                                              pytest.approx(ins.evidence["opp_per100_ok"])]
     row = table(mr, "Blunders when short of time").rows[0]
     assert row[:2] == ["Blitz", 180] and row[4] == 180 and row[5] == pytest.approx(100 * 5 / 180)
 
@@ -264,6 +302,8 @@ def test_conversion_rates_and_thrown_games():
     assert (stats["opp_reached"], stats["opp_converted"], stats["opp_rate"]) == (20, 19, 0.95)
     ins = insight(mr, "engine.weakness.conversion")
     assert ins and ins.category == "conversion"
+    assert ins.formats == {"blitz": 40}  # the 40 games in which someone reached a winning position
+    assert series(ins.chart, "You") == [pytest.approx(0.4)] and series(ins.chart, "Opponents") == [pytest.approx(0.95)]
     thrown_losses = {g.url for g, _ in pairs[12:20]}
     assert ins.example_games and set(ins.example_games) <= thrown_losses  # losses come first
     # the saved-positions numbers are folded into the conversion finding instead of a second card
@@ -273,6 +313,24 @@ def test_conversion_rates_and_thrown_games():
     rows = table(mr, "Winning and losing positions").rows
     assert rows[0][1:5] == [20, 8, 4, 8] and rows[0][5] == pytest.approx(0.4)
     assert rows[1][1:5] == [20, 0, 1, 19] and rows[1][5] == pytest.approx(0.05)
+
+
+def test_conversion_chart_by_format_leaves_out_a_side_with_too_few_games():
+    pairs = []
+    for k in range(20):  # you reach +85% first: 16 blitz games, 4 bullet; you win half
+        tc = "blitz" if k < 16 else "bullet"
+        pairs.append(analysed(lambda i, u: {"win_before": 90.0} if u and i == 10 else {},
+                              outcome="win" if k % 2 else "loss", time_class=tc))
+    for k in range(20):  # your opponent reaches 85%+ first: 10 blitz, 10 bullet; they win all
+        pairs.append(analysed(lambda i, u: {"win_before": 90.0} if not u and i == 11 else {}, outcome="loss",
+                              time_class="blitz" if k < 10 else "bullet"))
+    ins = insight(run(pairs), "engine.weakness.conversion")
+    assert ins.formats == {"bullet": 14, "blitz": 26}
+    assert ins.chart.labels == ["All games", "Bullet", "Blitz"]
+    # bullet: only 4 games where you got there first, too few for a share of your own; blitz: 8 of 16
+    assert series(ins.chart, "You") == [pytest.approx(0.5), None, pytest.approx(0.5)]
+    assert series(ins.chart, "Opponents") == [pytest.approx(1.0), pytest.approx(1.0), pytest.approx(1.0)]
+    assert f"A bar needs at least {engine_stats.MIN_BAR_GAMES} such games." in ins.chart.note
 
 
 def test_conversion_counts_each_game_once_for_whoever_got_there_first():
@@ -319,9 +377,12 @@ def test_missed_tactics_and_costliest_examples():
     ins = insight(mr, "engine.weakness.missed-tactics")
     assert ins and ins.category == "tactics" and ins.evidence["count"] == 40 and ins.evidence["opp_count"] == 10
     assert ins.example_games[0] == pairs[-1][0].url  # the costliest miss first
+    assert series(ins.chart, "You") == [pytest.approx(10.0)] and series(ins.chart, "Opponents") == [pytest.approx(2.5)]
     assert insight(mr, "engine.weakness.hung-material") is None
     mates = insight(mr, "engine.observation.missed-mates")
     assert mates and mates.evidence["missed_mates"] == 3
+    assert series(mates.chart, "You") == [3] and series(mates.chart, "Opponents") == [0]
+    assert "allowed against you: 0" in mates.chart.note
     row = table(mr, "Tactics").rows[0]
     assert row[1:] == [40, pytest.approx(10.0), 10, pytest.approx(2.5)]
 
@@ -343,11 +404,32 @@ def test_blunder_anatomy_by_piece_and_move_number():
     assert pieces["Pawn"][1] == 80  # e4 and exd5
     ins = insight(mr, "engine.observation.blunder-anatomy")
     assert ins and "Queen moves" in ins.title and ins.evidence["blunders"] == 40
+    shares = dict(zip(ins.chart.labels, zip(*(s.values for s in ins.chart.series))))
+    assert shares["Queen"] == (pytest.approx(40 / 200), pytest.approx(1.0))  # 20% of your moves, all your blunders
+    assert ins.chart.note == "Formats: Blitz 10 games."  # one format: the chart is that format's split
     buckets = table(mr, "Blunders by move number")
     chart = next(c for c in mr.charts if c.title.startswith("Blunders per 100 moves, by move number"))
     assert chart.series[0].values == [r[2] for r in buckets.rows]
     assert chart.series[1].values == [r[4] for r in buckets.rows]
     assert buckets.rows[0][1:3] == [100, pytest.approx(20.0)]  # moves 1-10: 2 blunders in 10 of your moves
+
+
+def test_blunder_anatomy_note_gives_each_formats_share_with_its_count():
+    def queen(i, user):  # every blunder a queen move (Qd1)
+        return {"judgement": "blunder"} if user and i in (2, 12, 22, 32) else {}
+
+    def mixed(i, user):  # one queen blunder, one pawn blunder (e4 at ply 0, exd5 at ply 4)
+        return {"judgement": "blunder"} if user and i in (4, 12) else {}
+
+    pairs = [analysed(queen, time_class="bullet") for _ in range(10)]
+    pairs += [analysed(mixed, time_class="blitz") for _ in range(10)]
+    pairs += [analysed(queen, time_class="rapid") for _ in range(3)]  # too few games for a share of its own
+    ins = insight(run(pairs), "engine.observation.blunder-anatomy")
+    assert ins.evidence["blunders"] == 40 + 10 + 12 and ins.evidence["total_blunders"] == 40 + 20 + 12
+    assert ins.chart.note == (
+        "Queen moves were 100% of your 40 bullet blunders and 50% of your 20 blitz blunders. "
+        "Formats: Bullet 10 · Blitz 10 · Rapid 3 games."
+    )
 
 
 # --------------------------------------------------------------------------- opening outcome
@@ -369,7 +451,29 @@ def test_opening_outcome_eval_after_move_ten():
     assert rows[("Italian Game", "White")][2:4] == [6, pytest.approx(0.2)]
     ins = insight(mr, "engine.weakness.openings-black-caro-kann-defense")
     assert ins and ins.category == "openings" and "Caro-Kann" in ins.title
+    assert ins.formats == {"blitz": 12}
+    assert series(ins.chart, "The Caro-Kann Defense") == [pytest.approx(caro_row[3])]
+    assert len(ins.chart.series) == 1  # no other opening as Black
     assert not any(i.id.startswith("engine.") and "italian" in i.id for i in mr.insights)  # 6 games: table only
+
+
+def test_opening_chart_compares_with_your_other_openings_when_no_format_has_a_bar():
+    """12 Caro-Kann games spread over three formats (4 each: no format bar) still get the comparison with your other
+    openings as Black; an opening row needs 5 games, and so does the other openings' bar."""
+    def at_ply_20(cp):
+        return lambda i, user: {"cp_after": cp} if i == 19 else {}
+
+    caro = [analysed(at_ply_20(200), color="black", opening_family="Caro-Kann Defense", time_class=tc)
+            for tc in ("bullet", "blitz", "rapid") for _ in range(4)]
+    sicilian = [analysed(at_ply_20(-50), color="black", opening_family="Sicilian Defense") for _ in range(6)]
+    ins = insight(run(caro + sicilian), "engine.weakness.openings-black-caro-kann-defense")
+    assert ins.formats == {"bullet": 4, "blitz": 4, "rapid": 4} and ins.chart.labels == ["All games"]
+    assert series(ins.chart, "The Caro-Kann Defense") == [pytest.approx(-2.0)]
+    assert series(ins.chart, "Your other openings as Black") == [pytest.approx(0.5)]
+    assert "Your other openings as Black: Blitz 6 games." in ins.chart.note
+    few = sicilian[:4]  # 4 games of other openings: too few for a bar
+    ins = insight(run(caro + few), "engine.weakness.openings-black-caro-kann-defense")
+    assert [s.name for s in ins.chart.series] == ["The Caro-Kann Defense"]
 
 
 # --------------------------------------------------------------------------- accuracy trend and by result
@@ -391,6 +495,9 @@ def test_accuracy_trend_and_accuracy_by_result():
     assert ins.evidence["games"] == 12
     wins = [a.my_accuracy for g, a in pairs if g.outcome == "win"]
     assert ins.evidence["win"] == pytest.approx(sum(wins) / len(wins))
+    assert [s.name for s in ins.chart.series] == ["Wins", "Draws", "Losses"]
+    assert [s.values[0] for s in ins.chart.series] == [pytest.approx(ins.evidence[o]) for o in ("win", "draw", "loss")]
+    assert ins.chart.reference == pytest.approx(ins.evidence["opponents"])
 
 
 # --------------------------------------------------------------------------- statistics: games are the unit

@@ -72,12 +72,18 @@ def test_repeated_mistake_detected_with_reach_count_and_insight():
     assert 0 < ins.severity <= 1
     table, puzzles = res.tables
     assert puzzles.title == "Your costliest mistakes (puzzles)" and len(puzzles.rows) == 2
-    assert all(row[4].startswith("https://lichess.org/analysis/") for row in puzzles.rows)
+    assert all(row[5].startswith("https://lichess.org/analysis/") for row in puzzles.rows)
+    assert [row[1] for row in puzzles.rows] == ["Blitz", "Blitz"]
     assert len(table.rows[0]) == len(table.columns) == len(table.formats)
     assert table.rows[0][0] == "1.e4 e5 2.Nf3 Nc6 3.Bc4"
-    assert table.rows[0][2:6] == [4, 2, "3...Nd4", "3...Nf6"]
-    [diagram] = res.diagrams
-    assert diagram.svg.startswith("<svg") and diagram.fen == ins.evidence["fen"]
+    assert table.rows[0][2:7] == [4, 2, "Blitz 2", "3...Nd4", "3...Nf6"]
+    diagram, *puzzle_boards = res.diagrams  # the repeated mistake, then one board per costliest puzzle
+    assert diagram.svg == "" and diagram.fen == ins.evidence["fen"] and ins.diagram is diagram
+    assert [(a.start, a.end, a.kind) for a in diagram.arrows] == [("c6", "d4", "played"), ("g8", "f6", "best")]
+    assert (diagram.orientation, diagram.time_class, diagram.link) == ("black", "blitz", ins.example_games[0])
+    assert [b.title for b in puzzle_boards] == ["Puzzle 1: Italian Game", "Puzzle 2: Italian Game"]
+    assert ins.formats == {"blitz": 4}
+    assert ins.chart.labels == ["Blitz"] and [s.values for s in ins.chart.series] == [[2.0], [2.0]]
     assert res.stats["repeated_positions"] == 1 and res.stats["claims"] == 0
 
 
@@ -120,18 +126,19 @@ def test_diagrams_render_in_html_and_markdown():
     from chess_insights.report.html import lichess_analysis_url
 
     res = mistakes.analyze(_ctx([_game_with_error(1), _game_with_error(2)]))
+    assert res.diagrams and all(d.svg == "" for d in res.diagrams)  # the renderers draw boards from the FEN
     evil = Diagram(title="<b>x</b>", fen="not a fen", svg='<svg><script>alert(1)</script></svg>', caption="c")
     res.diagrams.append(evil)
     report = Report(username="tester", generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc), filters="", n_games=2,
                     date_from=None, date_to=None, modules=[res], strengths=[], weaknesses=[], study_plan=[])
     html = render_html(report)
-    assert html.count('<figure class="board-fig">') == 2
     assert "<svg" in html and "alert(1)" not in html and "&lt;b&gt;x&lt;/b&gt;" in html
+    assert all(d.title in html for d in res.diagrams[:-1])
     fen = res.diagrams[0].fen
     assert lichess_analysis_url(fen) == "https://lichess.org/analysis/" + fen.replace(" ", "_")
     assert lichess_analysis_url("not a fen") is None
     md = render_markdown(report)
-    assert "analyse on Lichess" in md and fen.split()[0] in md
+    assert res.diagrams[0].title in md and fen.split()[0] in md
 
 
 # --------------------------------------------------------------------------- review fixes
@@ -236,17 +243,24 @@ def test_chess960_puzzles_carry_the_variant_and_castle_correctly():
     assert board.san(move) == "O-O-O"
     board.push(move)
     assert board.king(chess.WHITE) == chess.C1 and board.piece_at(chess.D1) == chess.Piece.from_symbol("R")
-    svg = mistakes._svg(puzzle)
-    assert svg.startswith("<svg")
+    board = mistakes.game_diagram(puzzle.game, puzzle.ply, lambda played, best: (played, best or ""),
+                                  best_san=puzzle.best_san)
+    assert (board.title, board.caption, board.fen, board.svg) == ("1.a3", "1.O-O-O", puzzle.fen, "")
+    assert [(a.start, a.end, a.kind) for a in board.arrows] == [("a2", "a3", "played"), ("b1", "c1", "best")]
 
 
 def test_diagram_arrows_show_where_the_king_goes_when_castling():
-    standard = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
-    assert mistakes._arrow(standard, standard.parse_san("O-O")) == (chess.E1, chess.G1)
-    c960 = chess.Board("rk5r/pppppppp/8/8/8/8/PPPPPPPP/RK5R w HAha - 0 1", chess960=True)
-    assert mistakes._arrow(c960, c960.parse_san("O-O-O")) == (chess.B1, chess.C1)  # not b1 -> a1 (the rook)
-    assert mistakes._arrow(c960, c960.parse_san("O-O")) == (chess.B1, chess.G1)
-    assert mistakes._arrow(c960, c960.parse_san("a3")) == (chess.A2, chess.A3)
+    def arrows(game, ply, best):
+        board = mistakes.game_diagram(game, ply, lambda p, b: ("t", "c"), best_san=best)
+        return [(a.start, a.end, a.kind) for a in board.arrows]
+
+    castles = make_game(moves_san=["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "O-O", "Nf6"])
+    assert arrows(castles, 6, "d3") == [("e1", "g1", "played"), ("d2", "d3", "best")]
+    fen = "rk5r/pppppppp/8/8/8/8/PPPPPPPP/RK5R w HAha - 0 1"
+    c960 = make_game(rules="chess960", initial_fen=fen, moves_san=["O-O", "a6"])
+    assert arrows(c960, 0, "O-O-O") == [("b1", "g1", "played"), ("b1", "c1", "best")]  # not b1 -> a1 (the rook)
+    other = make_game(rules="chess960", initial_fen=fen, moves_san=["a3", "a6"])
+    assert arrows(other, 0, "O-O") == [("a2", "a3", "played"), ("b1", "g1", "best")]
 
 
 # --------------------------------------------------------------------------- verifier findings: repeated mistakes

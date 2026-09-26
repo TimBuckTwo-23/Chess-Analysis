@@ -15,6 +15,10 @@ Needs engine analysis (``ctx.evals``). Two outputs:
 * **Puzzles**: every position where your move lost a lot of winning chances,
   exported as PGN (``SetUp``/``FEN`` per puzzle) that Lichess studies and most
   chess GUIs import directly.
+
+Every position shown gets a board (:func:`game_diagram`): your move as a red arrow, the engine's
+green, seen from your side, with a strip of the moves actually played from there. Findings and
+tables say which formats (bullet, blitz, rapid) the games behind them come from.
 """
 
 from __future__ import annotations
@@ -23,13 +27,13 @@ import hashlib
 import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import chess
-import chess.svg
 
+from .. import visuals
 from ..context import AnalysisContext
-from ..models import Diagram, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Table
+from ..models import Chart, Diagram, Frame, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Strip, Table
 from ..stats import STRICT_ALPHA, MeanTest, bh_adjust, clamp, significance
 
 KEY = "mistakes"
@@ -42,13 +46,8 @@ PUZZLE_LIMIT = 300  # the costliest puzzles exported by --puzzles
 PUZZLE_TABLE_ROWS = 10  # the costliest puzzles listed in the report, each with a Lichess board link
 LICHESS_STUDY_CHAPTERS = 64  # a Lichess study holds at most this many puzzles
 MAX_INSIGHTS = 3
-MAX_DIAGRAMS = 4
-BOARD_COLORS = {
-    "square light": "#E9E4D4",
-    "square dark": "#7D8F6E",
-    "arrow red": "#C43D3Dcc",  # your move
-    "arrow green": "#1F7A3Acc",  # engine's move
-}
+MAX_DIAGRAMS = 4  # boards of repeated mistakes (the costliest puzzles get one each on top)
+STRIP_PLIES = 4  # small boards under a position: your move and the three moves played after it
 
 
 @dataclass
@@ -83,6 +82,7 @@ class RepeatedMistake:
     drops: list[float] = field(default_factory=list)  # win-% it lost in each analysed game that has it, flagged or not
     reached: int = 0  # games (analysed or not) in which the position came up with you to move
     games_reached: list[str] = field(default_factory=list)
+    reached_in: list[Game] = field(default_factory=list)  # those games (with every game you played it in)
     base_rate: Optional[float] = None  # your error rate per move, the null hypothesis of the test
     p_value: float = 1.0  # one-sided binomial: played it in >= ``errors`` of ``reached`` games at ``base_rate``
     p_adjusted: float = 1.0  # Benjamini-Hochberg over every repeated mistake tested
@@ -334,6 +334,7 @@ def find_repeated(
             continue
         rep.games_reached = list(dict.fromkeys(g.url for g in reached.get(epd, [])))
         rep.reached = max(len(reached.get(epd, [])), rep.errors)
+        rep.reached_in = list({g.game_id: g for g in [*reached.get(epd, []), *rep.played_in]}.values())
         out.append(rep)
     return sorted(out, key=lambda r: (-r.weight, r.epd, r.uci))
 
@@ -363,30 +364,120 @@ def assess(repeated: list[RepeatedMistake], errors: int, moves: int) -> list[Rep
     return repeated
 
 
-def _arrow(board: chess.Board, move: chess.Move) -> tuple[chess.Square, chess.Square]:
-    """(from, to) for a move's arrow; castling points to the king's destination (Chess960 moves encode the rook)."""
-    if board.is_castling(move):
-        rank = chess.square_rank(move.from_square)
-        return move.from_square, chess.square(2 if board.is_queenside_castling(move) else 6, rank)
-    return move.from_square, move.to_square
+# --------------------------------------------------------------------------- pictures
+Describe = Callable[[str, Optional[str]], tuple[str, str]]  # (your move, the better move) labels -> (title, caption)
 
 
-def _svg(event: MistakeEvent) -> str:
-    board = chess.Board(event.fen, chess960=event.game.rules == "chess960")
-    arrows = []
+def format_name(time_class: str) -> str:
+    """"Blitz" for "blitz" (the report's name for a time class)."""
+    return visuals.FORMAT_NAMES.get(time_class, time_class.capitalize())
+
+
+def formats_note(counts: dict[str, int], what: str = "games") -> str:
+    """"Bullet 210 · Blitz 88 games" (the report's format order); "" when there are none."""
+    parts = [f"{format_name(tc)} {n}" for tc, n in visuals.ordered_formats(counts).items()]
+    if not parts:
+        return ""
+    return " · ".join(parts) + (f" {what}" if what else "")
+
+
+def formats_words(counts: dict[str, int]) -> str:
+    """"100 bullet, 100 blitz and 100 rapid", or "all blitz" for a single format ("" for none)."""
+    items = list(visuals.ordered_formats(counts).items())
+    if len(items) == 1:
+        return f"all {format_name(items[0][0]).lower()}"
+    parts = [f"{n} {format_name(tc).lower()}" for tc, n in items]
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}" if parts else ""
+
+
+def _win_caption(p: PlyEval) -> str:
+    """Your winning chances after a move, from the engine's verdict on it: "Your chances: 33%"."""
+    mine = p.win_after if p.is_user else 100.0 - p.win_after
+    return f"Your chances: {mine:.0f}%"
+
+
+def game_diagram(
+    game: Game,
+    ply: int,
+    describe: Describe,
+    *,
+    best_san: Optional[str] = None,
+    ev: Optional[GameEval] = None,
+    strip_title: str = "What happened in the game",
+    strip_plies: int = STRIP_PLIES,
+) -> Optional[Diagram]:
+    """A board of ``game`` just before ply ``ply`` (one of your moves), seen from your side and linked to the game.
+
+    The move played there is a red arrow and ``best_san`` (the engine's choice) a green one; a strip of small
+    boards follows the moves actually played from there (that move first, up to ``strip_plies``), each with your
+    winning chances when ``ev`` has them. ``describe`` turns the two move labels ("7...Bg4", "7...Nf6") into the
+    board's title and caption. None if the game's moves don't replay up to that point.
+    """
+    if not 0 <= ply < len(game.moves_san):
+        return None
     try:
-        arrows.append(chess.svg.Arrow(*_arrow(board, board.parse_san(event.san)), color="red"))
-        if event.best_san:
-            arrows.append(chess.svg.Arrow(*_arrow(board, board.parse_san(event.best_san)), color="green"))
-    except ValueError:
+        board = _board(game)
+        last = ""
+        for san in game.moves_san[:ply]:
+            move = board.parse_san(san)
+            last = move.uci()
+            board.push(move)
+    except ValueError:  # unreadable start position or illegal move before the position
+        return None
+    fen, before = board.fen(), board.copy(stack=False)
+    played = game.moves_san[ply]
+    line: list[str] = []
+    try:
+        for san in game.moves_san[ply : ply + max(1, strip_plies)]:
+            move = board.parse_san(san)
+            line.append(move.uci())
+            board.push(move)
+    except ValueError:  # the strip stops at an unreadable move
         pass
-    return chess.svg.board(
-        board,
-        orientation=chess.WHITE if event.game.color == "white" else chess.BLACK,
-        arrows=arrows,
-        size=280,
-        colors=BOARD_COLORS,
+    if not line:  # the move itself doesn't replay: no position to talk about
+        return None
+    if best_san and visuals.parse_move(before, best_san) is None:  # e.g. an eval from another record: no green
+        best_san = None
+    title, caption = describe(move_label(fen, played), move_label(fen, best_san) if best_san else None)
+    diagram = visuals.position_diagram(
+        title,
+        fen,
+        orientation=game.color,
+        played=played,
+        best=best_san,
+        caption=caption,
+        link=game.url,
+        time_class=game.time_class,
+        last_move=last,
     )
+    plies = {p.ply: p for p in ev.plies} if ev is not None else {}
+    captions = [_win_caption(plies[ply + i]) if ply + i in plies else "" for i in range(len(line))]
+    if game.rules == "chess960":  # arrows and strip from the Chess960 board (castling differs from standard chess)
+        diagram.arrows = []
+        for move_text, kind in ((played, "played"), (best_san, "best")):
+            arrow = visuals.move_arrow(before, move_text, kind) if move_text else None
+            if arrow is not None and all((a.start, a.end) != (arrow.start, arrow.end) for a in diagram.arrows):
+                diagram.arrows.append(arrow)
+        strip = _strip_on(before, strip_title, line, captions)
+    else:
+        strip = visuals.line_strip(strip_title, fen, line, max_frames=len(line), captions=captions)
+    if strip.frames:
+        diagram.strips.append(strip)
+    return diagram
+
+
+def _strip_on(board: chess.Board, title: str, moves_uci: list[str], captions: list[str]) -> Strip:
+    """:func:`visuals.line_strip` played on ``board`` itself, which keeps its rules (Chess960 castling)."""
+    board = board.copy(stack=False)
+    frames = []
+    for uci, caption in zip(moves_uci, captions):
+        move = chess.Move.from_uci(uci)
+        if move not in board.legal_moves:
+            break
+        label = visuals.move_label(board, move)
+        board.push(move)
+        frames.append(Frame(fen=board.fen(), move=label, last_move=uci, caption=caption))
+    return Strip(title=title, frames=frames)
 
 
 def _slug(epd: str) -> str:
@@ -427,7 +518,69 @@ def fold_follow_ups(repeated: list[RepeatedMistake]) -> tuple[list[RepeatedMista
 
 
 # --------------------------------------------------------------------------- module
-def _insight(r: RepeatedMistake, follow_ups: Iterable[RepeatedMistake] = ()) -> Insight:
+def _repeated_diagram(r: RepeatedMistake, evals: Optional[dict[str, GameEval]] = None) -> Optional[Diagram]:
+    """The position of a repeated mistake from your latest analysed game with it, and what happened next there."""
+    e = r.first
+    line = format_line(e.game.moves_san[: e.ply], e.game.initial_fen, last_n=6)
+
+    def describe(played: str, best: Optional[str]) -> tuple[str, str]:
+        return (
+            f"{e.game.opening_family or 'Position'}: {played}",
+            f"After {line}. Red: your move (in {r.errors} of {_plural(r.reached, 'game')})."
+            + (" Green: engine's choice." if best else ""),
+        )
+
+    return game_diagram(
+        e.game, e.ply, describe, best_san=r.best_san, ev=(evals or {}).get(e.game.game_id),
+        strip_title="What happened next in your latest game with it",
+    )
+
+
+def _repeated_chart(r: RepeatedMistake) -> Chart:
+    """What you played in the games that reached the position: all of them, then each format (counts)."""
+    e = r.first
+    played = move_label(e.fen, r.san)
+    reached = visuals.format_counts(r.reached_in)
+    chose = visuals.format_counts(r.played_in)
+    if len(reached) > 1:  # every game, then each format (counts, so even a few games get their own bar)
+        labels = ["All games"] + [format_name(tc) for tc in reached]
+        yes = [r.errors] + [chose.get(tc, 0) for tc in reached]
+        no = [r.reached - r.errors] + [max(0, n - chose.get(tc, 0)) for tc, n in reached.items()]
+    else:  # one format: its bar is the whole count
+        labels = [format_name(next(iter(reached)))] if reached else ["All games"]
+        yes, no = [r.errors], [r.reached - r.errors]
+    note = f"Games that reached the position: {formats_note(reached, '')}." if reached else ""
+    if r.significant and r.base_rate:
+        note += f" You go wrong on about 1 move in {round(1 / r.base_rate)} overall."
+    return visuals.comparison_chart(
+        "What you played in this position",
+        labels,
+        [(f"Played {played}", yes), ("Another move", no)],
+        value_format="int",
+        note=note.strip(),
+        kind="stacked_bar",
+    )
+
+
+def _puzzle_diagram(number: int, e: MistakeEvent, ev: Optional[GameEval] = None) -> Optional[Diagram]:
+    """Board for one of the costliest puzzles (the table's row ``number``)."""
+
+    def describe(played: str, best: Optional[str]) -> tuple[str, str]:
+        return (
+            f"Puzzle {number}: {e.game.opening_family or format_name(e.game.time_class) + ' game'}",
+            f"You played {played} (red), which cost you {e.drop:.0f} in 100 of your chances to win"
+            + (f"; {best} (green) was better." if best else "."),
+        )
+
+    return game_diagram(e.game, e.ply, describe, best_san=e.best_san, ev=ev)
+
+
+def _insight(
+    r: RepeatedMistake,
+    follow_ups: Iterable[RepeatedMistake] = (),
+    evals: Optional[dict[str, GameEval]] = None,
+    diagram: Optional[Diagram] = None,
+) -> Insight:
     e = r.first
     played = move_label(e.fen, r.san)
     best = move_label(e.fen, r.best_san) if r.best_san else None
@@ -481,6 +634,9 @@ def _insight(r: RepeatedMistake, follow_ups: Iterable[RepeatedMistake] = ()) -> 
             "Replay the line from move 1 a few times, then test yourself on it again in a few days.",
         ],
         example_games=r.example_games[:5],
+        formats=visuals.format_counts(r.reached_in or r.played_in or [e.game]),
+        chart=_repeated_chart(r),
+        diagram=diagram if diagram is not None else _repeated_diagram(r, evals),
     )
 
 
@@ -500,6 +656,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     puzzles = [e for e in events if e.drop >= PUZZLE_MIN_DROP and e.best_san]
     exported = min(len(puzzles), PUZZLE_LIMIT)
     n_analysed = sum(1 for g in ctx.games if g.game_id in ctx.evals)
+    analysed_formats = visuals.format_counts(g for g in ctx.games if g.game_id in ctx.evals)
 
     puzzle_file = str(ctx.opt("puzzle_file", "") or "")
     puzzle_hint = f"in {puzzle_file}" if puzzle_file else "export with --puzzles"
@@ -517,6 +674,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         Kpi("Games with those moves", sum(r.errors for r in repeated), "int"),
         Kpi("Puzzles from your games", exported, "int", hint=puzzle_hint),
     ]
+    mix = f" Engine-analysed games: {formats_note(analysed_formats, '')}." if analysed_formats else ""
     rows = []
     for r in repeated[:15]:
         e = r.first
@@ -526,6 +684,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                 e.game.opening_family or "",
                 r.reached,
                 r.errors,
+                formats_note(visuals.format_counts(r.played_in), ""),
                 move_label(e.fen, r.san),
                 move_label(e.fen, r.best_san) if r.best_san else "",
                 r.avg_drop / 100.0,
@@ -538,14 +697,15 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
             Table(
                 title="Repeated mistakes",
                 columns=[
-                    "Moves to reach it", "Opening", "Reached", "Played it", "Your move", "Engine move",
-                    "Avg win chance lost", "Game",
+                    "Moves to reach it", "Opening", "Reached", "Played it", "Played it, by format", "Your move",
+                    "Engine move", "Avg win chance lost", "Game",
                 ],
                 rows=rows,
-                formats=["text", "text", "int", "int", "text", "text", "pct", "url"],
+                formats=["text", "text", "int", "int", "text", "text", "text", "pct", "url"],
                 note=f"A wrong move lost at least {MIN_DROP:.0f} percentage points of winning chances in Stockfish's "
                 "analysis. Reached and Played it count all your games, analysed or not; positions are matched "
-                "exactly, so the same position reached by a different move order counts together.",
+                "exactly, so the same position reached by a different move order counts together." + mix,
+                key_columns=[0, 3, 5, 6],
             )
         )
 
@@ -554,10 +714,11 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         tables.append(
             Table(
                 title="Your costliest mistakes (puzzles)",
-                columns=["Opening", "Your move", "Better", "Winning chances lost", "Position", "Game"],
+                columns=["Opening", "Format", "Your move", "Better", "Winning chances lost", "Position", "Game"],
                 rows=[
                     [
                         e.game.opening_family or "",
+                        format_name(e.game.time_class),
                         e.move_label,
                         e.best_label or "",
                         e.drop / 100.0,
@@ -566,34 +727,35 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
                     ]
                     for e in costliest
                 ],
-                formats=["text", "text", "text", "pct", "url", "url"],
-                key_columns=[1, 2, 4],
+                formats=["text", "text", "text", "text", "pct", "url", "url"],
+                key_columns=[1, 2, 3, 5],
                 note="Open the position (a Lichess analysis board) and find the better move before you look at it. "
-                + (f"All {exported} are in {puzzle_file}." if puzzle_file else "Export them all with --puzzles."),
+                + (f"All {exported} are in {puzzle_file}." if puzzle_file else "Export them all with --puzzles.")
+                + (f" These {len(costliest)}: {formats_note(visuals.format_counts(e.game for e in costliest), 'games')}."
+                   if len(costliest) > 1 else ""),
             )
         )
 
-    diagrams = []
+    # A board for each repeated mistake shown (the findings reuse them), then one per costliest puzzle, in the
+    # table's order.
+    boards: dict[int, Optional[Diagram]] = {}
     for r in distinct[:MAX_DIAGRAMS]:
-        e = r.first
-        diagrams.append(
-            Diagram(
-                title=f"{e.game.opening_family or 'Position'}: {move_label(e.fen, r.san)}",
-                fen=e.fen,
-                svg=_svg(e),
-                caption=f"After {format_line(e.game.moves_san[: e.ply], e.game.initial_fen, last_n=6)}. "
-                f"Red: your move (in {r.errors} of {_plural(r.reached, 'game')}). Green: engine's choice.",
-                link=e.game.url,
-            )
-        )
+        boards[id(r)] = _repeated_diagram(r, ctx.evals)
+    diagrams = [d for d in boards.values() if d is not None]
+    for i, e in enumerate(costliest, 1):
+        board = _puzzle_diagram(i, e, ctx.evals.get(e.game.game_id))
+        if board is not None:
+            diagrams.append(board)
 
     # The claims first (most costly first), then the most costly of the rest as observations.
     shown = (claims + [r for r in distinct if not r.significant])[:MAX_INSIGHTS]
-    insights = [_insight(r, follow_ups.get(id(r), ())) for r in shown]
+    insights = [_insight(r, follow_ups.get(id(r), ()), ctx.evals, boards.get(id(r))) for r in shown]
 
+    mix_words = f" ({formats_words(analysed_formats)})" if analysed_formats else ""
     if repeated:
         summary = (
-            f"In {n_analysed} analysed games Stockfish found {_plural(len(repeated), 'wrong move')} you played in "
+            f"In {n_analysed} analysed games{mix_words} Stockfish found "
+            f"{_plural(len(repeated), 'wrong move')} you played in "
             f"more than one game in the same position"
             + (f", {habits} of them often enough to be a habit" if habits else "")
             + ". These are the cheapest points to win back: learn the right move once and it pays off every time "
@@ -601,7 +763,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         )
     else:
         summary = (
-            f"No wrong move you played in more than one game in the same position, in {n_analysed} analysed games. "
+            f"No wrong move you played in more than one game in the same position, in {n_analysed} analysed "
+            f"games{mix_words}. "
             + (f"{len(puzzles)} of your mistakes are available as puzzles." if len(puzzles) != 1
                else "One of your mistakes is available as a puzzle.")
         )
@@ -615,7 +778,8 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
         diagrams=diagrams,
         stats={"repeated_positions": len(repeated), "claims": len(claims), "puzzles": len(puzzles),
                "puzzles_exported": exported, "errors": len(events), "puzzle_file": puzzle_file,
-               "follow_ups_folded": sum(len(v) for v in follow_ups.values())},
+               "follow_ups_folded": sum(len(v) for v in follow_ups.values()), "formats": analysed_formats,
+               "puzzle_formats": visuals.format_counts(e.game for e in puzzles)},
     )
 
 
