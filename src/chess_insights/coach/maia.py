@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 import chess
 
 from ..models import Explanation, Report
+from . import rating_map
 from .config import CoachConfig
 from .packet import user_ratings
 
@@ -24,58 +25,19 @@ log = logging.getLogger(__name__)
 
 # Maia-2 model per time class: the blitz model for blitz and bullet, rapid for the slower formats.
 MODEL_FOR = {"bullet": "blitz", "blitz": "blitz", "rapid": "rapid", "daily": "rapid"}
-# Fallback chess.com -> Lichess conversion when coach.rating_map is not available: the ChessGoals blitz table
-# (updated July 2026: chess.com 900 is about Lichess 1360, 1000 about 1425), extended in a straight line and used
-# for every format. ``CoachConfig.rating_map`` may give other points per time class: {"rapid": [[800, 1250], ...]}.
-FALLBACK_POINTS = ((900, 1360), (1000, 1425))
 MAX_FAILURES = 3  # stop after this many failed predictions in a row with none working
 
 # (fen, lichess_rating, model_type) -> {uci: probability}
 Predictor = Callable[[str, int, str], dict[str, float]]
 
 
-def _interpolate(rating: float, points: Any) -> Optional[int]:
-    """Piecewise-linear through (chess.com, Lichess) ``points``, extended in a straight line past both ends."""
-    try:
-        pts = sorted((float(a), float(b)) for a, b in points)
-    except (TypeError, ValueError):
-        return None
-    if len(pts) < 2:
-        return None
-    if rating <= pts[0][0]:
-        (x0, y0), (x1, y1) = pts[0], pts[1]
-    elif rating >= pts[-1][0]:
-        (x0, y0), (x1, y1) = pts[-2], pts[-1]
-    else:
-        (x0, y0), (x1, y1) = next((a, b) for a, b in zip(pts, pts[1:]) if a[0] <= rating <= b[0])
-    if x1 == x0:
-        return int(round(y0))
-    return int(round(y0 + (rating - x0) * (y1 - y0) / (x1 - x0)))
-
-
 def lichess_rating(rating: int, time_class: str, cfg: CoachConfig) -> tuple[int, str]:
-    """Your Lichess-equivalent rating and where the conversion came from.
-
-    Uses ``coach.rating_map`` when another part of the layer provides it (``lichess_equivalent(rating,
-    time_class)``), else the fallback table above (or ``cfg.rating_map`` points for the time class).
-    """
-    try:
-        from . import rating_map  # type: ignore[attr-defined]
-    except ImportError:
-        rating_map = None
-    fn = getattr(rating_map, "lichess_equivalent", None) if rating_map is not None else None
-    if callable(fn):
-        try:
-            value = fn(rating, time_class)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return int(round(value)), "coach.rating_map"
-        except Exception as exc:  # noqa: BLE001 — fall back to the local table
-            log.debug("rating_map.lichess_equivalent failed: %s", exc)
-    custom = (cfg.rating_map or {}).get(time_class)
-    value = _interpolate(rating, custom) if custom else None
-    if value is not None:
-        return value, "your rating map"
-    return _interpolate(rating, FALLBACK_POINTS) or int(rating), "ChessGoals blitz table (approximate)"
+    """Your Lichess-equivalent rating and where the conversion came from: ``rating_map.lichess_equivalent`` with
+    ``cfg.rating_map`` (per-format rows that replace the built-in table, such as ``{"rapid": [[800, 1250], ...]}``),
+    the same conversion the opening explorer's rating groups use."""
+    overrides = cfg.rating_map or None
+    return (rating_map.lichess_equivalent(rating, time_class, overrides),
+            rating_map.source_of(rating, time_class, overrides))
 
 
 def _mirror(uci: str) -> str:

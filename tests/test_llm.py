@@ -337,15 +337,29 @@ def test_maia_adds_probabilities_and_ranks_by_drop_times_p_best():
     assert report.coaching.settings["maia"]["positions"] == 3
 
 
-def test_maia_rating_fallback_follows_the_chessgoals_blitz_table():
-    assert maia._interpolate(900, maia.FALLBACK_POINTS) == 1360
-    assert maia._interpolate(1000, maia.FALLBACK_POINTS) == 1425
-    assert maia._interpolate(949, maia.FALLBACK_POINTS) == 1392  # the plan's "about 1,390"
-    assert maia._interpolate(1100, [[1000, 1400], [1200, 1550]]) == 1475
+def test_maia_rates_you_with_the_rating_map_and_its_overrides():
+    """One conversion for the whole layer: rating_map.lichess_equivalent with CoachConfig.rating_map."""
+    from chess_insights.coach import rating_map
+
+    assert maia.lichess_rating(949, "blitz", CoachConfig()) == (1390, rating_map.SOURCE_NAME)  # the plan's "about 1,390"
+    assert maia.lichess_rating(900, "blitz", CoachConfig())[0] == 1360
     cfg = CoachConfig(rating_map={"rapid": [[1000, 1400], [1200, 1550]]})
-    rating, source = maia.lichess_rating(1100, "rapid", cfg)
-    if source != "coach.rating_map":  # another part of the layer may provide the conversion
-        assert (rating, source) == (1475, "your rating map")
+    assert maia.lichess_rating(1100, "rapid", cfg) == (1475, "your rating map")
+    assert maia.lichess_rating(1100, "blitz", cfg)[0] == rating_map.to_lichess(1100, "blitz")  # other formats as built in
+    # daily games (Maia's rapid model) convert with the rapid rows, the overrides' when they give some
+    assert maia.lichess_rating(1100, "daily", cfg) == (1475, "your rating map, rapid rows")
+    assert maia.lichess_rating(1100, "daily", CoachConfig())[0] == rating_map.to_lichess(1100, "rapid")
+    assert not hasattr(maia, "FALLBACK_POINTS") and not hasattr(maia, "_interpolate")
+
+
+def test_maia_passes_your_rating_map_to_the_predictor():
+    report = coaching_report()
+    calls = []
+    cfg = CoachConfig(maia=True, rating_map={"blitz": [[900, 1500], [1000, 1600]]})
+    maia.annotate(report, cfg, predictor=fake_predictor(calls))
+    sic = next(e for e in report.coaching.explanations if e.epd == epd(SICILIAN_5E5))
+    assert sic.maia["rating"] == 1550 and (epd(SICILIAN_5E5), 1550, "blitz") in calls
+    assert report.coaching.settings["maia"]["ratings"]["blitz"]["source"] == "your rating map"
 
 
 def test_maia_reads_moves_from_the_side_to_moves_view():

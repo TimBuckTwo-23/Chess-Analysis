@@ -38,6 +38,10 @@ TABLES: dict[str, list[tuple[int, int]]] = {
 # rows compared with the source page (format -> chess.com ratings); everything else is an estimate
 CHECKED: dict[str, frozenset[int]] = {"blitz": frozenset({900, 1000}), "rapid": frozenset(), "bullet": frozenset()}
 
+# Formats without rows of their own borrow another's: daily games are slow, like rapid (Maia-2 uses its rapid model for
+# them too); anything else uses blitz, the table checked against the source.
+PROXY_FORMAT: dict[str, str] = {"daily": "rapid"}
+
 # The Lichess opening explorer's rating groups: a group holds the ratings from its value up to the next one.
 LICHESS_GROUPS = (0, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2500)
 LICHESS_MIN, LICHESS_MAX = 400, 3300
@@ -70,6 +74,35 @@ def to_lichess(
     value = y0 + (y1 - y0) * (float(rating) - x0) / (x1 - x0) if x1 != x0 else float(y0)
     value = min(max(value, LICHESS_MIN), LICHESS_MAX)
     return int(5 * round(value / 5))
+
+
+def _table_for(time_class: str, overrides: Optional[dict[str, Any]] = None) -> tuple[str, bool]:
+    """(the format whose rows convert ``time_class``, whether those rows come from ``overrides``): the format's own
+    rows, else those of ``PROXY_FORMAT`` (daily: rapid) or blitz, else the built-in blitz table (unusable
+    overrides)."""
+    for tc in dict.fromkeys((time_class, PROXY_FORMAT.get(time_class, "blitz"))):
+        if _rows(tc, overrides) is not None:
+            return tc, tc in (overrides or {})
+    return "blitz", False
+
+
+def lichess_equivalent(chesscom_rating: int, time_class: str, overrides: Optional[dict[str, Any]] = None) -> int:
+    """A chess.com rating on the Lichess scale, always a number: ``to_lichess`` with the rows ``_table_for`` picks
+    (``overrides``, such as ``CoachConfig.rating_map``, replace a format's rows, as everywhere in this module).
+    Rounded to 5, like every conversion here."""
+    tc, own = _table_for(time_class, overrides)
+    value = to_lichess(chesscom_rating, tc, overrides if own else None)
+    return value if value is not None else int(round(chesscom_rating))
+
+
+def source_of(chesscom_rating: float, time_class: str, overrides: Optional[dict[str, Any]] = None) -> str:
+    """Where ``lichess_equivalent``'s number comes from: "your rating map", the source (rows compared with it,
+    ``is_checked``), or the source's table as a rough estimate; names the rows borrowed from another format."""
+    tc, own = _table_for(time_class, overrides)
+    rows = "" if tc == time_class else f", {tc} rows"
+    if own:
+        return f"your rating map{rows}"
+    return f"{SOURCE_NAME}{rows}" + ("" if is_checked(chesscom_rating, tc) else ", rough estimate")
 
 
 def rating_group(lichess_rating: float) -> int:
