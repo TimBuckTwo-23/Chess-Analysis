@@ -456,7 +456,12 @@ def test_planted_structure_effects_change_only_the_players_habits():
 # Caro-Kann Black castles on moves 9-14, in the Sicilian on 9-14 against White's 6-9 ...): whatever the player's
 # repertoire, a gap to the opponents is no habit of theirs. A player who mostly plays one line gets its gap; the
 # fold rule turns it into an observation about that opening.
-LINE_WORLDS = {  # measured over more seeds in docs/METHODOLOGY.md
+# Measured over 8 worlds of 600 games each: no structure claim in any of ten repertoires (every opening equally;
+# 60% Caro-Kann, French or King's Indian with Black; 60% Sicilian or Ruy Lopez with White; and main lines with
+# both colours: Ruy Lopez + Queen's Gambit, Sicilian + King's Indian, Queen's Gambit + Caro-Kann, Sicilian +
+# Caro-Kann). Without the fold rule 36 of those 80 reports had one (all 16 with two main lines pulling the same
+# way). Planted habits are still found: late castling in 31 of 32 worlds, early queen and slow development in 32.
+LINE_WORLDS = {
     "mostly the Caro-Kann with Black": {"line_habits": True, "opening": ("black", "Caro-Kann Defense", 0.0, 0.6)},
     "mostly the Sicilian with White": {"line_habits": True, "opening": ("white", "Sicilian Defense", 0.0, 0.6)},
 }
