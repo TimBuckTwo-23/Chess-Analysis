@@ -21,7 +21,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install chess zstandard
-      - run: python scripts/record_fixtures.py fixtures-out
+      - name: Record
+        env:
+          # the opening explorer needs a Lichess token (sent only to explorer.lichess.org, never recorded)
+          LICHESS_TOKEN: ${{ secrets.LICHESS_TOKEN }}
+        run: python scripts/record_fixtures.py fixtures-out
       - name: Save on the fixtures branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

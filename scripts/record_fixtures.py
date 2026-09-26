@@ -6,6 +6,10 @@ and src/chess_insights/data by hand. Every item is independent: one failure is r
 manifest.json and the rest still run.
 
     python scripts/record_fixtures.py OUT_DIR
+
+The Lichess opening explorer answers only with a token: set LICHESS_TOKEN (the workflow passes the repository
+secret) and it is sent as a Bearer header to explorer.lichess.org only, never recorded and never sent on after a
+redirect. Without it the explorer items are recorded as the 401 pages they are.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import random
 import sys
 import time
@@ -42,8 +47,21 @@ HABITS = {
 }
 
 
+EXPLORER_HOST = "explorer.lichess.org"
+
+
+def auth_header(url: str) -> dict[str, str]:
+    """{"Authorization": "Bearer <LICHESS_TOKEN>"} for the opening explorer when the variable is set; else {}."""
+    token = os.environ.get("LICHESS_TOKEN", "").strip()
+    if token and urllib.parse.urlsplit(url).hostname == EXPLORER_HOST:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
 def get(url: str, *, headers: dict | None = None, timeout: float = 60) -> tuple[int, bytes, dict]:
     req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
+    for name, value in auth_header(url).items():
+        req.add_unredirected_header(name, value)  # not sent on if the explorer redirects elsewhere
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read(), dict(resp.headers)
@@ -52,6 +70,7 @@ def get(url: str, *, headers: dict | None = None, timeout: float = 60) -> tuple[
 
 
 def record(out: Path, name: str, url: str, **kw) -> dict:
+    """Save one answer as <name>.json: its URL, status, content type, time and body (never a request header)."""
     status, body, headers = get(url, **kw)
     try:
         payload = json.loads(body.decode("utf-8")) if body else None
