@@ -32,7 +32,7 @@ import chess.pgn
 
 from ..models import Coaching, Drill, DrillPuzzle, Game, ModuleResult, ReviewItem
 from . import puzzles_db
-from .config import REVIEW_STEPS_DAYS, CoachConfig
+from .config import DEFAULT_DRILL_RATING, REVIEW_STEPS_DAYS, CoachConfig
 from .profile import motif_name, training_url
 
 if TYPE_CHECKING:
