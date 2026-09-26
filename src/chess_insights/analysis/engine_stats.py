@@ -11,6 +11,11 @@ cluster-robust test over per-game counts (:func:`clustered_rate_test`); game-lev
 measures (conversion, opening evaluations) are tested per game directly. Claims follow
 the project-wide rule (``stats.significance``), and comparisons repeated over groups
 (phases, time classes, openings, tactic types) are Benjamini-Hochberg adjusted.
+
+Every finding carries the engine-analysed games behind it per format (``Insight.formats``) and a
+small chart of its numbers, you against your opponents, for all games and then for each format
+with enough games, so it shows whether it holds in bullet, blitz and rapid alike. Findings about
+moves (blunders, missed tactics and mates) also get a board of the costliest example.
 """
 
 from __future__ import annotations
@@ -21,9 +26,10 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional, Sequence
 
+from .. import visuals
 from ..context import AnalysisContext
 from ..engine import PHASES
-from ..models import TIME_CLASSES, Chart, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Series, Table
+from ..models import TIME_CLASSES, Chart, Diagram, Game, GameEval, Insight, Kpi, ModuleResult, PlyEval, Series, Table
 from ..stats import (
     STRICT_ALPHA,
     MeanTest,
@@ -36,6 +42,7 @@ from ..stats import (
     significance,
     two_proportion_test,
 )
+from .mistakes import Describe, format_name, formats_note, formats_words, game_diagram
 from .results import MAX_EXAMPLES, slugify
 
 KEY = "engine"
@@ -301,6 +308,182 @@ def move_bucket(ply: int) -> str:
     return next(label for label, lo, hi in MOVE_BUCKETS if move_no >= lo and (hi is None or move_no <= hi))
 
 
+# --------------------------------------------------------------------------- pictures
+ALL_GAMES = "All games"
+Metric = Callable[[Sequence[Analysed]], Optional[float]]
+
+
+def _formats(records: Iterable[Analysed]) -> dict[str, int]:
+    """Engine-analysed games per time class, in the report's format order."""
+    return visuals.format_counts(r.game for r in records)
+
+
+def _mix_note(records: Iterable[Analysed]) -> str:
+    """" Formats: Bullet 210 · Blitz 88 games." for a table or chart that mixes formats ("" without games)."""
+    text = formats_note(_formats(records))
+    return f" Formats: {text}." if text else ""
+
+
+def _with(
+    ins: Insight,
+    records: Iterable[Analysed],
+    chart: Optional[Chart],
+    diagram: Optional[Diagram] = None,
+    formats: Optional[dict[str, int]] = None,
+) -> Insight:
+    """``ins`` with the games behind it per format (``records`` unless ``formats`` is given), its chart and board."""
+    ins.formats = formats if formats is not None else _formats(records)
+    ins.chart = chart
+    ins.diagram = diagram
+    return ins
+
+
+def _split(
+    records: Sequence[Analysed], metrics: Sequence[Metric], min_games: int = visuals.MIN_FORMAT_GAMES
+) -> tuple[list[str], list[list[Optional[float]]]]:
+    """Chart labels and each metric's values: every game first ("All games", or the format's name when there is
+    only one), then each format with at least ``min_games`` games (``visuals.split_by_format``)."""
+    games = [r.game for r in records]
+    counts = visuals.format_counts(games)
+    values = [[metric(records)] for metric in metrics]
+    if len(counts) <= 1:
+        return [format_name(next(iter(counts))) if counts else ALL_GAMES], values
+    by_game = {id(r.game): r for r in records}
+    names: list[str] = []
+    for i, metric in enumerate(metrics):
+        names, split, _ = visuals.split_by_format(
+            games, lambda gs, metric=metric: metric([by_game[id(g)] for g in gs]), min_games
+        )
+        values[i] += split
+    return [ALL_GAMES] + names, values
+
+
+def _split_note(records: Sequence[Analysed], min_games: int = visuals.MIN_FORMAT_GAMES) -> str:
+    """For a split chart's note: "Bullet 210 · Blitz 88 · Rapid 4 engine-analysed games; a format with fewer than
+    10 has no bar of its own"."""
+    counts = _formats(records)
+    text = formats_note(counts, "engine-analysed games")
+    if len(counts) > 1 and min(counts.values()) < min_games:
+        text += f"; a format with fewer than {min_games} has no bar of its own"
+    return f"{text}." if text else ""
+
+
+def _rate_chart(
+    title: str,
+    records: Sequence[Analysed],
+    count: Callable[[Tally], int],
+    pred: Callable[[Analysed, PlyEval], bool] = lambda r, p: True,
+    note: str = "",
+) -> Chart:
+    """You vs your opponents: ``count`` per 100 moves (of the moves ``pred`` keeps), for every game and by format."""
+
+    def rate(mine: bool) -> Metric:
+        def metric(rs: Sequence[Analysed]) -> Optional[float]:
+            t = tally(rs, mine, pred)
+            return t.per100(count(t))
+
+        return metric
+
+    labels, (you, them) = _split(records, [rate(True), rate(False)])
+    return visuals.comparison_chart(
+        title, labels, [("You", you), ("Opponents", them)], value_format="float1",
+        note=f"{note} {_split_note(records)}".strip(),
+    )
+
+
+def _count_chart(title: str, records: Sequence[Analysed], count: Callable[[Tally], int], note: str = "") -> Chart:
+    """You vs your opponents: how many times ``count`` happened, for every game and by format."""
+
+    def total_of(mine: bool) -> Metric:
+        return lambda rs: float(count(tally(rs, mine)))
+
+    labels, (you, them) = _split(records, [total_of(True), total_of(False)])
+    return visuals.comparison_chart(
+        title, labels, [("You", you), ("Opponents", them)], value_format="int",
+        note=f"{note} {_split_note(records)}".strip(),
+    )
+
+
+def _chances(p: PlyEval) -> str:
+    """"your chances to win fell from 62% to 18%" for one of your moves."""
+    return f"your chances to win fell from {p.win_before:.0f}% to {p.win_after:.0f}%"
+
+
+def _example_board(
+    records: Iterable[Analysed],
+    pred: Callable[[Analysed, PlyEval], bool],
+    describe: Callable[[Analysed, PlyEval], Describe],
+) -> Optional[Diagram]:
+    """A board of your costliest move that ``pred`` keeps (the largest drop in winning chances; the most recent on a
+    tie): the position before it, your move red, the engine's green, and the moves that followed in the game."""
+    candidates = sorted(
+        ((r, p) for r in records for p in r.plies if p.is_user and pred(r, p)),
+        key=lambda rp: (-(rp[1].win_before - rp[1].win_after), _recent(rp[0]), rp[1].ply),
+    )
+    for r, p in candidates[:5]:  # the first one whose moves replay
+        best = p.best_san if p.best_san and p.best_san != p.san else None
+        board = game_diagram(r.game, p.ply, describe(r, p), best_san=best, ev=r.ev)
+        if board is not None:
+            return board
+    return None
+
+
+def _short_of_time_caption(tc: str) -> Callable[[Analysed, PlyEval], Describe]:
+    """Title and caption for your costliest blunder with little time left, with the clock before the move."""
+
+    def describe(r: Analysed, p: PlyEval) -> Describe:
+        before = _clock_before(r.game, p.ply)
+        clock = f" with {before:.0f} seconds left" if before is not None else ""
+        return lambda played, best: (
+            f"Your costliest blunder short of time in {tc}: {played}",
+            f"{played} (red){clock}: {_chances(p)}" + (f"; Stockfish preferred {best} (green)." if best else "."),
+        )
+
+    return describe
+
+
+def _tactic_caption(tag: str) -> Callable[[Analysed, PlyEval], Describe]:
+    """Title and caption for your costliest missed shot (``missed_tactic``) or loose piece (``hung_material``)."""
+
+    def describe(r: Analysed, p: PlyEval) -> Describe:
+        if tag == "missed_tactic":
+            return lambda played, best: (
+                f"Your costliest missed shot: {best or played}",
+                (f"{best} (green) was the shot. " if best else "") + f"You played {played} (red) and {_chances(p)}.",
+            )
+        return lambda played, best: (
+            f"Your costliest loose piece: {played}",
+            f"After {played} (red) your opponent could win material, and {_chances(p)}."
+            + (f" Stockfish preferred {best} (green)." if best else ""),
+        )
+
+    return describe
+
+
+def _mate_caption(r: Analysed, p: PlyEval) -> Describe:
+    """Title and caption for your costliest missed forced mate (mate-in-N from the engine's verdict)."""
+    mate = p.mate_before if p.mate_before is None or p.mover == "white" else -p.mate_before
+    within = f" in {mate}" if mate is not None and mate > 0 else ""
+    return lambda played, best: (
+        f"Your costliest missed mate: {played}",
+        f"Stockfish saw a forced mate{within} here"
+        + (f", starting with {best} (green)" if best else "")
+        + f"; you played {played} (red).",
+    )
+
+
+def _blunder_caption(title: str) -> Callable[[Analysed, PlyEval], Describe]:
+    """Title "<title>: 23.Qxd5" and a caption with the winning chances it cost and the engine's move."""
+
+    def describe(r: Analysed, p: PlyEval) -> Describe:
+        return lambda played, best: (
+            f"{title}: {played}",
+            f"{played} (red): {_chances(p)}" + (f"; Stockfish preferred {best} (green)." if best else "."),
+        )
+
+    return describe
+
+
 # --------------------------------------------------------------------------- overview
 def _time_class_order(tc: str) -> tuple[int, str]:
     return (TIME_CLASSES.index(tc) if tc in TIME_CLASSES else len(TIME_CLASSES), tc)
@@ -340,6 +523,23 @@ def time_class_table(records: Sequence[Analysed]) -> tuple[Table, dict[str, Any]
     return table, stats
 
 
+def time_class_chart(table: Table) -> Optional[Chart]:
+    """Your engine accuracy against your opponents' in each format, carrying the per-format table (None for one
+    format: the key numbers already say it)."""
+    if len(table.rows) < 2:
+        return None
+    return visuals.comparison_chart(
+        "Engine accuracy by format",
+        [row[0] for row in table.rows],
+        [("You", [row[2] for row in table.rows]), ("Opponents", [row[3] for row in table.rows])],
+        value_format="float1",
+        note="Lichess's accuracy formula (0-100), in the same games for you and your opponents. The table has "
+        "the blunders per 100 moves too.",
+        kind="bar",
+        table=table,
+    )
+
+
 def blunder_insight(
     records: Sequence[Analysed], me_games: Sequence[Tally], opp_games: Sequence[Tally], th: Thresholds
 ) -> Optional[Insight]:
@@ -361,9 +561,13 @@ def blunder_insight(
         "games": len(records), "moves": me.moves, "blunders": me.blunders, "per100": mine,
         "opp_moves": opp.moves, "opp_blunders": opp.blunders, "opp_per100": theirs, "p_value": test.p_value,
     }
+    chart = _rate_chart("Blunders per 100 moves", records, lambda t: t.blunders)
     if _clearly_higher(mine, theirs, th.blunder_ratio):
         worst = [r for r in records if r.count(lambda p: p.judgement == "blunder")]
-        return Insight(
+        board = _example_board(
+            records, lambda r, p: p.judgement == "blunder", _blunder_caption("Your costliest blunder")
+        )
+        return _with(Insight(
             id=f"{KEY}.weakness.blunder-rate",
             kind="weakness",
             category="blunders",
@@ -382,9 +586,9 @@ def blunder_insight(
             example_games=_urls(
                 worst, lambda r: (r.game.outcome != "loss", -r.count(lambda p: p.judgement == "blunder"), _recent(r))
             ),
-        )
+        ), records, chart, board)
     if _clearly_higher(theirs, mine, th.blunder_ratio):
-        return Insight(
+        return _with(Insight(
             id=f"{KEY}.strength.blunder-rate",
             kind="strength",
             category="blunders",
@@ -402,7 +606,7 @@ def blunder_insight(
                 [r for r in records if r.game.outcome == "win"],
                 lambda r: (r.count(lambda p: p.judgement == "blunder"), _recent(r)),
             ),
-        )
+        ), records, chart)
     return None
 
 
@@ -442,7 +646,26 @@ def accuracy_by_result(records: Sequence[Analysed], th: Thresholds) -> tuple[Opt
         ],
         example_games=_urls(losses_by_acc, lambda r: (r.ev.my_accuracy, _recent(r))),
     )
-    return insight, stats
+    rated = [r for r in records if r.ev.my_accuracy is not None]
+    present = [o for o in ("win", "draw", "loss") if by[o]]
+
+    def accuracy_in(outcome: str) -> Metric:
+        return lambda rs: _avg(r.ev.my_accuracy for r in rs if r.game.outcome == outcome)
+
+    bars, values = _split(rated, [accuracy_in(o) for o in present])
+    note = "Lichess's accuracy formula (0-100)."
+    if opp is not None:
+        note += f" The line is your opponents' average over the same games ({opp:.1f})."
+    chart = visuals.comparison_chart(
+        "Your engine accuracy in wins, draws and losses",
+        bars,
+        [(labels[o].capitalize(), v) for o, v in zip(present, values)],
+        value_format="float1",
+        reference=opp,
+        note=f"{note} {_split_note(rated)}",
+        kind="bar",
+    )
+    return _with(insight, rated, chart), stats
 
 
 # --------------------------------------------------------------------------- phases
@@ -522,7 +745,8 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
         formats=["text", "int", "float2", "float1", "int", "float2", "float1"],
         note="Phases follow Lichess's rules: the middlegame starts once pieces come off or the back ranks empty; "
         "the endgame once at most 6 queens, rooks, bishops and knights remain. Pawns given away per move: how much "
-        "worse Stockfish rated the position after the move, on average (the average centipawn loss / 100).",
+        "worse Stockfish rated the position after the move, on average (the average centipawn loss / 100)."
+        + _mix_note(records),
         key_columns=[0, 3, 6],
     )
     chart = Chart(
@@ -534,6 +758,7 @@ def phase_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Table, C
             Series("Opponents", [opp[ph].per100(opp[ph].errors) for ph in PHASES]),
         ],
         value_format="float1",
+        note=_mix_note(records).strip(),
         table=table,
     )
     if len(records) < th.min_games:
@@ -625,8 +850,19 @@ def _phase_insight(
     def errors_in_phase(r: Analysed) -> int:
         return r.count(lambda p: p.phase == ph and p.judgement in ("mistake", "blunder"))
 
+    def in_phase(r: Analysed, p: PlyEval) -> bool:
+        return p.phase == ph
+
+    chart = _rate_chart(
+        f"Mistakes and blunders per 100 moves in the {ph}", records, lambda t: t.errors, in_phase,
+        note=f"The rest of the game: {_f1(rest_mine)} for you, {_f1(rest_theirs)} for your opponents.",
+    )
     if kind == "weakness":
-        return Insight(
+        board = _example_board(
+            records, lambda r, p: in_phase(r, p) and p.judgement in ("mistake", "blunder"),
+            _blunder_caption(f"Your costliest {ph} mistake"),
+        )
+        return _with(Insight(
             id=f"{KEY}.weakness.phase-{ph}",
             kind="weakness",
             category="phases",
@@ -640,8 +876,8 @@ def _phase_insight(
                 [r for r in records if errors_in_phase(r)],
                 lambda r: (-errors_in_phase(r), r.game.outcome != "loss", _recent(r)),
             ),
-        )
-    return Insight(
+        ), records, chart, board)
+    return _with(Insight(
         id=f"{KEY}.strength.phase-{ph}",
         kind="strength",
         category="phases",
@@ -657,7 +893,7 @@ def _phase_insight(
         example_games=_urls(
             [r for r in records if r.game.outcome == "win"], lambda r: (errors_in_phase(r), _recent(r))
         ),
-    )
+    ), records, chart)
 
 
 # --------------------------------------------------------------------------- time pressure
@@ -791,6 +1027,13 @@ def pressure_section(
     )
     if len(records) < th.min_games:
         return table, [], stats
+
+    def short_of_time_blunder(r: Analysed, p: PlyEval) -> bool:
+        before = _clock_before(r.game, p.ply)
+        return p.judgement == "blunder" and before is not None and before < th.pressure_fraction * float(
+            r.game.base_seconds or 0
+        )
+
     judged = [tc for tc in order if groups[tc]["me_low"].moves >= th.min_pressure_moves and groups[tc]["me_ok"].moves]
     # Everyone blunders more when short of time, so the claim needs two things: your own rate jumps (short of
     # time vs otherwise), and it jumps further than your opponents' does (your short-of-time rate vs theirs).
@@ -848,8 +1091,18 @@ def pressure_section(
             "phase_adjusted_excess": excess_tests[tc][0] if tc in excess_tests else None,
         }
         examples = _urls(low_games[tc], lambda r: (r.game.outcome != "loss", _recent(r)))
+        chart = visuals.comparison_chart(
+            f"Blunders per 100 moves in {tc}, by clock",
+            ["Short of time", "More time"],
+            [("You", [low, ok]), ("Opponents", [opp_low, opp_ok])],
+            value_format="float1",
+            note=f"Short of time: less than {share} of the starting clock left before the move. "
+            f"{formats_note({tc: len(by_game[tc])})} with clock data.",
+        )
+        board = _example_board(low_games[tc], short_of_time_blunder, _short_of_time_caption(tc))
+        formats = {tc: len(by_game[tc])}
         if worse_than_peers:
-            insights.append(
+            insights.append(_with(
                 Insight(
                     id=f"{KEY}.weakness.time-pressure-blunders-{tc}",
                     kind="weakness",
@@ -867,10 +1120,10 @@ def pressure_section(
                         "scramble.",
                     ],
                     example_games=examples,
-                )
-            )
+                ), (), chart, board, formats,
+            ))
         else:
-            insights.append(
+            insights.append(_with(
                 Insight(
                     id=f"{KEY}.observation.time-pressure-blunders-{tc}",
                     kind="observation",
@@ -885,8 +1138,8 @@ def pressure_section(
                         "When short of time, play safe moves: keep pieces protected and your king covered.",
                     ],
                     example_games=examples,
-                )
-            )
+                ), (), chart, board, formats,
+            ))
     return table, insights, stats
 
 
@@ -957,7 +1210,7 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         formats=["text", "int", "int", "int", "int", "pct"],
         note=f"Winning position: Stockfish gave that side at least a {th.win_threshold:.0f}% chance to win. Each "
         "game counts once, for the side that got there first. You won or held: in the first row the share you "
-        "won, in the second the share you still drew or won.",
+        "won, in the second the share you still drew or won." + _mix_note(conv.reached + conv.opp_reached),
     )
     stats = {
         "reached": len(conv.reached), "converted": conv.converted, "rate": conv.rate,
@@ -973,6 +1226,25 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     if not enough:
         return table, insights, stats
 
+    decided = conv.reached + conv.opp_reached  # the games behind every conversion number
+    yours = {id(r.game) for r in conv.reached}
+
+    def share(first_you: bool, good: Callable[[Game], bool]) -> Metric:
+        """Among the games that side got a winning position in first, the share where ``good`` holds."""
+
+        def metric(rs: Sequence[Analysed]) -> Optional[float]:
+            group = [r for r in rs if (id(r.game) in yours) == first_you]
+            return sum(1 for r in group if good(r.game)) / len(group) if group else None
+
+        return metric
+
+    def conversion_chart(title: str, you: Metric, them: Metric, what: str) -> Chart:
+        labels, (mine, theirs) = _split(decided, [you, them])
+        return visuals.comparison_chart(
+            title, labels, [("You", mine), ("Opponents", theirs)], value_format="pct",
+            note=f"{what} {_split_note(decided)}",
+        )
+
     test = two_proportion_test(conv.converted, len(conv.reached), conv.opp_converted, len(conv.opp_reached))
     significant, confidence = _claim(test, th, min_n=2 * th.min_conversion_games)  # n: games, each counted once
     stats.update(p_value=test.p_value)
@@ -986,6 +1258,12 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
     saved_text = (
         f" The other way round, you saved {conv.saved} of the {len(conv.opp_reached)} games where your opponent "
         f"got a winning position first ({pct(conv.saved / len(conv.opp_reached))})."
+    )
+    converted_chart = conversion_chart(
+        "Winning positions turned into wins",
+        share(True, lambda g: g.outcome == "win"),
+        share(False, lambda g: g.outcome == "loss"),
+        f"Games in which that side got a winning position (at least {th.win_threshold:.0f}% to win) first.",
     )
     if significant and rate <= opp_rate - th.min_conversion_gap:
         thrown = [r for r in conv.reached if r.game.outcome != "win"]
@@ -1005,7 +1283,7 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
         )
         evidence |= {"thrown": len(thrown), "thrown_on_time": on_time, "first_slip_phase": dict(phases),
                      "saved": conv.saved}
-        insights.append(
+        insights.append(_with(
             Insight(
                 id=f"{KEY}.weakness.conversion",
                 kind="weakness",
@@ -1025,10 +1303,10 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
                 example_games=_urls(
                     thrown, lambda r: (r.game.outcome != "loss", -peak[r.game.game_id], _recent(r))
                 ),
-            )
-        )
+            ), decided, converted_chart,
+        ))
     elif significant and rate >= opp_rate + th.min_conversion_gap:
-        insights.append(
+        insights.append(_with(
             Insight(
                 id=f"{KEY}.strength.conversion",
                 kind="strength",
@@ -1044,8 +1322,8 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
                     "Replay the linked wins to note the simplifying decisions that worked, so you repeat them.",
                 ],
                 example_games=_urls([r for r in conv.reached if r.game.outcome == "win"], _recent),
-            )
-        )
+            ), decided, converted_chart,
+        ))
     if insights:  # the saved-positions numbers are part of the conversion finding: no second card for them
         return table, insights, stats
     saved = [r for r in conv.opp_reached if r.game.outcome != "loss"]
@@ -1059,7 +1337,13 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
             "your opponent harder problems."
         )
         examples = _urls(conv.opp_reached, _recent)
-    insights.append(
+    saved_chart = conversion_chart(
+        "Lost positions saved (drawn or won)",
+        share(False, lambda g: g.outcome != "loss"),
+        share(True, lambda g: g.outcome != "win"),
+        f"Games in which the other side got a winning position (at least {th.win_threshold:.0f}% to win) first.",
+    )
+    insights.append(_with(
         Insight(
             id=f"{KEY}.observation.resilience",
             kind="observation",
@@ -1080,8 +1364,8 @@ def conversion_section(records: Sequence[Analysed], th: Thresholds) -> tuple[Tab
                 review,
             ],
             example_games=examples,
-        )
-    )
+        ), decided, saved_chart,
+    ))
     return table, insights, stats
 
 
@@ -1121,6 +1405,7 @@ TACTIC_TEXT = {
         weak_title="You miss more tactical shots than your opponents",
         strong_title="You miss fewer tactical shots than your opponents",
         what="missed a winning capture, check or promotion (costing at least 15% of your winning chances)",
+        chart="Missed tactical shots per 100 moves",
         study=[
             "Solve 20 minutes of puzzles a day, focused on forks, pins and discovered attacks.",
             "Before each move, list every check, capture and threat for both sides.",
@@ -1134,6 +1419,7 @@ TACTIC_TEXT = {
         weak_title="You leave material hanging more often than your opponents",
         strong_title="You leave material hanging less often than your opponents",
         what="made a mistake or blunder that let your opponent win material with a capture",
+        chart="Material left hanging per 100 moves",
         study=[
             "Before letting go of a piece, ask: after this move, what can my opponent capture, and is it defended?",
             "Drill 'hanging piece' and 'loose piece' puzzle themes until you spot undefended pieces instantly.",
@@ -1163,7 +1449,8 @@ def tactics_section(
         formats=["text", "int", "float2", "int", "float2"],
         note="Missed tactical shot: the engine's best move was a capture, check or promotion, you played something "
         "else and lost at least 15% of your winning chances. Left material hanging: a mistake or blunder the "
-        "opponent could punish with a capture that wins material (recapturing in a trade doesn't count).",
+        "opponent could punish with a capture that wins material (recapturing in a trade doesn't count)."
+        + _mix_note(records),
     )
     stats: dict[str, Any] = {
         "missed_tactics": me.missed_tactics, "opp_missed_tactics": opp.missed_tactics,
@@ -1210,8 +1497,14 @@ def tactics_section(
             evidence = {"count": mine_n, "per100": mine, "opp_count": theirs_n, "opp_per100": theirs,
                         "p_adjusted": adjusted[tag], "other_errors_per100": me.per100(other),
                         "opp_other_errors_per100": opp.per100(opp_other)}
+            chart = _rate_chart(
+                text["chart"], records, lambda t, attr=text["attr"]: getattr(t, attr),
+                note=f"Your other mistakes and blunders: {_f1(me.per100(other))} per 100 moves, your opponents' "
+                f"{_f1(opp.per100(opp_other))}.",
+            )
             if weak_excess:
-                insights.append(
+                board = _example_board(records, lambda r, p, tag=tag: tag in (p.tags or ()), _tactic_caption(tag))
+                insights.append(_with(
                     Insight(
                         id=f"{KEY}.weakness.{text['slug']}",
                         kind="weakness",
@@ -1223,10 +1516,10 @@ def tactics_section(
                         evidence=evidence,
                         study=text["study"],
                         example_games=_costliest(records, tag),
-                    )
-                )
+                    ), records, chart, board,
+                ))
             elif strong_excess:
-                insights.append(
+                insights.append(_with(
                     Insight(
                         id=f"{KEY}.strength.{text['slug']}",
                         kind="strength",
@@ -1241,10 +1534,15 @@ def tactics_section(
                             "Keep a daily puzzle habit so the edge doesn't fade.",
                         ],
                         example_games=_urls([r for r in records if r.game.outcome == "win"], _recent),
-                    )
-                )
+                    ), records, chart,
+                ))
     if me.missed_mates >= th.min_missed_mates:
-        insights.append(
+        mates_chart = _count_chart(
+            "Forced mates missed", records, lambda t: t.missed_mates,
+            note=f"Forced mates allowed against you: {me.allowed_mates} (your opponents: {opp.allowed_mates}).",
+        )
+        mate_board = _example_board(records, lambda r, p: "missed_mate" in (p.tags or ()), _mate_caption)
+        insights.append(_with(
             Insight(
                 id=f"{KEY}.observation.missed-mates",
                 kind="observation",
@@ -1266,8 +1564,8 @@ def tactics_section(
                     "material.",
                 ],
                 example_games=_costliest(records, "missed_mate"),
-            )
-        )
+            ), records, mates_chart, mate_board,
+        ))
     return table, insights, stats
 
 
@@ -1293,7 +1591,7 @@ def anatomy_section(
         columns=["Piece moved", "Your moves", "Your blunders", "Blunders /100 moves", "Share of your blunders"],
         rows=piece_rows,
         formats=["text", "int", "int", "float1", "pct"],
-        note="Castling counts as a king move.",
+        note="Castling counts as a king move." + _mix_note(records),
     )
     labels = [label for label, _, _ in MOVE_BUCKETS]
     me_b = {label: tally(records, True, lambda r, p, label=label: move_bucket(p.ply) == label) for label in labels}
@@ -1308,6 +1606,7 @@ def anatomy_section(
         columns=["Move numbers", "Your moves", "Your blunders /100", "Opponents' moves", "Opponents' blunders /100"],
         rows=bucket_rows,
         formats=["text", "int", "float1", "int", "float1"],
+        note=_mix_note(records).strip(),
     )
     chart = Chart(
         kind="bar",
@@ -1315,6 +1614,7 @@ def anatomy_section(
         labels=labels,
         series=[Series("You", [row[2] for row in bucket_rows]), Series("Opponents", [row[4] for row in bucket_rows])],
         value_format="float1",
+        note=_mix_note(records).strip(),
         table=bucket_table,
     )
     stats = {
@@ -1356,7 +1656,33 @@ def anatomy_section(
         detail += f" Your blunder rate peaks at moves {worst_bucket} ({_f1(b.per100(b.blunders))} per 100 moves)."
         study.append(f"Around moves {worst_bucket}, slow down and double-check every capture and check for both sides.")
     blundered = [r for r in records if r.count(lambda p: p.judgement == "blunder" and piece_of(p.san) == piece)]
-    insight = Insight(
+
+    def piece_share(rs: Sequence[Analysed]) -> Optional[str]:
+        mine = [p for r in rs for p in r.mine() if p.judgement == "blunder"]
+        return pct(sum(1 for p in mine if piece_of(p.san) == piece) / len(mine)) if mine else None
+
+    by_format = [
+        f"{format_name(tc)} {share}"
+        for tc in _formats(records)
+        if (share := piece_share([r for r in records if r.game.time_class == tc])) is not None
+    ]
+    piece_chart = visuals.comparison_chart(
+        "Your moves and your blunders, by piece moved",
+        [label for _, label in PIECES],
+        [
+            ("Share of your moves", [moves[k] / total_moves for k, _ in PIECES]),
+            ("Share of your blunders", [blunders[k] / total_blunders for k, _ in PIECES]),
+        ],
+        value_format="pct",
+        note=f"{name.capitalize()} moves' share of your blunders by format: {', '.join(by_format)}."
+        + _mix_note(records),
+        kind="bar",
+    )
+    board = _example_board(
+        records, lambda r, p: p.judgement == "blunder" and piece_of(p.san) == piece,
+        _blunder_caption(f"Your costliest {name} blunder"),
+    )
+    insight = _with(Insight(
         id=f"{KEY}.observation.blunder-anatomy",
         kind="observation",
         category="blunders",
@@ -1368,7 +1694,7 @@ def anatomy_section(
                   "total_moves": total_moves, "worst_moves": worst_bucket},
         study=study,
         example_games=_urls(blundered, _recent),
-    )
+    ), records, piece_chart, board)
     return piece_table, bucket_table, chart, [insight], stats
 
 
@@ -1464,7 +1790,8 @@ def opening_section(
         note="Stockfish's evaluation from your side after both players' 10th move, in pawns (+0.40 = you are 0.4 "
         "of a pawn better), compared with its evaluation of the start position, so White's usual small edge counts "
         "as 0; capped at ±5 pawns per game. Only engine-analysed games that reached move 10 count, so the numbers "
-        "of games are lower than in the Openings section. Games started from a custom position are left out.",
+        "of games are lower than in the Openings section. Games started from a custom position are left out."
+        + _mix_note(r for key in shown for r, _ in groups[key]),
     )
     insights: list[Insight] = []
     if len(records) < th.min_games:
@@ -1485,8 +1812,9 @@ def opening_section(
         side = colour.capitalize()
         evidence = {"family": family, "colour": colour, "games": n, "avg_cp": avg, "p_adjusted": adjusted[key]}
         pawns = f"{avg / 100:+.2f}".replace("-", "−")
+        chart = _opening_chart(groups, key, th)
         if avg < 0:
-            insights.append(
+            insights.append(_with(
                 Insight(
                     id=f"{KEY}.weakness.{slug}",
                     kind="weakness",
@@ -1507,10 +1835,10 @@ def opening_section(
                         "Check the engine's first inaccuracy in each linked game: it is often the same move or idea.",
                     ],
                     example_games=_urls([r for r, _ in items], lambda r: (opening_eval(r), _recent(r))),
-                )
-            )
+                ), [r for r, _ in items], chart,
+            ))
         else:
-            insights.append(
+            insights.append(_with(
                 Insight(
                     id=f"{KEY}.strength.{slug}",
                     kind="strength",
@@ -1529,9 +1857,43 @@ def opening_section(
                         "Review the linked games from move 10 onward: are you turning the early edge into wins?",
                     ],
                     example_games=_urls([r for r, _ in items], lambda r: (-(opening_eval(r) or 0.0), _recent(r))),
-                )
-            )
+                ), [r for r, _ in items], chart,
+            ))
     return table, insights, stats
+
+
+def _opening_chart(groups: dict[tuple[str, str], list[tuple[Analysed, float]]], key: tuple[str, str],
+                   th: Thresholds) -> Chart:
+    """Your average eval after move 10 in one opening (as one colour) next to your other openings with that colour,
+    for every game and by format (a format needs ``min_opening_games`` games in the opening for a bar)."""
+    family, colour = key
+    evals = {id(r.game): cp for items in groups.values() for r, cp in items}
+    this = [r for r, _ in groups[key]]
+    others = [r for (f, c), items in groups.items() if c == colour and f != family for r, _ in items]
+
+    def average(rs: Sequence[Analysed]) -> Optional[float]:
+        return sum(evals[id(r.game)] for r in rs) / len(rs) / 100.0 if rs else None
+
+    labels, (mine,) = _split(this, [average], th.min_opening_games)
+    by_name = {format_name(tc): tc for tc in _formats(this)}
+    if len(labels) == 1:  # one format in this opening: your other openings in that format
+        rest = [average([r for r in others if r.game.time_class == by_name.get(labels[0])])]
+    else:  # every game, then format by format
+        rest = [average(others)] + [
+            average([r for r in others if r.game.time_class == by_name[label]]) for label in labels[1:]
+        ]
+    series = [(f"The {family}", mine)]
+    if any(v is not None for v in rest):
+        series.append((f"Your other openings as {colour.capitalize()}", rest))
+    return visuals.comparison_chart(
+        f"Your position after move 10 as {colour.capitalize()}, in pawns",
+        labels,
+        series,
+        value_format="signed_float2",
+        reference=0.0,
+        note="Stockfish's evaluation from your side after both players' 10th move, compared with the start position "
+        f"(capped at ±5 pawns per game). {_split_note(this, th.min_opening_games)}",
+    )
 
 
 # --------------------------------------------------------------------------- accuracy trend
@@ -1556,7 +1918,7 @@ def accuracy_trend(records: Sequence[Analysed], th: Thresholds) -> tuple[Optiona
         labels=labels,
         series=[Series("You", mine), Series("Opponents", theirs)],
         value_format="float1",
-        note=f"Months with fewer than {th.min_month_games} analysed games are left blank.",
+        note=f"Months with fewer than {th.min_month_games} analysed games are left blank." + _mix_note(records),
     )
     return chart, stats
 
@@ -1570,7 +1932,8 @@ def _engine_label(records: Sequence[Analysed]) -> str:
 def _kpis(records: Sequence[Analysed], me: Tally, opp: Tally) -> list[Kpi]:
     my_acc, opp_acc = _avg(r.ev.my_accuracy for r in records), _avg(r.ev.opp_accuracy for r in records)
     return [
-        Kpi("Games analysed", len(records), "int", hint=_engine_label(records)),
+        Kpi("Games analysed", len(records), "int",
+            hint=" · ".join(x for x in (_engine_label(records), formats_note(_formats(records), "")) if x)),
         Kpi("Your engine accuracy", my_acc, "float1", hint=f"opponents {_f1(opp_acc)} in the same games"),
         Kpi("Blunders /100 moves", me.per100(me.blunders), "float1", hint=f"opponents {_f1(opp.per100(opp.blunders))}"),
         Kpi("Mistakes /100 moves", me.per100(me.mistakes), "float1", hint=f"opponents {_f1(opp.per100(opp.mistakes))}"),
@@ -1594,7 +1957,7 @@ def _kpis(records: Sequence[Analysed], me: Tally, opp: Tally) -> list[Kpi]:
 def _summary(records: Sequence[Analysed], me: Tally, opp: Tally, insights: list[Insight], th: Thresholds) -> str:
     my_acc, opp_acc = _avg(r.ev.my_accuracy for r in records), _avg(r.ev.opp_accuracy for r in records)
     n = len(records)
-    text = f"Stockfish reviewed {n} of your games"
+    text = f"Stockfish reviewed {n} of your games ({formats_words(_formats(records))})"
     if my_acc is not None and opp_acc is not None:
         text += f": your engine accuracy averaged {my_acc:.1f} against {opp_acc:.1f} for your opponents"
     text += (
@@ -1638,7 +2001,11 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     insights: list[Insight] = []
 
     tc_table, tc_stats = time_class_table(records)
-    tables.append(tc_table)
+    tc_chart = time_class_chart(tc_table)
+    if tc_chart is not None:
+        charts.append(tc_chart)  # carries the per-format table
+    else:
+        tables.append(tc_table)
     blunders = blunder_insight(records, me_games, opp_games, th)
     if blunders:
         insights.append(blunders)
@@ -1686,6 +2053,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
 
     stats = {
         "games": len(records),
+        "formats": _formats(records),
         "engine": _engine_label(records),
         "player": side(me, _avg(r.ev.my_accuracy for r in records)),
         "opponents": side(opp, _avg(r.ev.opp_accuracy for r in records)),
