@@ -907,8 +907,9 @@ def test_ask_answers_from_the_last_report(run, tmp_path, monkeypatch):
 
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "testerbob.json").write_text('{"username": "TesterBob"}', encoding="utf-8")
-    code, _, stderr = run("ask", "TesterBob", "why do I lose?")
-    assert code == 1 and "not available" in stderr  # the stub on this branch
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    code, stdout, _ = run("ask", "TesterBob", "why do I lose?")
+    assert code == 0 and "ANTHROPIC_API_KEY" in stdout  # no key: a clear message instead of an answer
 
     seen = {}
 

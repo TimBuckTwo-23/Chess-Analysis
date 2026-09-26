@@ -142,15 +142,22 @@ def test_facts_for_choice_points_and_repeated_mistakes(tmp_path, session):
     assert table.formats[-2:] == ["url", "text"] and table.key_columns == [0, 1, 2]
     assert "Lichess opening explorer needs a token" in table.note
 
-    # a board for each: what the engine prefers green, your move red (your other choices grey)
-    choice_board, habit_board = mod.diagrams[-2:]
-    assert choice_board.orientation == "black" and choice_board.title.startswith("After 1.e4 c5 2.d4: cxd4")
-    assert [(a.start, a.end, a.kind) for a in choice_board.arrows] == [("c5", "d4", "best"), ("b8", "c6", "neutral")]
+    # one board per position: what the engine prefers green, your move red (your other choices grey). The choice
+    # point is already drawn by the openings section: its board gets the facts (arrow, caption, the engine strip).
+    def board_at(fen):
+        (board,) = [d for d in mod.diagrams if d.fen.split()[:4] == fen.split()[:4]]
+        return board
+
+    choice_board = board_at(HABITS["sicilian_2nc6"]["before"])
+    habit_board = board_at(HABITS["sicilian_5e5"]["before"])
+    assert choice_board.orientation == "black"
+    assert ("c5", "d4", "best") in [(a.start, a.end, a.kind) for a in choice_board.arrows]
+    assert "Cxd4 is what the engine prefers" in choice_board.caption or choice_board.title.startswith(
+        "After 1.e4 c5 2.d4: cxd4")
     assert [(a.start, a.end, a.kind) for a in habit_board.arrows] == [("a7", "a6", "best"), ("e6", "e5", "played")]
-    assert "Your games: 11 bullet, 8 blitz, 5 rapid." in choice_board.caption
     assert habit_board.time_class == "blitz"
     # the cloud's best line as a strip of small boards (recorded: c5d4 g1f3 e7e5 c2c3 ...)
-    (strip,) = choice_board.strips
+    strip = next(s for s in choice_board.strips if s.title.startswith("The engine's line"))
     assert strip.title == "The engine's line (Lichess cloud: −0.1 for you)"
     assert [f.move for f in strip.frames] == ["2...cxd4", "3.Nf3", "3...e5", "4.c3"]
     assert strip.frames[0].last_move == "c5d4"
@@ -308,10 +315,12 @@ def test_cached_explorer_answers_fill_the_masters_and_peers_columns(tmp_path, se
     # a masters game opens through Lichess's import route (masters ids are not Lichess game ids), Black at the bottom
     assert row[-2] == "https://lichess.org/import/master/Mast3rGm/black"
     assert "rating groups 1200, 1400, 1600; your chess.com blitz 949 is about 1390 on Lichess" in table.note
-    board = next(d for d in mod.diagrams if d.fen == fen)
-    assert board.title == "After 1.e4 c5 2.d4: cxd4 is what masters choose"
+    # one board per position: the openings section's own board of this choice point gets the facts
+    (board,) = [d for d in mod.diagrams if d.fen == fen]
+    assert board.title == "Your choice after 1.e4 c5 2.d4 (Black)"
+    assert "CxD4 is what masters choose" not in board.caption and "Cxd4 is what masters choose" in board.caption
     assert "Lichess 1200–1799: cxd4 63%" in board.caption
-    assert board.link == "https://lichess.org/import/master/Mast3rGm/black"
+    assert any(a.kind == "best" and (a.start, a.end) == ("c5", "d4") for a in board.arrows)
     assert not any("explorer.lichess.org" in url for url, _ in session.calls)
 
 

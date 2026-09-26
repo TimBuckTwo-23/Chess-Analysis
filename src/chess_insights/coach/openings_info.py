@@ -419,6 +419,32 @@ def _diagram(pos: OpeningPosition) -> Optional[Diagram]:
     )
 
 
+def merge_diagram(existing: Diagram, facts: Diagram) -> None:
+    """Add a facts board's contents to the board the openings section already draws for the same position: the
+    stronger players' move as a green arrow (when the section has no better move yet), the facts in the caption,
+    the engine line's strip and the master game link when the board has none. One board per position."""
+    squares = {(a.start, a.end): a for a in existing.arrows}
+    has_best = any(a.kind == "best" for a in existing.arrows)
+    for arrow in facts.arrows:
+        if arrow.kind != "best" or has_best:
+            continue
+        mine = squares.get((arrow.start, arrow.end))
+        if mine is not None:
+            mine.kind = "best"  # your usual move is what they play too
+        else:
+            existing.arrows.append(arrow)
+        has_best = True
+    title = facts.title.split(": ", 1)[1] if ": " in facts.title else ""
+    extra = facts.caption.split(". ", 1)[1] if ". " in facts.caption else ""  # drop the repeated "You: ..."
+    extra = ". ".join(part for part in extra.split(". ") if not part.startswith("Your games"))
+    words = [w for w in (title[:1].upper() + title[1:] if title else "", extra.rstrip(".")) if w]
+    if words:
+        existing.caption = (existing.caption.rstrip() + " " + ". ".join(words) + ".").strip()
+    existing.strips = list(existing.strips) + [s for s in facts.strips if s.frames]
+    if not existing.link and facts.link:
+        existing.link = facts.link
+
+
 def facts_table(positions: Sequence[OpeningPosition], peer_note: str, notes: Sequence[str]) -> Optional[Table]:
     """'What stronger players play here': one row per position with outside facts; empty columns are dropped."""
     rows = []
@@ -670,5 +696,11 @@ def _annotate_facts(
             openings_mod.tables.append(table)
         for pos in shown:
             diagram = _diagram(pos)
-            if diagram is not None:
+            if diagram is None:
+                continue
+            existing = next((d for d in openings_mod.diagrams
+                             if openings_db.normalize_epd(d.fen or "") == openings_db.normalize_epd(pos.fen)), None)
+            if existing is None:
                 openings_mod.diagrams.append(diagram)
+            else:  # the openings section already draws this position: add the outside facts to its board
+                merge_diagram(existing, diagram)
