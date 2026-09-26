@@ -57,6 +57,10 @@ The report is built to be read on a phone:
    also saved on the `reports` branch, under `<username>/latest/` and a dated folder, so
    you can compare reports over time.
 
+Or list players in [`players.txt`](players.txt) (one username per line, optionally
+followed by a time zone): saving a change to that file on `main` runs a report for everyone
+listed. You can edit it in the GitHub app too.
+
 GitHub's machines download your games and run Stockfish, and they remember what they
 already downloaded and analysed. A re-run a week later only fetches and analyses the
 new games.

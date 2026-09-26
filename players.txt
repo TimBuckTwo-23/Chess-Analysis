@@ -1,0 +1,5 @@
+# One chess.com username per line, optionally followed by your time zone, e.g.
+#   magnuscarlsen Europe/Oslo
+# Saving a change to this file on main runs the "report" workflow for everyone listed
+# (Actions -> report). Lines starting with # are ignored.
+BigMuffEater

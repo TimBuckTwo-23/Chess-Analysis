@@ -1,5 +1,6 @@
 # Run the analysis on GitHub's machines: no install needed, works from a phone.
-# github.com/<you>/Chess-Analysis -> Actions -> report -> Run workflow.
+#   * Actions -> report -> Run workflow: one player, with options; or
+#   * edit players.txt on main: a report for every player listed there.
 # The report is attached to the run (Artifacts) and saved on the `reports` branch.
 name: report
 
@@ -23,25 +24,58 @@ on:
       depth:
         description: Stockfish depth per position
         default: "12"
+  push:
+    branches: [main]
+    paths: [players.txt]
 
 permissions:
   contents: write # to save the report on the `reports` branch
 
-concurrency:
-  group: report-${{ inputs.username }}
-  cancel-in-progress: false
-
 jobs:
+  players:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_USER: ${{ inputs.username }}
+          IN_TZ: ${{ inputs.timezone }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          rows = []
+          if os.environ["EVENT"] == "workflow_dispatch":
+              rows.append({"username": os.environ["IN_USER"].strip(), "timezone": os.environ["IN_TZ"].strip()})
+          elif os.path.exists("players.txt"):
+              for line in open("players.txt", encoding="utf-8"):
+                  parts = line.split("#", 1)[0].split()
+                  if parts:
+                      rows.append({"username": parts[0], "timezone": parts[1] if len(parts) > 1 else ""})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"matrix={json.dumps({'include': rows})}\ncount={len(rows)}\n")
+          print(rows)
+          EOF
+
   report:
+    needs: players
+    if: needs.players.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # one at a time: every job adds a commit to the reports branch
+      matrix: ${{ fromJSON(needs.players.outputs.matrix) }}
     env:
       # inputs reach the shell only through environment variables (never pasted into commands)
-      USERNAME: ${{ inputs.username }}
-      TZ_NAME: ${{ inputs.timezone }}
-      ENGINE: ${{ inputs.engine }}
-      ENGINE_GAMES: ${{ inputs.engine_games }}
-      DEPTH: ${{ inputs.depth }}
+      USERNAME: ${{ matrix.username }}
+      TZ_NAME: ${{ matrix.timezone }}
+      ENGINE: ${{ github.event_name != 'workflow_dispatch' || inputs.engine }}
+      ENGINE_GAMES: ${{ inputs.engine_games || '300' }}
+      DEPTH: ${{ inputs.depth || '12' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +85,7 @@ jobs:
           cache: pip
 
       - name: Install Stockfish
-        if: ${{ inputs.engine }}
+        if: env.ENGINE == 'true'
         run: sudo apt-get update && sudo apt-get install -y stockfish
 
       - name: Install chess-insights
@@ -65,8 +99,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .chess-insights-cache
-          key: chess-insights-${{ inputs.username }}-${{ github.run_id }}
-          restore-keys: chess-insights-${{ inputs.username }}-
+          key: chess-insights-${{ matrix.username }}-${{ github.run_id }}
+          restore-keys: chess-insights-${{ matrix.username }}-
 
       - name: Analyse games
         run: |
@@ -89,16 +123,19 @@ jobs:
           retention-days: 30
 
       - name: Save the report on the reports branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           stamp=$(date -u +%Y-%m-%d)
           dest="$RUNNER_TEMP/reports-branch"
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY"
           git config --global user.name "chess-insights"
           git config --global user.email "chess-insights@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin reports >/dev/null; then
-            git clone --quiet --depth 1 --branch reports "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY" "$dest"
+            git clone --quiet --depth 1 --branch reports "$remote" "$dest"
           else
             mkdir -p "$dest" && git -C "$dest" init --quiet -b reports
-            git -C "$dest" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY"
+            git -C "$dest" remote add origin "$remote"
           fi
           mkdir -p "$dest/$REPORT_NAME/$stamp" "$dest/$REPORT_NAME/latest"
           cp reports/* "$dest/$REPORT_NAME/$stamp/"
@@ -106,5 +143,3 @@ jobs:
           git -C "$dest" add -A
           git -C "$dest" commit --quiet -m "Report for $REPORT_NAME ($stamp)" || exit 0
           git -C "$dest" push --quiet origin reports
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
