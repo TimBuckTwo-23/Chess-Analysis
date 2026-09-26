@@ -6,8 +6,9 @@ mobility, king safety ... for middlegame and endgame, from White's side). The te
 misleading: right after 5...e5 Stockfish counts the pawn's attack on the d4 knight as a plus for Black. So the
 concepts compare the two lines where they have played out: the refutation of your move against the engine's best
 line, each read at ``COMPARE_PLIES`` plies from the position before your move, or at the nearest settled position:
-not in check, and no capture left that wins material for the side to move (a static exchange count, ``see``). A
-position in the middle of a combination (a fork with the queen still to be taken) is never a comparison point. The
+not in check, and no capture left that wins material for the side to move (a static exchange count, ``see``; in a
+pawn race where no position qualifies, at most a pawn). A position in the middle of a combination (a fork with the
+queen still to be taken) is never a comparison point. The
 engine's PV runs 15 to 25 plies, but its far end is speculative, and the three habit positions of the coaching plan
 read true at this distance (5...e5: piece activity, king safety and pawn structure all worse than after 5...a6).
 
