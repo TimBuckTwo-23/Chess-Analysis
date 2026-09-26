@@ -1,0 +1,154 @@
+{
+ "recorded": "2026-09-26T22:58:56+00:00",
+ "items": {
+  "openings": {
+   "ok": true,
+   "result": {
+    "rows": 3815
+   }
+  },
+  "lichess_apis": {
+   "ok": true,
+   "result": {
+    "cloud_eval_sicilian_5e5_before": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_5e5_e5": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_5e5_a6": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_5e5_d6": {
+     "status": 200
+    },
+    "cloud_eval_qga_4e4_before": {
+     "status": 200
+    },
+    "cloud_eval_qga_4e4_e4": {
+     "status": 200
+    },
+    "cloud_eval_qga_4e4_Nf3": {
+     "status": 200
+    },
+    "cloud_eval_qga_4e4_d5": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_2nc6_before": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_2nc6_Nc6": {
+     "status": 200
+    },
+    "cloud_eval_sicilian_2nc6_cxd4": {
+     "status": 200
+    },
+    "cloud_eval_qga_4d5_before": {
+     "status": 200
+    },
+    "cloud_eval_qga_4d5_d5": {
+     "status": 200
+    },
+    "cloud_eval_qga_4d5_Nf3": {
+     "status": 200
+    },
+    "cloud_eval_missing": {
+     "status": 404
+    },
+    "tablebase_kpk_win": {
+     "status": 200
+    },
+    "tablebase_kpk_draw": {
+     "status": 200
+    },
+    "tablebase_krk": {
+     "status": 200
+    },
+    "tablebase_rook_ending": {
+     "status": 200
+    },
+    "tablebase_too_many": {
+     "status": 200
+    },
+    "explorer_masters_sicilian_5e5": {
+     "status": 401
+    },
+    "explorer_lichess_sicilian_5e5": {
+     "status": 401
+    },
+    "explorer_masters_qga_4e4": {
+     "status": 401
+    },
+    "explorer_lichess_qga_4e4": {
+     "status": 401
+    }
+   }
+  },
+  "wikibooks": {
+   "ok": true,
+   "result": {
+    "wikibooks_sicilian": {
+     "status": 200
+    },
+    "wikibooks_sicilian_nf3_nc6": {
+     "status": 200
+    },
+    "wikibooks_qga": {
+     "status": 200
+    },
+    "wikibooks_missing": {
+     "status": 200
+    }
+   }
+  },
+  "gutenberg": {
+   "ok": true,
+   "result": {
+    "33870": {
+     "status": 200,
+     "headings": 616
+    },
+    "5614": {
+     "status": 200,
+     "headings": 1750
+    },
+    "4542": {
+     "status": 200,
+     "headings": 14
+    },
+    "4656": {
+     "status": 200,
+     "headings": 15
+    }
+   }
+  },
+  "puzzles": {
+   "ok": true,
+   "result": {
+    "rows_seen": 6100952,
+    "eligible": 2775706,
+    "sample_rows": 1573,
+    "drill_rows": 6000,
+    "per_theme": {
+     "fork": 80,
+     "pin": 80,
+     "skewer": 80,
+     "hangingPiece": 80,
+     "discoveredAttack": 80,
+     "backRankMate": 80,
+     "discoveredCheck": 80,
+     "doubleCheck": 80,
+     "trappedPiece": 80,
+     "smotheredMate": 80,
+     "mateIn1": 80,
+     "mateIn2": 80,
+     "mateIn3": 80,
+     "deflection": 80,
+     "attraction": 80,
+     "overloading": 0,
+     "advancedPawn": 80
+    }
+   }
+  }
+ }
+}

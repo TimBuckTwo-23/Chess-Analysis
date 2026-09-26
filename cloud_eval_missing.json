@@ -1,0 +1,9 @@
+{
+ "url": "https://lichess.org/api/cloud-eval?fen=8/8/8/3k4/8/2K5/8/7Q%20w%20-%20-%200%201",
+ "status": 404,
+ "content_type": "application/json",
+ "recorded": "2026-09-26T22:59:17+00:00",
+ "body": {
+  "error": "No cloud evaluation available for that position"
+ }
+}

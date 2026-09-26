@@ -1,0 +1,25 @@
+{
+ "url": "https://en.wikibooks.org/w/api.php?action=query&prop=extracts&explaintext=1&exsentences=4&titles=Chess_Opening_Theory%2F1.+e4%2F1...c5&format=json&redirects=1",
+ "status": 200,
+ "content_type": "",
+ "recorded": "2026-09-26T22:59:32+00:00",
+ "body": {
+  "batchcomplete": "",
+  "query": {
+   "normalized": [
+    {
+     "from": "Chess_Opening_Theory/1. e4/1...c5",
+     "to": "Chess Opening Theory/1. e4/1...c5"
+    }
+   ],
+   "pages": {
+    "37063": {
+     "pageid": 37063,
+     "ns": 0,
+     "title": "Chess Opening Theory/1. e4/1...c5",
+     "extract": "\n== 1...c5 · Sicilian defence ==\n1...c5 is the Sicilian defence, a counter-attacking, asymmetric opening. Black controls the d4 square with a flank pawn, asserting that trading their flank c-pawn for White's d-pawn will surely be to their advantage, as it will leave them with two central pawns to White's one. Black would love to one day achieve d5, and exploit the c-file should it open. \nThe main approach for White is the Open Sicilian: 2."
+    }
+   }
+  }
+ }
+}

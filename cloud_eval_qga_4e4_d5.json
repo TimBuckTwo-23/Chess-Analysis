@@ -1,0 +1,25 @@
+{
+ "url": "https://lichess.org/api/cloud-eval?fen=r1bqkbnr/ppp1pppp/2n5/3P4/2p5/2N5/PP2PPPP/R1BQKBNR%20b%20KQkq%20-%200%204&multiPv=3",
+ "status": 200,
+ "content_type": "application/json",
+ "recorded": "2026-09-26T22:59:07+00:00",
+ "body": {
+  "fen": "r1bqkbnr/ppp1pppp/2n5/3P4/2p5/2N5/PP2PPPP/R1BQKBNR b KQkq - 0 4",
+  "knodes": 2223364,
+  "depth": 44,
+  "pvs": [
+   {
+    "moves": "c6b8 e2e4 e7e5 g1f3 b8d7 f1c4 f8d6 e1h1 g8e7 a2a4",
+    "cp": 66
+   },
+   {
+    "moves": "c6e5 f2f4 e5d7 e2e4 c7c6 d5c6 b7c6 f1c4 e7e6 g1f3",
+    "cp": 73
+   },
+   {
+    "moves": "c6a5 d1a4 c7c6 b2b4 c4b3 a2b3 e7e6 c1d2 b7b6 b3b4",
+    "cp": 105
+   }
+  ]
+ }
+}

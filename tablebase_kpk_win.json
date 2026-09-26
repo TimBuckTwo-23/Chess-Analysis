@@ -1,0 +1,55 @@
+{
+ "url": "https://tablebase.lichess.org/standard?fen=8/8/8/8/8/4k3/4P3/4K3%20w%20-%20-%200%201",
+ "status": 200,
+ "content_type": "application/json",
+ "recorded": "2026-09-26T22:59:18+00:00",
+ "body": {
+  "checkmate": false,
+  "stalemate": false,
+  "variant_win": false,
+  "variant_loss": false,
+  "insufficient_material": false,
+  "dtz": 0,
+  "precise_dtz": 0,
+  "dtm": 0,
+  "dtw": null,
+  "dtc": null,
+  "category": "draw",
+  "moves": [
+   {
+    "uci": "e1d1",
+    "san": "Kd1",
+    "zeroing": false,
+    "conversion": false,
+    "checkmate": false,
+    "stalemate": false,
+    "variant_win": false,
+    "variant_loss": false,
+    "insufficient_material": false,
+    "dtz": 0,
+    "precise_dtz": 0,
+    "dtm": 0,
+    "dtw": null,
+    "dtc": null,
+    "category": "draw"
+   },
+   {
+    "uci": "e1f1",
+    "san": "Kf1",
+    "zeroing": false,
+    "conversion": false,
+    "checkmate": false,
+    "stalemate": false,
+    "variant_win": false,
+    "variant_loss": false,
+    "insufficient_material": false,
+    "dtz": 0,
+    "precise_dtz": 0,
+    "dtm": 0,
+    "dtw": null,
+    "dtc": null,
+    "category": "draw"
+   }
+  ]
+ }
+}

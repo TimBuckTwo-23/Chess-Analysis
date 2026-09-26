@@ -1,0 +1,25 @@
+{
+ "url": "https://en.wikibooks.org/w/api.php?action=query&prop=extracts&explaintext=1&exsentences=4&titles=Chess_Opening_Theory%2F1.+d4%2F1...d5%2F2.+c4%2F2...dxc4&format=json&redirects=1",
+ "status": 200,
+ "content_type": "",
+ "recorded": "2026-09-26T22:59:34+00:00",
+ "body": {
+  "batchcomplete": "",
+  "query": {
+   "normalized": [
+    {
+     "from": "Chess_Opening_Theory/1. d4/1...d5/2. c4/2...dxc4",
+     "to": "Chess Opening Theory/1. d4/1...d5/2. c4/2...dxc4"
+    }
+   ],
+   "pages": {
+    "81401": {
+     "pageid": 81401,
+     "ns": 0,
+     "title": "Chess Opening Theory/1. d4/1...d5/2. c4/2...dxc4",
+     "extract": "\n== 2...dxc4 · Queen's Gambit Accepted ==\nThe Queen's Gambit Accepted has a rich heritage in chess, both sides played by many of the world champions through the years. It is not really much of a gambit since White can recover the pawn immediately with 3. Qa4+, though unless White wants the queen placed on c4, this is unnecessary. \nBlack does better not to hold on to the pawn."
+    }
+   }
+  }
+ }
+}
