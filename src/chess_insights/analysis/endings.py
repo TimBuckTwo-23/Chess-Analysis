@@ -13,6 +13,10 @@ plies; game length also leaves out abandoned games, which say nothing about how
 long you can hold a position. Timeouts are only described here: the clock
 module owns the "you lose on time" finding.
 
+Every observation carries the formats behind it and a chart split by format; the ones about how
+games end (being mated, abandoning, drawing) also show the final position of a recent game of
+that kind, with the last move highlighted.
+
 Nothing here becomes a strength or weakness, only an observation, and only when its
 test passes the project-wide rule (``stats.significance`` at ``stats.STRICT_ALPHA``).
 How long a game lasts and how a loss ends are consequences of the result and of both
@@ -29,8 +33,11 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+import chess
+
 from ..context import AnalysisContext
-from ..models import TIME_CLASSES, Chart, Game, Insight, Kpi, ModuleResult, Series, Table
+from ..models import TIME_CLASSES, Chart, Diagram, Game, Insight, Kpi, Mark, ModuleResult, Series, Table
+from ..visuals import FORMAT_NAMES, MIN_FORMAT_GAMES, format_counts, position_diagram
 from ..stats import (
     STRICT_ALPHA,
     MeanTest,
@@ -49,7 +56,7 @@ from ..stats import (
     summarize,
     two_proportion_test,
 )
-from .results import MAX_EXAMPLES, recent_urls
+from .results import MAX_EXAMPLES, Metric, format_note, recent_urls, safe_visual, score_delta, split_chart
 
 KEY = "endings"
 TITLE = "How your games end"
@@ -150,6 +157,117 @@ def _group_by_class(games: Sequence[Game]) -> dict[str, list[Game]]:
     return {tc: groups[tc] for tc in sorted(groups, key=lambda tc: (rank.get(tc, len(rank)), tc))}
 
 
+# --------------------------------------------------------------------------- final positions
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+_ENDED = {
+    ("loss", "checkmate"): "you were checkmated",
+    ("win", "checkmate"): "you checkmated your opponent",
+    ("loss", "timeout"): "you lost on time",
+    ("win", "timeout"): "you won on time",
+    ("loss", "resignation"): "you resigned",
+    ("win", "resignation"): "your opponent resigned",
+    ("loss", "abandoned"): "you abandoned the game",
+    ("win", "abandoned"): "your opponent abandoned the game",
+}
+
+
+def final_board(game: Game) -> Optional[chess.Board]:
+    """The position at the end of ``game``; None when its moves can't be replayed (a variant, a broken record)."""
+    try:
+        board = chess.Board(game.initial_fen or chess.STARTING_FEN, chess960=game.rules == "chess960")
+        for san in game.moves_san:
+            board.push_san(san)
+    except ValueError:
+        return None
+    return board
+
+
+def material_balance(board: chess.Board, color: str) -> int:
+    """Your material minus your opponent's, in pawns (knight and bishop 3, rook 5, queen 9)."""
+    mine = chess.WHITE if color == "white" else chess.BLACK
+    total = 0
+    for piece, value in PIECE_VALUES.items():
+        total += value * (len(board.pieces(piece, mine)) - len(board.pieces(piece, not mine)))
+    return total
+
+
+def material_text(diff: int) -> str:
+    """'Material was level.' / 'You had 3 pawns' worth more material.' / '... less material.'"""
+    if diff == 0:
+        return "Material was level."
+    worth = "a pawn's worth" if abs(diff) == 1 else f"{abs(diff)} pawns' worth"
+    return f"You had {worth} {'more' if diff > 0 else 'less'} material."
+
+
+def time_control_text(game: Game) -> str:
+    """'blitz 3+0' / 'daily' (the format and the clock)."""
+    if game.time_class == "daily" or not game.base_seconds:
+        return game.time_class
+    return f"{game.time_class} {game.base_seconds / 60:g}+{game.increment}"
+
+
+_DRAWN = {
+    "agreement": "you agreed a draw",
+    "repetition": "the game was drawn by repetition",
+    "stalemate": "the game was drawn by stalemate",
+    "insufficient": "the game was drawn by insufficient material",
+    "fifty_move": "the game was drawn by the 50-move rule",
+    "timeout_vs_insufficient": "a flag fell against insufficient material: a draw",
+}
+
+
+def ending_text(game: Game) -> str:
+    """'you were checkmated' / 'the game was drawn by repetition' ... in plain words."""
+    if game.outcome == "draw":
+        return _DRAWN.get(draw_type(game), "the game was drawn")
+    return _ENDED.get((game.outcome, method(game)), f"you {'won' if game.outcome == 'win' else 'lost'}")
+
+
+def final_position_diagram(game: Game, title: str) -> Optional[Diagram]:
+    """The final position of ``game`` from your side, the last move highlighted, linked to the game.
+
+    None when the game has fewer than ``MIN_PLIES`` plies (the start position says nothing) or can't be replayed.
+    A checkmated king's square is marked.
+    """
+    if game.plies < MIN_PLIES:
+        return None
+    board = final_board(game)
+    if board is None or not board.move_stack:
+        return None
+    king = board.king(board.turn) if board.is_checkmate() else None
+    marks = [Mark(chess.square_name(king), "check")] if king is not None else []
+    day = f"{game.end_time.day} {game.end_time:%b %Y}"
+    caption = (
+        f"Final position: {ending_text(game)} after {game.full_moves} moves ({time_control_text(game)}, {day}). "
+        f"{material_text(material_balance(board, game.color))}"
+    )
+    return position_diagram(
+        title,
+        board.fen(),
+        orientation=game.color,
+        caption=caption,
+        link=game.url,
+        time_class=game.time_class,
+        last_move=board.peek().uci(),
+        marks=marks,
+    )
+
+
+def first_diagram(games: Sequence[Game], urls: Sequence[str], title: str) -> Optional[Diagram]:
+    """The final-position board of a finding's first example game (``urls``, most instructive first) that can be drawn.
+
+    Falls back to the most recent of ``games`` when none of the examples can be replayed.
+    """
+    by_url = {g.url: g for g in games if g.url}
+    ordered = [by_url[u] for u in urls if u in by_url]
+    picked = {id(g) for g in ordered}
+    ordered += sorted((g for g in games if id(g) not in picked), key=lambda g: g.end_time, reverse=True)
+    for game in ordered[: MAX_EXAMPLES * 2]:
+        if (diagram := final_position_diagram(game, title)) is not None:
+            return diagram
+    return None
+
+
 # --------------------------------------------------------------------------- tables & charts
 def mix_shares(games: Sequence[Game]) -> list[Optional[float]]:
     """Share of ``games`` in each MIX category (None for an empty group)."""
@@ -214,10 +332,14 @@ def decisive_profile(games: Sequence[Game]) -> DecisiveProfile:
     )
 
 
-def profile_table(p: DecisiveProfile, n_short: int) -> Table:
+def profile_table(p: DecisiveProfile, n_short: int, formats: Optional[dict[str, int]] = None) -> Table:
     note = "Share of your losses and of your wins that ended each way."
     if n_short:
         note += f" {n_short} game(s) with fewer than {MIN_PLIES} plies are left out."
+    if formats and len(formats) > 1:
+        note += (
+            f" {format_note(formats)}, all formats together; the result mix above splits them by time control."
+        )
     return Table(
         title="How your losses and wins end",
         columns=["Ending", "Losses", "Share of losses", "Wins", "Share of wins"],
@@ -243,34 +365,75 @@ def draw_table(by_class: dict[str, list[Game]]) -> Table:
     )
 
 
-def length_table(summaries: dict[str, ScoreSummary], n_left_out: int) -> Table:
+def length_formats(groups: dict[str, list[Game]], min_games: int = MIN_FORMAT_GAMES) -> list[str]:
+    """Time classes that get their own column / series in the game-length view (none when there is only one)."""
+    counts = format_counts(g for gs in groups.values() for g in gs)
+    return [tc for tc, n in counts.items() if n >= min_games] if len(counts) > 1 else []
+
+
+def _format_delta(games: Sequence[Game], tc: str, min_games: int = MIN_FORMAT_GAMES) -> tuple[int, Optional[float]]:
+    """(rated games, score vs rating) of ``games`` in time class ``tc``; None below ``min_games`` rated games."""
+    s = summarize([g for g in games if g.time_class == tc])
+    return s.n_rated, (s.delta if s.n_rated >= min_games else None)
+
+
+def length_table(
+    summaries: dict[str, ScoreSummary], n_left_out: int, groups: Optional[dict[str, list[Game]]] = None
+) -> Table:
+    """Score by game length, all formats together, then (with games in several formats) vs rating per format."""
+    formats = length_formats(groups) if groups else []
     rows = []
     for key, label, _, _ in LENGTH_BUCKETS:
         s = summaries[key]
-        rows.append([label, s.n, s.wdl, s.rated_score, s.expected, s.delta, s.half_width])
+        row: list[Any] = [label, s.n, s.wdl, s.rated_score, s.expected, s.delta, s.half_width]
+        for tc in formats:
+            row.append(_format_delta(groups[key], tc)[1])  # type: ignore[index]
+        rows.append(row)
     note = (
         "Moves = moves as numbered on the scoresheet (a move by White and Black's reply count once). vs rating = your "
         "score minus what your rating predicts, per game; ± is how far the true figure could plausibly be (95%)."
     )
     if n_left_out:
         note += f" {n_left_out} abandoned or very short game(s) are left out."
+    if groups:
+        counts = format_counts(g for gs in groups.values() for g in gs)
+        if len(counts) > 1:
+            note += (
+                f" {format_note(counts)}. The format columns show vs rating in each format (empty below "
+                f"{MIN_FORMAT_GAMES} rated games of that length)."
+            )
+    names = [f"vs rating: {FORMAT_NAMES.get(tc, tc.capitalize())}" for tc in formats]
     return Table(
         title="Score by game length",
-        columns=["Moves", "Games", "W/D/L", "Score", "Rating predicts", "vs rating", "± (95%)"],
+        columns=["Moves", "Games", "W/D/L", "Score", "Rating predicts", "vs rating", "± (95%)", *names],
         rows=rows,
-        formats=["text", "int", "text", "pct", "pct", "signed_pct", "pct"],
+        formats=["text", "int", "text", "pct", "pct", "signed_pct", "pct", *(["signed_pct"] * len(formats))],
         note=note,
+        key_columns=[0, 1, 3, 5] if formats else None,
     )
 
 
-def length_chart(summaries: dict[str, ScoreSummary]) -> Chart:
+def length_chart(summaries: dict[str, ScoreSummary], groups: Optional[dict[str, list[Game]]] = None) -> Chart:
+    """Score vs rating per length band: all formats together, then one series per format with enough games."""
+    formats = length_formats(groups) if groups else []
+    series = [Series("All formats" if formats else "Score vs rating", [summaries[k].delta for k, *_ in LENGTH_BUCKETS])]
+    for tc in formats:
+        values = [_format_delta(groups[k], tc)[1] for k, *_ in LENGTH_BUCKETS]  # type: ignore[index]
+        if any(v is not None for v in values):
+            series.append(Series(FORMAT_NAMES.get(tc, tc.capitalize()), values))
+    note = "Per game, against what your rating predicts. Empty bars are lengths without rated games."
+    if len(series) > 1:
+        note = (
+            "Per game, against what your rating predicts; one colour per format. A format's bar is left empty "
+            f"below {MIN_FORMAT_GAMES} rated games of that length."
+        )
     return Chart(
         kind="bar",
         title="Score vs rating by game length (moves)",
         labels=[label for _, label, _, _ in LENGTH_BUCKETS],
-        series=[Series("Score vs rating", [summaries[key].delta for key, _, _, _ in LENGTH_BUCKETS])],
+        series=series,
         value_format="signed_pct",
-        note="Per game, against what your rating predicts. Empty bars are lengths without rated games.",
+        note=note,
         reference=0.0,
     )
 
@@ -302,35 +465,59 @@ def mate_insight(
     mated_games = [g for g in played if g.outcome == "loss" and g.termination == "checkmate"]
     resigned, opp_resigned = p.by_method["resignation"]
     k = min(MAX_EXAMPLES, len(mated_games))
-    return (
-        Insight(
-            id=f"{KEY}.observation.checkmated-often",
-            kind="observation",
-            category="endings",
-            title=(
-                f"{pct(p.loss_share('checkmate'))} of your losses end in checkmate, against "
-                f"{pct(p.win_share('checkmate'))} of your wins"
-            ),
-            detail=(
-                f"{mated} of your {p.losses} losses ended in checkmate, and {mating} of your {p.wins} wins ended "
-                f"with you mating your opponent. You resigned {pct(p.loss_share('resignation'))} of your losses; "
-                f"your opponents resigned {pct(p.win_share('resignation'))} of your wins. Being mated in a larger "
-                "share of games can point at king-safety problems, but it is also exactly what playing on in lost "
-                "positions looks like (a resignation becomes a mate), so on its own it is not evidence of a "
-                "weakness. The engine analysis (--engine) can tell the two apart."
-            ),
-            severity=clamp(test.mean / 0.30),
-            confidence=confidence,
-            evidence={**stats, "resigned": resigned, "opponent_resigned": opp_resigned},
-            study=[
-                f"Replay your last {k} losses by checkmate: was the position already lost when the attack started? "
-                "If not, find the move where your king's cover was first weakened.",
-                "Solve 15 mating-pattern puzzles a day (back rank, smothered, Anastasia's, Arabian mate) until you "
-                "spot them instantly for both sides.",
-            ],
-            example_games=recent_urls(mated_games),
+    insight = Insight(
+        id=f"{KEY}.observation.checkmated-often",
+        kind="observation",
+        category="endings",
+        title=(
+            f"{pct(p.loss_share('checkmate'))} of your losses end in checkmate, against "
+            f"{pct(p.win_share('checkmate'))} of your wins"
         ),
-        stats,
+        detail=(
+            f"{mated} of your {p.losses} losses ended in checkmate, and {mating} of your {p.wins} wins ended "
+            f"with you mating your opponent. You resigned {pct(p.loss_share('resignation'))} of your losses; "
+            f"your opponents resigned {pct(p.win_share('resignation'))} of your wins. Being mated in a larger "
+            "share of games can point at king-safety problems, but it is also exactly what playing on in lost "
+            "positions looks like (a resignation becomes a mate), so on its own it is not evidence of a "
+            "weakness. The engine analysis (--engine) can tell the two apart."
+        ),
+        severity=clamp(test.mean / 0.30),
+        confidence=confidence,
+        evidence={**stats, "resigned": resigned, "opponent_resigned": opp_resigned},
+        study=[
+            f"Replay your last {k} losses by checkmate: was the position already lost when the attack started? "
+            "If not, find the move where your king's cover was first weakened.",
+            "Solve 15 mating-pattern puzzles a day (back rank, smothered, Anastasia's, Arabian mate) until you "
+            "spot them instantly for both sides.",
+        ],
+        example_games=recent_urls(mated_games),
+        formats=format_counts(g for g in played if g.outcome != "draw"),
+    )
+    insight.chart = safe_visual(lambda: mate_chart(played), "the checkmate chart")
+    insight.diagram = safe_visual(
+        lambda: first_diagram(mated_games, insight.example_games, "A recent game in which you were checkmated"),
+        "a checkmate board",
+    )
+    return insight, stats
+
+
+def mate_chart(played: Sequence[Game]) -> Chart:
+    """Share of your losses and of your wins that ended in checkmate, over all formats and per format."""
+    def mate_share(gs: list[Game]) -> Optional[float]:
+        return sum(1 for g in gs if method(g) == "checkmate") / len(gs) if gs else None
+
+    return split_chart(
+        "Games that ended in checkmate",
+        [
+            ("Your losses", [g for g in played if g.outcome == "loss"], mate_share),
+            ("Your wins", [g for g in played if g.outcome == "win"], mate_share),
+        ],
+        value_format="pct",
+        value_name="by checkmate",
+        note=(
+            "Share of your losses in which you were mated, and of your wins in which you mated your opponent. "
+            f"{format_note(format_counts(g for g in played if g.outcome != 'draw'), 'decisive games')}."
+        ),
     )
 
 
@@ -350,25 +537,48 @@ def abandoned_insight(games: Sequence[Game], th: Thresholds) -> tuple[Optional[I
             f" Going by the ratings you could have expected about {sum(expected):.1f} points from "
             f"{'those games' if len(expected) > 1 else 'that game'}."
         )
-    return (
-        Insight(
-            id=f"{KEY}.observation.abandoned-games",
-            kind="observation",
-            category="endings",
-            title=f"You abandoned {len(mine)} games, and each one costs rating points",
-            detail=detail,
-            severity=clamp(len(mine) / len(games) * 10.0),
-            confidence=sample_confidence(len(games)),
-            evidence=stats,
-            study=[
-                "Only start a rated game when you are sure you have time to finish it; play unrated or daily games "
-                "when you might be interrupted.",
-                "Check your connection and battery before a rated session, and play on even in bad positions: "
-                "opponents at club level often let you back in.",
-            ],
-            example_games=recent_urls(mine),
-        ),
-        stats,
+    insight = Insight(
+        id=f"{KEY}.observation.abandoned-games",
+        kind="observation",
+        category="endings",
+        title=f"You abandoned {len(mine)} games, and each one costs rating points",
+        detail=detail,
+        severity=clamp(len(mine) / len(games) * 10.0),
+        confidence=sample_confidence(len(games)),
+        evidence=stats,
+        study=[
+            "Only start a rated game when you are sure you have time to finish it; play unrated or daily games "
+            "when you might be interrupted.",
+            "Check your connection and battery before a rated session, and play on even in bad positions: "
+            "opponents at club level often let you back in.",
+        ],
+        example_games=recent_urls(mine),
+        formats=format_counts(games),
+    )
+    insight.chart = safe_visual(lambda: abandoned_chart(games), "the abandoned-games chart")
+    insight.diagram = safe_visual(
+        lambda: first_diagram(mine, insight.example_games, "A recent game you abandoned"), "an abandoned-game board"
+    )
+    return insight, stats
+
+
+def abandoned_chart(games: Sequence[Game]) -> Chart:
+    """Games you and your opponents abandoned, over all formats and per format."""
+
+    def count(code: str, outcome: str) -> Metric:
+        attr = "my_result_code" if outcome == "loss" else "opp_result_code"
+        return lambda gs: float(sum(1 for g in gs if g.outcome == outcome and getattr(g, attr) == code))
+
+    return split_chart(
+        "Abandoned games",
+        [
+            ("You abandoned", games, count("abandoned", "loss")),
+            ("Opponents abandoned", games, count("abandoned", "win")),
+        ],
+        value_format="int",
+        value_name="abandoned",
+        min_games=1,
+        note=f"Games left before the end, each a full loss for whoever left. {format_note(format_counts(games))}.",
     )
 
 
@@ -500,40 +710,58 @@ def length_insights(
         else:
             examples = recent_urls(group, "win")
             k = min(MAX_EXAMPLES, s.wins) or "few"
-        out.append(
-            Insight(
-                id=f"{KEY}.observation.length-{key.replace('_', '-')}",
-                kind="observation",
-                category="endings",
-                title=f"Your games of {labels[key]} moves score {direction} your games of other lengths",
-                detail=(
-                    f"In games lasting {labels[key]} moves you scored {pct(s.rated_score)} in {s.n_rated} games where "
-                    f"your rating predicts {pct(s.expected)} ({per100_games(s.test.mean)} vs your rating); in your "
-                    f"games of other lengths {per100_games(rest.test.mean)}. The gap is {per100(abs(test.mean)).lstrip('+')} points "
-                    "per 100 games "
-                    f"(about {abs(score_to_elo_diff(test.mean, s.expected or 0.5)):.0f} Elo). How long a game lasts "
-                    "depends on the result and on when you and your opponents resign, so this describes your games "
-                    "rather than proving a strength or weakness."
-                ),
-                severity=severity_from_points(shrink_effect(test.mean, test.se)),
-                confidence=confidence,
-                evidence={
-                    "bucket": labels[key],
-                    "n": s.n,
-                    "n_rated": s.n_rated,
-                    "score": s.rated_score,
-                    "expected": s.expected,
-                    "delta": s.delta,
-                    "rest_delta": rest.delta,
-                    "gap": test.mean,
-                    "p_value": test.p_value,
-                    "p_adjusted": adjusted[key],
-                },
-                study=[a.format(k=k) for a in study],
-                example_games=examples,
-            )
+        insight = Insight(
+            id=f"{KEY}.observation.length-{key.replace('_', '-')}",
+            kind="observation",
+            category="endings",
+            title=f"Your games of {labels[key]} moves score {direction} your games of other lengths",
+            detail=(
+                f"In games lasting {labels[key]} moves you scored {pct(s.rated_score)} in {s.n_rated} games where "
+                f"your rating predicts {pct(s.expected)} ({per100_games(s.test.mean)} vs your rating); in your "
+                f"games of other lengths {per100_games(rest.test.mean)}. The gap is {per100(abs(test.mean)).lstrip('+')} points "
+                "per 100 games "
+                f"(about {abs(score_to_elo_diff(test.mean, s.expected or 0.5)):.0f} Elo). How long a game lasts "
+                "depends on the result and on when you and your opponents resign, so this describes your games "
+                "rather than proving a strength or weakness."
+            ),
+            severity=severity_from_points(shrink_effect(test.mean, test.se)),
+            confidence=confidence,
+            evidence={
+                "bucket": labels[key],
+                "n": s.n,
+                "n_rated": s.n_rated,
+                "score": s.rated_score,
+                "expected": s.expected,
+                "delta": s.delta,
+                "rest_delta": rest.delta,
+                "gap": test.mean,
+                "p_value": test.p_value,
+                "p_adjusted": adjusted[key],
+            },
+            study=[a.format(k=k) for a in study],
+            example_games=examples,
+            formats=format_counts(g for gs in groups.values() for g in gs),
         )
+        insight.chart = safe_visual(lambda: length_split_chart(key, groups), "a game-length chart")
+        out.append(insight)
     return out, {labels[k]: p for k, p in adjusted.items()}
+
+
+def length_split_chart(key: str, groups: dict[str, list[Game]]) -> Chart:
+    """Score vs rating in one length band and in your games of other lengths, over all formats and per format."""
+    label = next(label for k, label, _, _ in LENGTH_BUCKETS if k == key)
+    rest = [g for k2, gs in groups.items() if k2 != key for g in gs]
+    return split_chart(
+        f"Score vs rating in games of {label} moves",
+        [(f"Games of {label} moves", groups[key], score_delta), ("Other lengths", rest, score_delta)],
+        value_format="signed_pct",
+        value_name="vs rating",
+        reference=0.0,
+        note=(
+            "Your score minus what your rating predicts, per game (+5% = 5 points per 100 games above it). "
+            f"{format_note(format_counts(g for gs in groups.values() for g in gs))}."
+        ),
+    )
 
 
 def draw_insight(by_class: dict[str, list[Game]], games: Sequence[Game], th: Thresholds) -> Optional[Insight]:
@@ -552,7 +780,7 @@ def draw_insight(by_class: dict[str, list[Game]], games: Sequence[Game], th: Thr
         common, count = Counter(draw_type(g) for g in draws).most_common(1)[0]
         label = dict(DRAW_TYPES)[common].lower()
         detail += f" The most common kind of draw is by {label} ({count} of {len(draws)})."
-    return Insight(
+    insight = Insight(
         id=f"{KEY}.observation.draw-rate",
         kind="observation",
         category="endings",
@@ -568,6 +796,29 @@ def draw_insight(by_class: dict[str, list[Game]], games: Sequence[Game], th: Thr
             "sustained pressure.",
         ],
         example_games=recent_urls(draws),
+        formats=format_counts(games),
+    )
+    insight.chart = safe_visual(lambda: draw_chart(games, th.min_tc_games), "the draw-rate chart")
+    if draws:
+        common = Counter(draw_type(g) for g in draws).most_common(1)[0][0]
+        typical = [g for g in draws if draw_type(g) == common]
+        title = f"A recent draw by {dict(DRAW_TYPES)[common].lower()}"
+        insight.diagram = safe_visual(lambda: first_diagram(typical, insight.example_games, title), "a draw board")
+    return insight
+
+
+def draw_chart(games: Sequence[Game], min_games: int) -> Chart:
+    """Your draw rate over all formats and in each format with ``min_games`` games."""
+    def rate(gs: list[Game]) -> Optional[float]:
+        return sum(1 for g in gs if g.outcome == "draw") / len(gs) if gs else None
+
+    return split_chart(
+        "How often your games are drawn",
+        [("Draw rate", games, rate)],
+        value_format="pct",
+        value_name="drawn",
+        min_games=min_games,
+        note=f"Share of all games that ended in a draw. {format_note(format_counts(games))}.",
     )
 
 
@@ -643,11 +894,13 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
 
     mix = mix_chart(by_class)
     mix.table = mix_table(by_class, games)
-    tables = [profile_table(profile, len(games) - len(played))]
+    tables = [profile_table(profile, len(games) - len(played), format_counts(played))]
     charts = [mix]
-    lengths_table = length_table(summaries, len(games) - len(length_games))
+    lengths_table = safe_visual(
+        lambda: length_table(summaries, len(games) - len(length_games), groups), "the game-length table"
+    ) or length_table(summaries, len(games) - len(length_games))
     if any(s.delta is not None for s in summaries.values()):
-        chart = length_chart(summaries)
+        chart = safe_visual(lambda: length_chart(summaries, groups), "the game-length chart") or length_chart(summaries)
         chart.table = lengths_table
         charts.append(chart)
     else:
