@@ -2,7 +2,12 @@
 #   * Actions -> report -> Run workflow: one player, with options; or
 #   * edit players.txt on main: a report for every player listed there (engine sample balanced, coaching on).
 # The report (with its drill PGNs) is attached to the run (Artifacts) and saved on the `reports` branch.
-# Optional repository secrets: LICHESS_TOKEN (opening explorer facts), ANTHROPIC_API_KEY (the LLM coach).
+# Optional repository secrets: LICHESS_TOKEN (opening explorer facts), ANTHROPIC_API_KEY (the LLM coach; the
+# Anthropic SDK is installed only when it is set).
+# Time: the defaults (300 games at depth 12, coaching 150 positions at depth 20) take about 15 minutes on GitHub's
+# 4-CPU runner. Stockfish needs about 0.6 s a game at depth 12 and 2 s at depth 15, so "all" of a few thousand games
+# at depth 15 does not fit in one run: the analysis stops after 80 minutes, the games finished so far stay in the
+# cache, and the next run carries on from there.
 name: report
 
 on:
@@ -60,9 +65,12 @@ jobs:
           EVENT: ${{ github.event_name }}
           IN_USER: ${{ inputs.username }}
           IN_TZ: ${{ inputs.timezone }}
+          IN_ENGINE: ${{ github.event_name != 'workflow_dispatch' || inputs.engine }}
+          IN_ENGINE_GAMES: ${{ inputs.engine_games || '300' }}
+          IN_DEPTH: ${{ inputs.depth || '12' }}
         run: |
           python3 - <<'EOF'
-          import json, os
+          import json, os, re
           rows = []
           if os.environ["EVENT"] == "workflow_dispatch":
               rows.append({"username": os.environ["IN_USER"].strip(), "timezone": os.environ["IN_TZ"].strip()})
@@ -71,6 +79,21 @@ jobs:
                   parts = line.split("#", 1)[0].split()
                   if parts:
                       rows.append({"username": parts[0], "timezone": parts[1] if len(parts) > 1 else ""})
+          for row in rows:
+              # the game cache's key: lowercase, and only what a chess.com username may hold (letters, digits, _ and
+              # -), so the "." after it in the key keeps "bob" from restoring the cache of "bob-smith"
+              row["cache_name"] = re.sub(r"[^a-z0-9_-]", "", row["username"].lower())
+          # Stockfish on GitHub's 4-CPU runner: about 0.6 s a game at depth 12, 2 s at depth 15 (x1.5 a depth)
+          games = os.environ["IN_ENGINE_GAMES"].strip().lower()
+          depth = int(os.environ["IN_DEPTH"]) if os.environ["IN_DEPTH"].strip().isdigit() else 12
+          per_game = 0.6 * 1.5 ** (depth - 12)
+          if os.environ["IN_ENGINE"] == "true" and (
+                  (games == "all" and depth > 12) or (games.isdigit() and int(games) * per_game > 60 * 60)):
+              many = "all your games" if games == "all" else f"{games} games"
+              print(f"::warning title=A long engine run::Stockfish on {many} at depth {depth} takes about "
+                    f"{per_game:.1f} s a game here, so a large archive may not finish within the 80 minutes the "
+                    "analysis gets. Nothing is lost: the games analysed so far are cached, and running the workflow "
+                    "again carries on from there. Depth 12 is about three times faster than depth 15.")
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"matrix={json.dumps({'include': rows})}\ncount={len(rows)}\n")
           print(rows)
@@ -109,20 +132,28 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y stockfish
 
       - name: Install chess-insights
+        env:
+          # only whether the secret is set, never the key itself: the Anthropic SDK (the llm extra, for
+          # --coach-llm) is installed when the AI coach can run
+          LLM_KEY_SET: ${{ secrets.ANTHROPIC_API_KEY != '' }}
         run: |
           python -m pip install -U pip
-          pip install -e .
+          if [ "$LLM_KEY_SET" = "true" ]; then pip install -e ".[llm]"; else pip install -e .; fi
 
       # Downloaded months, Stockfish results and the coaching's lines are kept between runs, so a
-      # re-run only fetches the current month and analyses new games and positions. (The puzzle
-      # database has its own folder and monthly cache below; this path is unchanged so that the
-      # caches saved by earlier runs still restore.)
+      # re-run only fetches the current month and analyses new games and positions. Saved after the
+      # analysis even when it fails or runs out of time (Stockfish's results are cached game by game),
+      # so a re-run carries on where it stopped. (The puzzle database has its own folder and monthly
+      # cache below; this path is unchanged so that the caches saved by earlier runs still restore:
+      # the second restore key finds the ones saved under the old key, chess-insights-<Username>-<run>.)
       - name: Restore game and engine cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .chess-insights-cache
-          key: chess-insights-${{ matrix.username }}-${{ github.run_id }}
-          restore-keys: chess-insights-${{ matrix.username }}-
+          key: chess-insights-${{ matrix.cache_name }}.${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            chess-insights-${{ matrix.cache_name }}.
+            chess-insights-${{ matrix.username }}-
 
       # The Lichess puzzle database (CC0) for the drills: downloaded at most once a month and kept
       # in its own cache. A failed download never blocks the report (the drills then link to
@@ -170,6 +201,8 @@ jobs:
           fi
 
       - name: Analyse games
+        id: analyse
+        timeout-minutes: 80 # leaves the job's 120 minutes room for setup, the monthly puzzle download and saving
         env:
           # read by chess-insights from the environment, never passed on the command line
           LICHESS_TOKEN: ${{ secrets.LICHESS_TOKEN }}
@@ -189,6 +222,18 @@ jobs:
           fi
           if [ -n "${PREVIOUS_REPORT:-}" ]; then args+=(--previous "$PREVIOUS_REPORT"); fi
           chess-insights "${args[@]}"
+
+      - name: Save game and engine cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .chess-insights-cache
+          key: chess-insights-${{ matrix.cache_name }}.${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Say how to carry on
+        if: failure() && steps.analyse.outcome == 'failure'
+        run: |
+          echo "::error title=No report this time::The analysis did not finish: the 'Analyse games' step says why (it stops after 80 minutes). Whatever it finished is saved in the cache, so running the workflow again carries on from there instead of starting over."
 
       - name: Attach the report to this run
         uses: actions/upload-artifact@v4
