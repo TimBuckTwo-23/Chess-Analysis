@@ -68,6 +68,30 @@ def test_few_false_claims_on_null_data(null_reports):
         assert mean_claims <= TARGET_MEAN_FALSE_CLAIMS, claims
 
 
+def test_format_views_claim_nothing_the_main_report_does_not(null_reports):
+    """The per-format views sit on the same page as the main report (tabs): a claim found only in one view would be
+    one more chance of a false claim per view. The null world has three formats, so the views are built."""
+    assert any(r.format_reports for r in null_reports)
+    for report in null_reports:
+        main = {c for c, _ in claims_of(report)}
+        for tc, view in report.format_reports.items():
+            assert {c for c, _ in claims_of(view)} <= main, (tc, claims_of(view), main)
+
+
+def test_few_false_claims_per_page_on_null_data(null_reports):
+    """Every distinct claim on the page (the main report and its format views' claims that it does not make)."""
+    pages = []
+    for report in null_reports:
+        main = {c for c, _ in claims_of(report)}
+        view_only = {(tc, c) for tc, view in report.format_reports.items() for c, _ in claims_of(view) if c not in main}
+        pages.append(len(main) + len(view_only))
+    mean_claims = sum(pages) / len(pages)
+    assert mean_claims <= MAX_MEAN_FALSE_CLAIMS, pages
+    assert max(pages) <= MAX_FALSE_CLAIMS_ONE_RUN, pages
+    if RUNS >= 16:
+        assert mean_claims <= TARGET_MEAN_FALSE_CLAIMS, pages
+
+
 @pytest.mark.parametrize("shift", [0.06, -0.06])
 def test_a_rating_that_lags_creates_no_findings(shift):
     # Every game 6 points per 100 above (below) the rating's expectation: an improving (declining) player

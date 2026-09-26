@@ -1,7 +1,18 @@
 """Run every analysis module and assemble the Report.
 
-    games + evals ─ run_modules ─ coach.build_coaching ─ build_report (fill, rank, plan) ─ coach.finish_coaching
-                                                                     └─ the same per format: Report.format_reports
+    games + evals ─ run_modules ─ coach.build_coaching ─ apply_deep_verdicts ─ build_report (fill, rank, plan)
+                                                        ─ coach.finish_coaching
+                   └─ the same per format (Report.format_reports): run_modules ─ apply_deep_verdicts
+                      ─ view_only_observations ─ build_report
+
+Two checks keep the page to the main report's claims:
+
+* ``apply_deep_verdicts``: a repeated-mistake weakness whose move the coaching's deeper Stockfish search clears
+  (``Explanation.verdict`` "close" or "fine") is shown as an observation, in the main report and every view.
+* ``view_only_observations``: a format view tests its findings on that format's games alone, so each view is
+  another set of chances for a false claim (about 0.6 per page with three views, against 0.1-0.2 for the main
+  report alone, on null data). A view's strength or weakness that is not also a claim of the main report is
+  shown as an observation in that view, with a first sentence saying so.
 
 Every step is isolated: a failing module, coaching step or format view logs a warning and the report still builds.
 """
@@ -12,15 +23,17 @@ import importlib
 import inspect
 import logging
 import math
+import re
 import traceback
+from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional, get_args
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, get_args
 
 from .context import AnalysisContext
 from .fill import fill
 from .insights import build_study_plan, headline, practice_actions, rank_insights, summary_lines
-from .models import Coaching, Game, GameEval, Insight, InsightKind, ModuleResult, Report
-from .visuals import FORMAT_ORDER, format_counts, format_text
+from .models import Coaching, Explanation, Game, GameEval, Insight, InsightKind, ModuleResult, Report
+from .visuals import FORMAT_NAMES, FORMAT_ORDER, format_counts, format_text
 
 if TYPE_CHECKING:
     from .coach import CoachConfig
@@ -194,15 +207,30 @@ def game_labels(
     return {g.url: game_label(g, year) for g in games if g.url and g.url in wanted}
 
 
-def _practice(modules: list[ModuleResult], coaching: Optional[Coaching]) -> list[str]:
-    """``insights.practice_actions``, with the coaching when it takes it (its drills become plan actions)."""
+def _accepts(fn: Callable[..., Any], name: str) -> bool:
+    """Whether ``fn`` takes the keyword argument ``name`` (a stand-in with an older signature may not)."""
     try:
-        params = inspect.signature(practice_actions).parameters
+        params = inspect.signature(fn).parameters
     except (TypeError, ValueError):  # a builtin or a mock without a signature
-        params = {}  # type: ignore[assignment]
-    if "coaching" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return practice_actions(modules, coaching=coaching)
-    return practice_actions(modules)
+        return False
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _practice(
+    modules: list[ModuleResult],
+    coaching: Optional[Coaching],
+    time_class: str = "",
+    puzzle_file_formats: Optional[dict[str, int]] = None,
+) -> list[str]:
+    """``insights.practice_actions``, with the coaching when it takes it (its drills become plan actions), and in a
+    format view with how many of the puzzle file's puzzles are from that format."""
+    kwargs: dict[str, Any] = {}
+    if _accepts(practice_actions, "coaching"):
+        kwargs["coaching"] = coaching
+    if time_class and _accepts(practice_actions, "time_class"):
+        kwargs["time_class"] = time_class
+        kwargs["puzzle_file_formats"] = puzzle_file_formats
+    return practice_actions(modules, **kwargs)
 
 
 def build_report(
@@ -215,16 +243,20 @@ def build_report(
     coaching: Optional[Coaching] = None,
     practice_coaching: Optional[Coaching] = None,
     time_class: str = "",
+    puzzle_file_formats: Optional[dict[str, int]] = None,
 ) -> Report:
     """``top_n``: how many strengths and weaknesses the report lists (None: every one that passed the rule).
 
     Every finding first gets its formats and a picture where its module gave none (``fill``). ``coaching`` goes
     on the report; the study plan's practice actions come from ``practice_coaching`` (default: ``coaching``), so a
-    format view can point at drills that live on the main report. ``time_class`` marks a one-format view.
+    format view can point at drills that live on the main report. ``time_class`` marks a one-format view;
+    ``puzzle_file_formats`` (a view only) counts the puzzle file's puzzles per format, as the file holds every
+    format's.
     """
     fill(modules, ctx)
     strengths, weaknesses = rank_insights(modules, top_n=top_n)
-    practice = _practice(modules, practice_coaching if practice_coaching is not None else coaching)
+    practice = _practice(modules, practice_coaching if practice_coaching is not None else coaching,
+                         time_class, puzzle_file_formats)
     plan = build_study_plan(weaknesses, practice=practice)
     games = ctx.games
     return Report(
@@ -276,25 +308,208 @@ def build_coaching(ctx: AnalysisContext, modules: list[ModuleResult], cfg: "Coac
     return coaching
 
 
-def finish_coaching(report: Report, cfg: "CoachConfig") -> None:
-    """``coach.finish_coaching`` (progress, Maia, the LLM coach), isolated: a failure becomes a note."""
+def finish_coaching(report: Report, cfg: "CoachConfig", games: Optional[list[Game]] = None) -> None:
+    """``coach.finish_coaching`` (progress, Maia, the LLM coach), isolated: a failure becomes a note. ``games``: the
+    report's games, which progress needs to tell the games since the previous report from the earlier ones."""
     try:
         from . import coach
 
-        coach.finish_coaching(report, cfg)
+        if games is not None and _accepts(coach.finish_coaching, "games"):
+            coach.finish_coaching(report, cfg, games=games)
+        else:
+            coach.finish_coaching(report, cfg)
     except Exception as exc:  # noqa: BLE001
         note = _coaching_failed(exc, "finishing the coaching")
         if report.coaching is not None:
             report.coaching.notes.append(note)
 
 
-def view_coaching(coaching: Optional[Coaching], time_class: str) -> Optional[Coaching]:
-    """A format view's copy of the coaching: that format's explanations only. Drills, the motif profile and the
-    review schedule stay on the main report (they are practice for every format)."""
+# --------------------------------------------------------------------------- claim checks
+CLAIM_KINDS = ("strength", "weakness")
+DEEP_CLEARED = ("close", "fine")  # Explanation.verdict values that clear the move the finding is about
+
+_KIND_SEGMENT = re.compile(r"\.(strength|weakness|observation)\.")
+
+
+def claim_ids(modules: Iterable[ModuleResult]) -> set[str]:
+    """The ids of every strength and weakness in the sections (the lists at the top show a subset of them)."""
+    return {i.id for m in modules for i in m.insights or [] if i.kind in CLAIM_KINDS}
+
+
+def _kindless(insight_id: str) -> str:
+    """The id without its kind: a finding that is a weakness in one view and an observation in another
+    (mistakes.weakness.x / mistakes.observation.x) is about the same thing."""
+    return _KIND_SEGMENT.sub(".*.", str(insight_id or ""), count=1)
+
+
+def _epd(fen: Any) -> str:
+    return " ".join(str(fen or "").split()[:4])
+
+
+def _san(label: Any) -> str:
+    """"5...e5" / "5.d3" / "d3" -> "e5" / "d3"."""
+    return str(label or "").replace("…", "...").split(".")[-1].strip()
+
+
+def _position_key(ins: Insight) -> Optional[tuple[str, str]]:
+    """(EPD, SAN) of a finding about one move in one position (the mistakes module's evidence), else None."""
+    evidence = ins.evidence or {}
+    fen, move = evidence.get("fen"), evidence.get("move")
+    return (_epd(fen), _san(move)) if fen and move else None
+
+
+def explains(exp: Explanation, ins: Insight) -> bool:
+    """Whether ``exp`` explains the finding ``ins``: its insight id is the finding's (whatever the kind in it) and,
+    for a finding about one move in one position, it is about that position and move (a follow-up move folded into
+    an earlier habit carries the habit's id, but its verdict is about another move)."""
+    if not getattr(exp, "insight_id", None) or _kindless(exp.insight_id) != _kindless(ins.id):
+        return False
+    key = _position_key(ins)
+    return key is None or key == (_epd(exp.epd or exp.fen), _san(exp.played))
+
+
+def _deep_depth(exp: Explanation, coaching: Coaching) -> Optional[int]:
+    """The depth of the deeper search behind ``exp`` (its lines, its source, else the coaching's setting)."""
+    depths = [line.depth for line in (exp.best_line, exp.refutation) if line is not None and line.depth]
+    if depths:
+        return min(depths)
+    for source in exp.sources or []:
+        found = re.search(r"depth (\d+)", str(getattr(source, "name", "")))
+        if found:
+            return int(found.group(1))
+    depth = (coaching.settings or {}).get("depth")
+    return depth if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0 else None
+
+
+def deep_verdict_sentence(exp: Explanation, kind: str, depth: Optional[int]) -> str:
+    """"A deeper Stockfish search (depth 16) rates 5.d3 about as good as 5.d4, so it is not listed as a weakness;
+    ..." (or "makes 5.d3 its own first choice" when the deeper search picks the move played)."""
+    at = f" (depth {depth})" if depth else ""
+    if exp.verdict == "fine" or not exp.best or _san(exp.best) == _san(exp.played):
+        what = f"makes {exp.played} its own first choice"
+    else:
+        what = f"rates {exp.played} about as good as {exp.best}"
+    return (f"A deeper Stockfish search{at} {what}, so it is not listed as a {kind}; the numbers below come from the "
+            "quicker game analysis.")
+
+
+# The mistakes module's words for a habit and for the moves that follow it: not true of a move the deeper search
+# clears.
+_HABIT_SENTENCE = re.compile(
+    r"\s*(You go wrong on about 1 move in \d+ overall, so playing this one move in \d+ of \d+ games is a habit, not "
+    r"bad luck\.|That is a habit, not bad luck\.)"
+)
+_FIX_THE_FIRST = ": fix the first move and the rest goes with it."
+_BETTER_SUFFIX = re.compile(r";\s*[^;]+ is better$")
+
+
+def _observe(ins: Insight, first: str, because: str, **evidence: Any) -> None:
+    """Make ``ins`` an observation: the same card, chart and board, with ``first`` as its detail's first sentence
+    and the reason in its evidence (``observation_because``)."""
+    ins.kind = "observation"
+    ins.detail = f"{first} {ins.detail or ''}".strip()
+    ins.evidence = {**(ins.evidence or {}), "observation_because": because, **evidence}
+
+
+def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching]) -> list[str]:
+    """Findings the coaching's deeper search contradicts become observations; returns their ids.
+
+    A strength or weakness that an explanation explains (``explains``: its insight id, and the same position and
+    move) whose ``verdict`` is "close" or "fine" rests on a verdict of the quicker game analysis that the deeper
+    search does not confirm. It stays in its section as an observation, its detail starting with the deeper
+    check's result in words; for the mistakes module's findings, the "is better" in the title and the habit
+    sentence go, as they would contradict it. A check of the finding's premise, not a new claim: nothing is ever
+    promoted. Run it before ranking, on the main report's modules and on every view's (the same insight ids).
+    """
+    if coaching is None:
+        return []
+    cleared = [e for e in coaching.explanations or []
+               if isinstance(e, Explanation) and getattr(e, "verdict", "error") in DEEP_CLEARED and e.insight_id]
+    changed: list[str] = []
+    for m in modules:
+        for ins in m.insights or []:
+            if ins.kind not in CLAIM_KINDS:
+                continue
+            exp = next((e for e in cleared if explains(e, ins)), None)
+            if exp is None:
+                continue
+            depth = _deep_depth(exp, coaching)
+            kind = ins.kind
+            if _position_key(ins) is not None:
+                ins.title = _BETTER_SUFFIX.sub("", ins.title) or ins.title
+                ins.detail = _HABIT_SENTENCE.sub("", ins.detail or "").replace(_FIX_THE_FIRST, ".")
+                ins.study = [a for a in ins.study or [] if f" beats {exp.played}" not in a]
+            _observe(ins, deep_verdict_sentence(exp, kind, depth), "deep-check",
+                     deep_check={"verdict": exp.verdict, "depth": depth, "best": exp.best, "played": exp.played})
+            changed.append(ins.id)
+    return changed
+
+
+def view_only_sentence(time_class: str) -> str:
+    name = FORMAT_NAMES.get(time_class, time_class or "these").lower()
+    return (f"Seen in your {name} games only, and not strong enough across all your games to call it a finding: "
+            "it may be chance.")
+
+
+def view_only_observations(modules: list[ModuleResult], main_claims: Iterable[str], time_class: str) -> list[str]:
+    """A format view's strengths and weaknesses that are not claims of the main report (by id) become observations
+    in the view; returns their ids.
+
+    Each view tests its findings on its own format's games: with three views that is three more sets of chances
+    for a false claim on the same page. A view keeps a claim only when the main report makes it too, so the page
+    claims nothing the main report doesn't; the rest keep their card, chart, board and title, with a first
+    sentence saying the pattern shows in this format only and may be chance. Run it before the view's ranking and
+    study plan.
+    """
+    main = set(main_claims)
+    changed: list[str] = []
+    for m in modules:
+        for ins in m.insights or []:
+            if ins.kind in CLAIM_KINDS and ins.id not in main:
+                _observe(ins, view_only_sentence(time_class), "view-only", view_only=time_class)
+                changed.append(ins.id)
+    return changed
+
+
+def _safely(what: str, fn: Callable[[], list[str]]) -> list[str]:
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 — a check that fails leaves the findings as they are
+        log.warning("%s failed: %s", what, exc)
+        log.debug("%s", traceback.format_exc())
+        return []
+
+
+def view_coaching(
+    coaching: Optional[Coaching],
+    time_class: str,
+    games: Iterable[Game] = (),
+    modules: Iterable[ModuleResult] = (),
+) -> Optional[Coaching]:
+    """A format view's copy of the coaching: the explanations of that format's positions. Drills, the motif
+    profile and the review schedule stay on the main report (they are practice for every format).
+
+    An explanation belongs to the view when it is of that format (``time_class``), when one of its games
+    (``game_url``, ``games``: URLs, looked up in ``games``) is, or when it explains one of the view's findings
+    (``modules``; ``explains``). A position repeated in several formats has no single time class, but its
+    explanation still belongs in each of their views. The explanations of the view's findings come first (a
+    renderer may show only the first few), with the finding's own id in the view (a view may call the same
+    finding a weakness where the main report calls it an observation)."""
     if coaching is None:
         return None
+    formats = {g.url: g.time_class for g in games if g.url}
+    findings = [i for m in modules for i in m.insights or []]
+    linked: list[Explanation] = []
+    rest: list[Explanation] = []
+    for e in coaching.explanations or []:
+        finding = next((i for i in findings if explains(e, i)), None)
+        if finding is not None:
+            linked.append(e if e.insight_id == finding.id else replace(e, insight_id=finding.id))
+        elif e.time_class == time_class or any(formats.get(u) == time_class for u in [e.game_url, *(e.games or [])]
+                                               if u):
+            rest.append(e)
     return Coaching(
-        explanations=[e for e in coaching.explanations if e.time_class == time_class],
+        explanations=linked + rest,
         notes=list(coaching.notes),
         settings=dict(coaching.settings),
         llm=dict(coaching.llm),
@@ -338,6 +553,20 @@ def view_engine_note(time_class: str, view: AnalysisContext, whole: AnalysisCont
     return f"{first.engine}{depth} on {k} of your {n} {time_class} games (the most recent)."
 
 
+def puzzle_file_formats(ctx: AnalysisContext) -> Optional[dict[str, int]]:
+    """Puzzles per format in the --puzzles file (``options["puzzle_file"]``), which holds every format's costliest
+    mistakes (``mistakes.build_puzzles`` on all the report's games); None without the file or the engine."""
+    if not ctx.opt("puzzle_file", "") or not ctx.evals:
+        return None
+    try:
+        from .analysis.mistakes import build_puzzles
+
+        return format_counts(e.game for e in build_puzzles(ctx.games, ctx.evals))
+    except Exception as exc:  # noqa: BLE001 — the views then point at the file without counts
+        log.warning("counting the puzzle file's formats failed: %s", exc)
+        return None
+
+
 def build_format_views(
     ctx: AnalysisContext,
     modules: Optional[list[tuple[str, str]]] = None,
@@ -346,16 +575,28 @@ def build_format_views(
     engine_note: str = "",
     coaching: Optional[Coaching] = None,
     min_games: int = MIN_FORMAT_GAMES,
+    main_claims: Optional[Iterable[str]] = None,
 ) -> dict[str, Report]:
     """The same analysis on each format's games alone, for every format with at least ``min_games`` games.
 
     Only when the games cover two or more formats (a one-format report is already its own view). Each view is a
-    full Report: its claims are tested on that format's games only (its own false-claim budget), its engine
-    sections use that format's engine-analysed games, and it has no views of its own. Keys in format order.
+    full Report: its findings are tested on that format's games only, its engine sections use that format's
+    engine-analysed games, and it has no views of its own. Keys in format order.
+
+    A view claims nothing the main report doesn't: its findings go through ``apply_deep_verdicts`` (the same
+    deeper-search verdicts as the main report) and ``view_only_observations`` against ``main_claims`` (the ids of
+    the main report's strengths and weaknesses; None: found by running the modules on all the games) before its
+    ranking and study plan.
     """
     counts = format_counts(ctx.games)
     if len(counts) < 2:
         return {}
+    if main_claims is None:
+        whole = run_modules(ctx, modules)
+        apply_deep_verdicts(whole, coaching)
+        main_claims = claim_ids(whole)
+    main_claims = set(main_claims)
+    in_file = puzzle_file_formats(ctx)
     views: dict[str, Report] = {}
     for tc, n in counts.items():
         if n < min_games:
@@ -369,14 +610,18 @@ def build_format_views(
             options=dict(ctx.options),
         )
         try:
+            results = run_modules(sub, modules)
+            _safely("the deeper-search verdicts", lambda: apply_deep_verdicts(results, coaching))
+            _safely("the view-only check", lambda: view_only_observations(results, main_claims, tc))
             views[tc] = build_report(
                 sub,
-                run_modules(sub, modules),
+                results,
                 filters=view_filters(tc, filters),
                 engine_note=view_engine_note(tc, sub, ctx, engine_note),
-                coaching=view_coaching(coaching, tc),
+                coaching=view_coaching(coaching, tc, ctx.games, results),
                 practice_coaching=coaching,
                 time_class=tc,
+                puzzle_file_formats=in_file,
             )
         except Exception as exc:  # noqa: BLE001 — a view is extra; the main report stands without it
             log.warning("the %s view could not be built: %s", tc, exc)
@@ -397,7 +642,8 @@ def run_analysis(
 ) -> Report:
     """Games (already filtered) -> Report.
 
-    ``coach``: run the coaching layer (explanations, drills ...) with these settings; None skips it.
+    ``coach``: run the coaching layer (explanations, drills ...) with these settings; None skips it. Its deeper
+    search's verdicts apply to the findings before ranking (``apply_deep_verdicts``).
     ``options["format_views"]``: False skips the per-format views (default: built whenever two or more formats
     are present, each from ``MIN_FORMAT_GAMES`` games).
     """
@@ -409,11 +655,13 @@ def run_analysis(
     )
     results = run_modules(ctx, modules)
     coaching = build_coaching(ctx, results, coach) if coach is not None else None
+    _safely("the deeper-search verdicts", lambda: apply_deep_verdicts(results, coaching))
     report = build_report(ctx, results, filters=filters, engine_note=engine_note, coaching=coaching)
     if coach is not None:
-        finish_coaching(report, coach)
+        finish_coaching(report, coach, ctx.games)
     if ctx.opt("format_views", True):
         report.format_reports = build_format_views(
-            ctx, modules, filters=filters, engine_note=engine_note, coaching=report.coaching
+            ctx, modules, filters=filters, engine_note=engine_note, coaching=report.coaching,
+            main_claims=claim_ids(results),
         )
     return report

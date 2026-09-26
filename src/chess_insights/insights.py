@@ -412,11 +412,13 @@ def _round_robin(
 class PracticeActions(list):
     """What :func:`practice_actions` returns: the actions for the "your own positions" item (a plain list of
     strings, as before), plus ``drills``: one action per drill pack (coach/drills.py), keyed by Lichess theme in
-    pack order, for the tactics and blunders items of the study plan (:func:`drill_actions_for`)."""
+    pack order, for the tactics and blunders items of the study plan (:func:`drill_actions_for`), and ``target``:
+    the practice item's target when it differs from the default (a format view's share of the puzzle file)."""
 
-    def __init__(self, actions: Iterable[str] = (), drills: Optional[dict[str, str]] = None):
+    def __init__(self, actions: Iterable[str] = (), drills: Optional[dict[str, str]] = None, target: str = ""):
         super().__init__(actions)
         self.drills: dict[str, str] = dict(drills or {})
+        self.target = target
 
 
 # Plan items that get a drill pack, and the packs that fit a finding (by its id) better than any other.
@@ -473,9 +475,20 @@ def drill_actions_for(leads: Sequence[Insight], practice: Sequence[str]) -> dict
     return {lead_id: drills[theme] for lead_id, theme in chosen.items()}
 
 
-def practice_actions(modules: Iterable[ModuleResult], coaching: Any = None) -> PracticeActions:
+def practice_actions(
+    modules: Iterable[ModuleResult],
+    coaching: Any = None,
+    *,
+    time_class: str = "",
+    puzzle_file_formats: Optional[dict[str, int]] = None,
+) -> PracticeActions:
     """Study actions built from facts, not claims: your own mistakes as puzzles (needs the engine), and one
     puzzle-pack action per drill pack of the coaching layer (``coaching.drills``) for the tactics and blunders items.
+
+    In a format view (``time_class``) the puzzle file is still the one file with every format's puzzles, costliest
+    first, so the action says how many of them are from that format (``puzzle_file_formats``: the file's puzzles
+    per format), or says the file holds every format's when that count is unknown; no action when the file has
+    none from that format.
 
     The result is a list (the positions item's actions, as before) with the pack actions in ``.drills``.
     """
@@ -489,12 +502,28 @@ def practice_actions(modules: Iterable[ModuleResult], coaching: Any = None) -> P
     }
     if not n:
         return PracticeActions([], drills)
-    where = f"in {stats['puzzle_file']}" if stats.get("puzzle_file") else "(export them with --puzzles)"
+    file = str(stats.get("puzzle_file") or "")
+    import_it = "Import the file into a Lichess study or any chess program."
+    fmt = str(time_class or "").lower()
+    if fmt and file:
+        if puzzle_file_formats is None:
+            text = (f"Solve 10 of your own puzzles a day from {file}: it holds your costliest mistakes in every "
+                    f"format, not only {fmt} (the All formats view has the count). {import_it}")
+        else:
+            total = sum(v for v in puzzle_file_formats.values() if isinstance(v, int))
+            mine = puzzle_file_formats.get(fmt, 0)
+            if not mine:
+                return PracticeActions([], drills)
+            text = (f"Solve 10 of your own puzzles a day: {mine} of the {total} puzzles in {file} are from your "
+                    f"{fmt} games (positions where your move cost a lot, costliest first). {import_it}")
+            target = f"Solve each of the {mine} {fmt} puzzles in the file once before your next report."
+            return PracticeActions([text], drills, target)
+        return PracticeActions([text], drills)
+    where = f", in {file}" if file else " (export them with --puzzles)"
+    games = f"your {fmt} games" if fmt else "your games"
     return PracticeActions(
-        [
-            f"Solve 10 of your own puzzles a day: {n} positions from your games where your move cost a lot, "
-            f"{where}. Import the file into a Lichess study or any chess program."
-        ],
+        [f"Solve 10 of your own puzzles a day: {n} positions from {games} where your move cost a lot{where}. "
+         f"{import_it}"],
         drills,
     )
 
@@ -537,7 +566,8 @@ def build_study_plan(
                     "direct training there is: the positions come from your openings and your kind of game.",
                     actions=actions,
                     category=kicker,
-                    target="Solve every puzzle in the file once before your next report.",
+                    target=getattr(practice, "target", "")
+                    or "Solve every puzzle in the file once before your next report.",
                 )
             )
             continue

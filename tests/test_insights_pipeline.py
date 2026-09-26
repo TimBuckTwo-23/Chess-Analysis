@@ -356,3 +356,32 @@ def test_hanging_piece_motif_and_hung_material_findings_are_one_topic():
     assert sentence == "Miss no more forks than your opponents: 0.62 per 100 moves (now 1.24)."
     assert baseline == {"metric": "forks missed per 100 moves", "value": 1.24}
     assert target_for(motif)[0].startswith("Allow no more hanging pieces than your opponents")
+
+
+def test_a_format_views_own_puzzles_point_at_its_share_of_the_one_puzzle_file():
+    """The --puzzles file holds every format's puzzles, costliest first: a view says how many are its format's."""
+    stats = {"puzzles_exported": 63, "puzzle_file": "me-puzzles.pgn"}
+    modules = [ModuleResult(key="mistakes", title="Positions", summary="", stats=stats)]
+    counts = {"bullet": 100, "blitz": 63, "rapid": 21}
+    [action] = actions = insights.practice_actions(modules, time_class="blitz", puzzle_file_formats=counts)
+    assert action.startswith("Solve 10 of your own puzzles a day: 63 of the 184 puzzles in me-puzzles.pgn are from "
+                             "your blitz games")
+    assert actions.target == "Solve each of the 63 blitz puzzles in the file once before your next report."
+    [item] = insights.build_study_plan([], practice=actions)
+    assert item.target == actions.target and item.actions == [action]
+    # none of the file's puzzles from this format (the file keeps the costliest 300): nothing to point at
+    assert insights.practice_actions(modules, time_class="daily", puzzle_file_formats=counts) == []
+    # counts unknown: the file is named as every format's
+    [unknown] = insights.practice_actions(modules, time_class="blitz")
+    assert "me-puzzles.pgn: it holds your costliest mistakes in every format, not only blitz" in unknown
+    # no file: the view's own count, and how to export them
+    no_file = [ModuleResult(key="mistakes", title="Positions", summary="", stats={"puzzles_exported": 63})]
+    [export] = insights.practice_actions(no_file, time_class="blitz", puzzle_file_formats=counts)
+    assert export.startswith("Solve 10 of your own puzzles a day: 63 positions from your blitz games where your move "
+                             "cost a lot (export them with --puzzles).")
+    # the main report is unchanged
+    [main] = insights.practice_actions(modules)
+    assert main.startswith("Solve 10 of your own puzzles a day: 63 positions from your games where your move cost a "
+                           "lot, in me-puzzles.pgn.")
+    [item] = insights.build_study_plan([], practice=insights.practice_actions(modules))
+    assert item.target == "Solve every puzzle in the file once before your next report."
