@@ -101,7 +101,7 @@ def test_three_most_missed_motifs_get_packs_of_the_most_popular_puzzles(subset, 
     assert [d.theme for d in motif_packs] == ["fork", "pin", "skewer"]  # most missed; pin before skewer on allowed
     fork = motif_packs[0]
     assert fork.title == "30 fork puzzles" and fork.link == "https://lichess.org/training/fork"
-    assert fork.reason == "you missed 23 forks in 300 games; your opponents 15"
+    assert fork.reason == "you missed 23 forks in 300 games; your opponents 15 (counts from the tactical patterns table, not a tested finding)"
     assert fork.rating_range == RATING and fork.file == "me-drill-fork.pgn"
     # the most popular first, then the most played, then the id: deterministic
     rows = [r for r in fixture_rows(subset) if "fork" in r["Themes"].split() and 1200 <= int(r["Rating"]) <= 1600]
@@ -356,7 +356,7 @@ def test_reasons_count_in_words():
     [(theme, reason)] = drills.pick_themes(ctx, Coaching())
     assert theme == "hangingPiece" and reason == "you left material hanging once in 1 game; your opponents 0"
     profile = Coaching(settings={"motif_profile": {"games": 1, "counts": {"fork": {"you_missed": 1, "opp_missed": 0}}}})
-    assert drills.pick_themes(ctx, profile)[0] == ("fork", "you missed 1 fork in 1 game; your opponents 0")
+    assert drills.pick_themes(ctx, profile)[0] == ("fork", "you missed 1 fork in 1 game; your opponents 0 (counts from the tactical patterns table, not a tested finding)")
 
 
 def test_pack_files_and_links_are_safe(tmp_path):
@@ -556,3 +556,12 @@ def test_a_failed_pack_write_leaves_the_earlier_file_whole(subset, tmp_path, mon
     assert all(d.file == "" for d in coaching.drills)  # not written: no file named
     assert any(n.startswith("The fork drill pack could not be written") for n in coaching.notes)
     assert [p.name for p in tmp_path.iterdir()] == ["me-drill-fork.pgn"]  # no temporary files left behind
+
+
+def test_a_reason_backed_by_a_motif_finding_is_not_marked_untested():
+    coaching = Coaching(settings={"motif_profile": {"games": 300, "findings": ["tactics.weakness.motif-missed.fork"],
+                                                    "counts": {"fork": {"you_missed": 23, "opp_missed": 15},
+                                                               "pin": {"you_missed": 4, "opp_missed": 5}}}})
+    reasons = dict(drills._profile_themes(coaching))
+    assert reasons["fork"] == "you missed 23 forks in 300 games; your opponents 15"
+    assert reasons["pin"].endswith("not a tested finding)")

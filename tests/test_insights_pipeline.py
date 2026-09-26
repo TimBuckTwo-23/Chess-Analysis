@@ -385,3 +385,16 @@ def test_a_format_views_own_puzzles_point_at_its_share_of_the_one_puzzle_file():
                            "lot, in me-puzzles.pgn.")
     [item] = insights.build_study_plan([], practice=insights.practice_actions(modules))
     assert item.target == "Solve every puzzle in the file once before your next report."
+
+
+def test_a_missed_motif_target_is_per_chance():
+    from chess_insights.insights import target_for
+    from chess_insights.models import Insight
+
+    fork = Insight(id="tactics.weakness.motif-missed.fork", kind="weakness", category="tactics", title="t",
+                   detail="", severity=0.5, confidence=0.9,
+                   evidence={"theme": "fork", "motif_kind": "missed", "rate": 0.5, "opp_rate": 0.26,
+                             "per100": 1.2, "opp_per100": 0.6})
+    sentence, baseline = target_for(fork)
+    assert sentence == "Miss no more of the forks your opponents leave you than they miss of yours: 26% (now 50%)."
+    assert baseline == {"metric": "share of the forks left to you that you missed", "value": 0.5}

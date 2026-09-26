@@ -367,6 +367,13 @@ def target_for(ins: Insight) -> tuple[str, dict[str, Any]]:
 
         names = motif_name(str(ev["theme"]), plural=True)
         verb = "Miss" if ev.get("motif_kind") == "missed" else "Allow"
+        if ev.get("motif_kind") == "missed" and _num(ev.get("rate")) is not None and _num(ev.get("opp_rate")) is not None:
+            # a missed pattern is judged per chance: of the ones your opponents' mistakes left you
+            return (
+                f"Miss no more of the {names} your opponents leave you than they miss of yours: "
+                f"{pct(ev['opp_rate'])} (now {pct(ev['rate'])}).",
+                {"metric": f"share of the {names} left to you that you missed", "value": ev["rate"]},
+            )
         return (
             f"{verb} no more {names} than your opponents: {ev.get('opp_per100', 0):.2f} per 100 moves "
             f"(now {ev['per100']:.2f}).",

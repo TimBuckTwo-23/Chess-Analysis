@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, g
 from .context import AnalysisContext
 from .fill import fill
 from .insights import build_study_plan, headline, practice_actions, rank_insights, summary_lines
-from .models import Coaching, Explanation, Game, GameEval, Insight, InsightKind, ModuleResult, Report
+from .models import Coaching, Diagram, Explanation, Game, GameEval, Insight, InsightKind, ModuleResult, Report
 from .visuals import FORMAT_NAMES, FORMAT_ORDER, format_counts, format_text
 
 if TYPE_CHECKING:
@@ -454,6 +454,7 @@ def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching
                 ins.study = [a for a in ins.study or [] if f" beats {exp.played}" not in a]
             _observe(ins, deep_verdict_sentence(exp, kind, depth), "deep-check",
                      deep_check={"verdict": exp.verdict, "depth": depth, "best": exp.best, "played": exp.played})
+            _clear_board(ins.diagram, exp, depth)
             changed.append(ins.id)
             moves.append(str(exp.played))
         if moves:
@@ -461,6 +462,21 @@ def apply_deep_verdicts(modules: list[ModuleResult], coaching: Optional[Coaching
                                + _count_words(len(moves), "it is shown as an observation.",
                                               "they are shown as observations."))
     return changed
+
+
+_GREEN_SENTENCE = re.compile(r"\s*Green:[^.]*\.")
+
+
+def _clear_board(diagram: Optional[Diagram], exp: Explanation, depth: Optional[int]) -> None:
+    """A cleared finding's board loses the quick analysis's green "better move" arrow and says what the deeper
+    check found instead (the board object may also be drawn in its section: it changes there too)."""
+    if diagram is None:
+        return
+    diagram.arrows = [a for a in diagram.arrows or [] if a.kind != "best"]
+    at = f" at depth {depth}" if depth else ""
+    what = ("its own first choice" if exp.verdict == "fine" else "about as good as its first choice")
+    caption = _GREEN_SENTENCE.sub("", diagram.caption or "").strip()
+    diagram.caption = (caption + " " if caption else "") + f"A deeper Stockfish check{at} rates {exp.played} {what}."
 
 
 def view_only_sentence(time_class: str) -> str:

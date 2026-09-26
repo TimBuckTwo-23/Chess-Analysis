@@ -542,3 +542,18 @@ def test_puzzle_file_formats_needs_the_file_and_the_engine(monkeypatch):
     assert pipeline.puzzle_file_formats(AnalysisContext("t", games, {}, {"puzzle_file": "x.pgn"})) is None
     assert pipeline.puzzle_file_formats(AnalysisContext("t", games, evals, {"puzzle_file": "x.pgn"})) == {
         "blitz": 2, "rapid": 1}
+
+
+def test_a_cleared_finding_board_loses_the_quick_checks_green_arrow():
+    from chess_insights import visuals
+
+    finding = habit_finding()
+    finding.diagram = visuals.position_diagram(
+        "Italian Game: 5.d3", ITALIAN_5, played="d3", best="d4",
+        caption="After 1.e4 e5. Red: your move (in 8 of 8 games). Green: engine's choice.")
+    modules = [ModuleResult("mistakes", "Positions", "", insights=[finding], diagrams=[finding.diagram])]
+    pipeline.apply_deep_verdicts(modules, Coaching(explanations=[deep_explanation("fine")]))
+    assert [a.kind for a in finding.diagram.arrows] == ["played"]
+    assert "Green" not in finding.diagram.caption
+    assert finding.diagram.caption.endswith("A deeper Stockfish check at depth 16 rates 5.d3 its own first choice.")
+    assert modules[0].diagrams[0] is finding.diagram  # the section's copy of the board says the same

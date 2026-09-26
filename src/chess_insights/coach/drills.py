@@ -76,13 +76,18 @@ def _profile_themes(coaching: Coaching) -> list[tuple[str, str]]:
         value = (counts.get(theme) or {}).get(key)
         return int(value) if isinstance(value, (int, float)) else 0
 
+    findings = set(profile.get("findings") or [])
     ranked = sorted((t for t in counts if n(t, "you_missed") > 0),
                     key=lambda t: (-n(t, "you_missed"), -n(t, "you_allowed"), t))
-    return [
-        (t, f"you missed {_plural(n(t, 'you_missed'), motif_name(t), motif_name(t, True))} in "
-            f"{_plural(int(games), 'game')}; your opponents {n(t, 'opp_missed')}")
-        for t in ranked
-    ]
+
+    def reason(t: str) -> str:
+        text = (f"you missed {_plural(n(t, 'you_missed'), motif_name(t), motif_name(t, True))} in "
+                f"{_plural(int(games), 'game')}; your opponents {n(t, 'opp_missed')}")
+        if not any(f.endswith(f".{t}") for f in findings):  # counts, not a tested difference: say so
+            text += " (counts from the tactical patterns table, not a tested finding)"
+        return text
+
+    return [(t, reason(t)) for t in ranked]
 
 
 def _explanation_themes(coaching: Coaching, gated: Iterable[str]) -> list[tuple[str, str]]:
