@@ -837,8 +837,9 @@ def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: 
     in ``keys`` only (``puzzles.puzzle_keys``: the ones the export can use and the explained ones; None = all).
 
     Themes come only with a line supplied here, and only the patterns that start within the moves kept, so the
-    PGN's Themes header describes the solution it prints; a key that already has a line (``fill_puzzle_lines``)
-    keeps that line's themes, or none."""
+    PGN's Themes header describes the solution it prints. A key the puzzle pass (``puzzles.fill_puzzle_lines``)
+    has settled, with a line or with a theme list (empty when it found none), is left as it is, and a line that
+    starts with the move played is no puzzle."""
     themes: dict[str, set[str]] = {}
     for ev in events:
         if ev.side == "you" and ev.kind == "missed" and ev.motif.theme in gated and ev.motif.ply < PUZZLE_LINE_PLIES:
@@ -847,13 +848,13 @@ def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: 
         if e.side != "you" or e.best_line is None or not e.best_line.moves_uci:
             continue
         key = f"{e.game_id}:{e.ply}"
-        if (keys is not None and key not in keys) or key in coaching.puzzle_lines:
+        if (keys is not None and key not in keys) or key in coaching.puzzle_lines or key in coaching.puzzle_themes:
+            continue
+        if e.best_line.moves_uci[0] == e.played_uci:  # the engine's move is the one you played: no puzzle
             continue
         coaching.puzzle_lines[key] = _trim(e.best_line)
         if themes.get(key):
             coaching.puzzle_themes[key] = sorted(themes[key])
-        else:
-            coaching.puzzle_themes.pop(key, None)  # themes of another line would not describe this one
 
 
 def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleResult], cfg: CoachConfig) -> None:

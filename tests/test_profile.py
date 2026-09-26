@@ -640,16 +640,20 @@ def test_puzzle_themes_come_only_with_the_line_they_describe():
     """The profile pass adds a Themes entry only for a line it supplies, and only patterns within the moves kept."""
     g = make_game(color="white", game_id="pz")
     long = Line(START, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d4", "e5d4", "e1g1", "f6e4"])
-    errors = [ProfileError("pz", ply, "you", "blitz", START, "a2a3", 20.0, long, None) for ply in (4, 6, 8)]
+    errors = [ProfileError("pz", ply, "you", "blitz", START, "a2a3", 20.0, long, None) for ply in (4, 6, 8, 10, 12)]
     events = [
         profile.MotifEvent(g, errors[0], "missed", Motif("fork", "best", 2, [], "you")),
         profile.MotifEvent(g, errors[1], "missed", Motif("pin", "best", 1, [], "you")),
         profile.MotifEvent(g, errors[2], "missed", Motif("skewer", "best", 9, [], "you")),  # beyond the 8 plies kept
+        profile.MotifEvent(g, errors[3], "missed", Motif("pin", "best", 1, [], "you")),
     ]
+    errors[4].played_uci = "e2e4"  # the line starts with the move played: no puzzle
     coaching = Coaching()
     deeper = Line(START, ["d2d4"])
     coaching.puzzle_lines["pz:6"] = deeper  # the deeper coach line (fill_puzzle_lines) found no pattern on it
+    coaching.puzzle_themes["pz:10"] = []  # the puzzle pass settled this one without a line
     profile._puzzle_lines(coaching, errors, events, frozenset({"fork", "pin", "skewer"}))
     assert coaching.puzzle_lines["pz:6"] is deeper and "pz:6" not in coaching.puzzle_themes  # not the profile's pin
-    assert coaching.puzzle_themes == {"pz:4": ["fork"]}
+    assert coaching.puzzle_themes == {"pz:4": ["fork"], "pz:10": []}
+    assert set(coaching.puzzle_lines) == {"pz:4", "pz:6", "pz:8"}
     assert len(coaching.puzzle_lines["pz:8"].moves_uci) == profile.PUZZLE_LINE_PLIES  # the skewer is not in it
