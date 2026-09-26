@@ -43,6 +43,9 @@ finding also carries a board of the position your games in that opening usually 
 (the longest move sequence most of them share, up to 8 moves) with that main line as a
 strip of small boards. Each choice point ("Your choices at key moves") becomes a board
 with your moves as arrows; :func:`choice_positions` returns them for the coaching layer.
+Stockfish's first choice there is drawn as the better move only when your usual move
+loses an inaccuracy's worth of winning chances (``Thresholds.engine_min_drop``): several
+opening moves are usually about equally good, and a red arrow on a sound move would mislead.
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ from ..visuals import (
     line_strip,
     move_arrow,
     ordered_formats,
+    parse_move,
     position_diagram,
 )
 from ..stats import (
@@ -139,6 +143,10 @@ class Thresholds:
     min_choice_games: int = 10  # games with one move at a choice point to show it
     max_choice_points: int = 4  # rows of the "Your choices at key moves" table (and the study advice)
     max_choice_diagrams: int = 12  # choice points drawn as boards
+    # Stockfish's move is drawn as the better one at a choice point only when your usual move there loses at
+    # least this many win-% points on average (Lichess's inaccuracy): in the opening the engine's first choice
+    # is often only a hair better than several good moves, and a red arrow on a sound move would mislead.
+    engine_min_drop: float = 5.0
     min_eval_games: int = 8  # engine-analysed games in an opening to say where its games are lost
     main_line_plies: int = 16  # an opening's usual position: at most this many plies (8 moves) deep
     strip_frames: int = 6  # small boards in a main-line strip
@@ -358,7 +366,11 @@ def versus_chart(
         if other:
             rows.append([label, other_name, o.n_rated, o.rated_score, o.expected, o.delta])
     rated = [g for g in subject if g.expected_score is not None]
-    full_note = " ".join(x for x in (note, split_note(rated, small, min_games, "rated games")) if x)
+    other_rated = [g for g in other if g.expected_score is not None]
+    parts = [note, f"{subject_name}: {split_note(rated, small, min_games, 'rated games')}" if rated else ""]
+    if other_rated and set(format_counts(other_rated)) != set(format_counts(rated)):
+        parts.append(f"{other_name}: {formats_note(format_counts(other_rated), 'rated games')}.")
+    full_note = " ".join(x for x in parts if x)
     series = [(subject_name, subject_values)] + ([(other_name, other_values)] if other else [])
     return comparison_chart(
         title,
@@ -440,18 +452,28 @@ def _main_line_strip(line: Sequence[str], ucis: Sequence[str], start: int, frame
 
 def family_diagram(grp: OpeningGroup, kind: InsightKind, th: Thresholds) -> Diagram:
     """The position your games in this opening usually reach, with the main line leading there as a strip and
-    the move you (or your opponent) most often played next as a blue arrow."""
+    the move you (or your opponent) most often played next as a blue arrow (when at least a quarter of the
+    games that reached the position went on with it; otherwise the caption says the games part ways there)."""
     line = usual_line(grp.games, th.main_line_plies)
     board, ucis = play_line(line)
     line = line[: len(ucis)]
     reached = [g for g in grp.games if g.moves_san[: len(line)] == line]
-    nxt = Counter(g.moves_san[len(line)] for g in reached if g.plies > len(line))
+    nxt = Counter(
+        g.moves_san[len(line)]
+        for g in reached
+        if g.plies > len(line) and parse_move(board, g.moves_san[len(line)]) is not None
+    )
     colour, where = _colour(grp.color), _family_phrase(grp.label, grp.color)
     caption = f"{len(reached)} of your {grp.n} games {where} as {colour} reached this position"
     next_move = None
     if nxt:
-        next_move, k = min(nxt.items(), key=lambda kv: (-kv[1], kv[0]))
-        caption += f"; the most common next move was {move_label(len(line), next_move)} ({k} game{'s' if k != 1 else ''})"
+        move, k = min(nxt.items(), key=lambda kv: (-kv[1], kv[0]))
+        label, share = move_label(len(line), move), f"{k} of {len(reached)} games"
+        if k >= 0.25 * len(reached):
+            next_move = move
+            caption += f"; the most common next move was {label} ({share})"
+        else:
+            caption += f"; from here your games went many ways (most often {label}, {share})"
     caption += "."
     outcome = "loss" if kind == "weakness" else "win" if kind == "strength" else None
     links = recent_urls(reached, outcome, 1) or recent_urls(reached, None, 1)
@@ -618,7 +640,7 @@ def family_format_chart(families: list[OpeningGroup], th: Thresholds) -> Optiona
         note=note,
         table=Table(
             title="By opening and format",
-            columns=["Opening"] + [c for name, _, _ in columns for c in (f"{name} games", f"{name} vs rating")],
+            columns=["Opening"] + [c for name, _, _ in columns for c in (f"{name} games", f"{name} fair estimate")],
             rows=[
                 [labels[j]] + [x for _, ns, values in columns for x in (ns[i], values[i])]
                 for j, i in enumerate(keep)
@@ -699,15 +721,19 @@ class ChoiceMove:
     formats: dict[str, int] = field(default_factory=dict)
     urls: list[str] = field(default_factory=list)  # most recent first
     game_ids: list[str] = field(default_factory=list)  # most recent first
+    engine_games: int = 0  # games with the move that Stockfish analysed
+    engine_drop: Optional[float] = None  # win-% points the move lost on average in them (Stockfish, your view)
 
 
 @dataclass
 class ChoicePosition:
     """A choice point as a position: where it is, which moves you have played there and how each has scored.
 
-    ``best`` is the engine's preferred move when the analysed games say (``engine_best``), else the move of
-    yours whose fair estimate beats all your other moves' by at least ``Thresholds.min_effect`` (it may be your
-    usual move), else None.
+    ``engine_best`` is Stockfish's first choice in the position (the most common verdict over the analysed
+    games). ``best`` is the move drawn green: the engine's choice when it is your usual move, or when your usual
+    move loses at least ``Thresholds.engine_min_drop`` win-% points on average (``best_by == "engine"``); else
+    the move of yours whose fair estimate beats all your other moves' by at least ``Thresholds.min_effect`` (it
+    may be your usual move; ``best_by == "results"``); else None.
     A comparison of your own results, not a verdict on the moves (nothing here is tested or claimed).
     """
 
@@ -721,6 +747,7 @@ class ChoicePosition:
     formats: dict[str, int] = field(default_factory=dict)  # of the games with one of ``moves``
     engine_best: Optional[str] = None  # SAN
     best: Optional[str] = None  # SAN
+    best_by: str = ""  # "engine" | "results" | "" (no better move known)
     opening_family: str = ""  # the most common opening family among those games
     last_move: str = ""  # UCI of the move that led to the position ("" at the start)
 
@@ -742,6 +769,31 @@ def engine_best(ply: int, games: Sequence[Game], evals: Optional[dict[str, Any]]
         if p is not None and p.best_san:
             counts[p.best_san] += 1
     return min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0] if counts else None
+
+
+def engine_drops(ply: int, games: Sequence[Game], evals: Optional[dict[str, Any]]) -> list[float]:
+    """Win-% points (the mover's view) Stockfish says the move at ply ``ply`` lost, one per analysed game."""
+    out = []
+    for g in games:
+        ev = (evals or {}).get(g.game_id)
+        p = next((p for p in ev.plies if p.ply == ply), None) if ev is not None else None
+        if p is not None:
+            out.append(max(0.0, p.win_before - p.win_after))
+    return out
+
+
+def engine_choice(moves: Sequence[ChoiceMove], best_engine: Optional[str], min_drop: float) -> Optional[str]:
+    """Stockfish's move as the better one: when it is your usual move, or when your usual move loses at least
+    ``min_drop`` win-% points on average in the analysed games. None when the engine has no verdict, or rates
+    your usual move about as good as its own (opening moves are often that close)."""
+    if best_engine is None or not moves:
+        return None
+    usual = moves[0]
+    if best_engine == usual.san:
+        return best_engine
+    if usual.engine_drop is not None and usual.engine_drop >= min_drop:
+        return best_engine
+    return None
 
 
 def best_scoring(moves: Sequence[ChoiceMove], margin: float) -> Optional[str]:
@@ -770,6 +822,7 @@ def choice_position(
         except ValueError:
             m = None
         recent = sorted(o.games, key=lambda g: g.end_time, reverse=True)
+        drops = engine_drops(len(point.prefix), o.games, evals)
         moves.append(
             ChoiceMove(
                 san=san,
@@ -784,11 +837,14 @@ def choice_position(
                 formats=format_counts(o.games),
                 urls=[g.url for g in recent if g.url],
                 game_ids=[g.game_id for g in recent],
+                engine_games=len(drops),
+                engine_drop=sum(drops) / len(drops) if drops else None,
             )
         )
     games = [g for o in point.options for g in o.games]
     best_engine = engine_best(len(point.prefix), games, evals)
-    best = best_engine or best_scoring(moves, th.min_effect)
+    by_engine = engine_choice(moves, best_engine, th.engine_min_drop)
+    best = by_engine or best_scoring(moves, th.min_effect)
     families = Counter(g.opening_family for g in games if g.opening_family)
     return ChoicePosition(
         color=point.color,
@@ -801,6 +857,7 @@ def choice_position(
         formats=format_counts(games),
         engine_best=best_engine,
         best=best,
+        best_by="engine" if by_engine else "results" if best else "",
         opening_family=min(families.items(), key=lambda kv: (-kv[1], kv[0]))[0] if families else "",
         last_move=ucis[-1] if ucis else "",
     )
@@ -812,8 +869,9 @@ def choice_positions(ctx: AnalysisContext, max_points: Optional[int] = None) -> 
     The same points as the "Your choices at key moves" boards: positions from the standard start where you
     have played two or more moves at least ``min_choice_games`` times each, up to move
     ``choice_max_ply // 2``; at most ``max_points`` (default ``Thresholds.max_choice_diagrams``). Each carries
-    its FEN, your moves (SAN, UCI, games, score, rating's prediction, game URLs) and the engine's preferred
-    move when ``ctx.evals`` has the position.
+    its FEN, your moves (SAN, UCI, games, score, rating's prediction, game URLs, and the win-% points Stockfish
+    says each lost when ``ctx.evals`` has the position) and the engine's first choice. Positions reached by
+    different move orders are separate points (compare ``ChoicePosition.epd`` to spot a transposition).
     """
     th = Thresholds.from_ctx(ctx)
     by_colour: dict[Color, list[Game]] = {"white": [], "black": []}
@@ -830,6 +888,33 @@ def _move_result(m: ChoiceMove) -> str:
     return text + (f" ({per100_games(m.delta)} vs your rating)" if m.delta is not None else "")
 
 
+def _chances(drop: float) -> str:
+    """'12 percentage points' / '0.8 percentage points' (of winning chances)."""
+    return f"{drop:.0f} percentage points" if drop >= 9.95 else f"{drop:.1f} percentage points"
+
+
+def _engine_note(pos: ChoicePosition, labels: dict[str, str]) -> str:
+    """What Stockfish says about the position, in words ("" when it analysed none of these games)."""
+    if not pos.engine_best:
+        return ""
+    usual = pos.usual
+    name = labels.get(pos.engine_best) or move_label(pos.ply, pos.engine_best)
+    analysed = f"{usual.engine_games} analysed game{'s' if usual.engine_games != 1 else ''}"
+    if pos.best_by == "engine" and pos.engine_best == usual.san:
+        return f" Your usual {usual.label} is Stockfish's first choice too."
+    if pos.best_by == "engine":
+        return (
+            f" Stockfish prefers {name}: your {usual.label} lost {_chances(usual.engine_drop or 0.0)} of winning "
+            f"chances on average ({analysed})."
+        )
+    if usual.engine_drop is not None:
+        return (
+            f" Stockfish's first choice is {name}, but it rates your {usual.label} almost as good (it lost "
+            f"{_chances(usual.engine_drop)} of winning chances on average, {analysed})."
+        )
+    return f" Stockfish's first choice here is {name}."
+
+
 def choice_diagram(pos: ChoicePosition) -> Diagram:
     """The position with your moves as arrows: your usual move red ("played"), the better move green when one
     is known (your usual move itself when it is the better one), the others grey."""
@@ -839,9 +924,8 @@ def choice_diagram(pos: ChoicePosition) -> Diagram:
     others = [(m.san, "neutral") for m in pos.moves[1:] if m.san != best]
     caption = "; ".join(_move_result(m) for m in pos.moves) + "."
     labels = {m.san: m.label for m in pos.moves}
-    if pos.engine_best:
-        caption += f" Stockfish prefers {labels.get(pos.engine_best) or move_label(pos.ply, pos.engine_best)}."
-    elif best:
+    caption += _engine_note(pos, labels)
+    if best and pos.best_by == "results":
         caption += f" {labels[best]} has scored best for you so far (fair estimate)."
     caption += f" {formats_note(pos.formats)}."
     return position_diagram(
@@ -1420,7 +1504,7 @@ def add_early_loss_visuals(ins: Insight, f: OpeningGroup, rest: Sequence[Game], 
         note=note,
         table=Table(
             title=title,
-            columns=["Games", "Losses", "Quick losses", "Share of losses", "Wins", "Quick wins", "Share of wins"],
+            columns=["Which games", "Losses", "Quick losses", "Share of losses", "Wins", "Quick wins", "Share of wins"],
             rows=rows,
             formats=["text", "int", "int", "pct", "int", "int", "pct"],
             note=note,
@@ -1654,7 +1738,7 @@ def analyze(ctx: AnalysisContext) -> ModuleResult:
     choices = choice_table(
         points,
         mixed_formats_note(list({id(g): g for p in points for o in p.options for g in o.games}.values()))
-        + (" Each position is drawn as a board below, with your moves as arrows." if diagrams else ""),
+        + (" Each position is also drawn as a board in this section, with your moves as arrows." if diagrams else ""),
     )
     if choices:
         tables.insert(0, choices)

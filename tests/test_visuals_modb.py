@@ -341,6 +341,19 @@ def test_usual_position_stops_where_your_games_part_ways():
     ) == ["e4", "e5"]
 
 
+
+def test_the_next_move_arrow_needs_a_quarter_of_your_games():
+    # 30 Caro-Kann games reach 2...d5, then split over five moves (6 games each): no blue arrow, the caption says so
+    scattered = [CARO[:4] + [m, "Nf6"] for m in ("e5", "Nc3", "exd5", "Nd2", "f3")] * 6
+    d = find(analyse(openings, weak_caro_world(scattered)), "openings.weakness.black.caro-kann-defense").diagram
+    assert d.last_move == "d7d5" and d.arrows == []
+    assert "from here your games went many ways (most often 3.Nc3, 6 of 30 games)" in d.caption
+    # a corrupt record's move after the usual position is neither drawn nor named
+    broken = [CARO[:4] + ["Kxz9"]] * 30
+    d = find(analyse(openings, weak_caro_world(broken)), "openings.weakness.black.caro-kann-defense").diagram
+    assert d.arrows == [] and "Kxz9" not in d.caption and d.caption.endswith("reached this position.")
+
+
 # --------------------------------------------------------------------------- choice points
 def choice_world() -> list:
     """After 1.e4 e5 2.Nf3 Nc6 you play 3.Bc4 (the Italian, scoring well) or 3.Bb5 (the Ruy Lopez, badly)."""
@@ -397,19 +410,80 @@ def test_choice_points_become_boards_with_your_moves_as_arrows():
     assert [(a.start, a.end, a.kind) for a in frame.arrows] == [("f1", "b5", "played"), ("f1", "c4", "best")]
 
 
-def test_the_engine_preferred_move_is_the_green_arrow():
-    games = choice_world()
-    evals = {
-        g.game_id: make_game_eval(g.game_id, [make_ply_eval(ply=4, san=g.moves_san[4], best_san="d4")]) for g in games[:40]
+def engine_evals(games, drops: dict, best: str = "d4", only: str = "") -> dict:
+    """Stockfish's verdict before White's 3rd move in the first 40 games (``only``: just the games with that move):
+    its first choice ``best``; each of your moves loses ``drops[move]`` win-% points."""
+    return {
+        g.game_id: make_game_eval(g.game_id, [make_ply_eval(ply=4, san=g.moves_san[4], best_san=best, win_before=55.0,
+                                                            win_after=55.0 - drops[g.moves_san[4]])])
+        for g in games[:40]
+        if not only or g.moves_san[4] == only
     }
-    ctx = AnalysisContext("t", sorted(games, key=lambda g: g.end_time), evals=evals)
+
+
+def test_the_engine_preferred_move_is_the_green_arrow():
+    games = choice_world()  # the first 40 games: 30 with 3.Bc4, 10 with 3.Bb5
+    ctx = AnalysisContext("t", sorted(games, key=lambda g: g.end_time), evals=engine_evals(games, {"Bb5": 8.0, "Bc4": 1.0}))
     pos = openings.choice_positions(ctx)[0]
-    assert pos.engine_best == "d4" and pos.best == "d4"
+    assert pos.engine_best == "d4" and pos.best == "d4" and pos.best_by == "engine"
+    bb5, bc4 = pos.moves
+    assert (bb5.engine_games, bb5.engine_drop, bc4.engine_games, bc4.engine_drop) == (10, 8.0, 30, 1.0)
     d = openings.choice_diagram(pos)
     assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("d2", "d4", "best"),
                                                             ("f1", "c4", "neutral")]
-    assert "Stockfish prefers 3.d4." in d.caption
+    assert ("Stockfish prefers 3.d4: your 3.Bb5 lost 8.0 percentage points of winning chances on average (10 analysed "
+            "games).") in d.caption
 
+
+def test_a_sound_usual_move_is_not_drawn_as_an_engine_mistake():
+    """In the opening Stockfish's first choice is often only a hair better than your move: no red-vs-green verdict
+    then; the green arrow falls back to how your moves have scored."""
+    games = sorted(choice_world(), key=lambda g: g.end_time)
+    pos = openings.choice_positions(AnalysisContext("t", games, evals=engine_evals(games, {"Bb5": 1.5, "Bc4": 1.0})))[0]
+    assert pos.engine_best == "d4" and pos.best == "Bc4" and pos.best_by == "results"
+    d = openings.choice_diagram(pos)
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "played"), ("f1", "c4", "best")]
+    assert ("Stockfish's first choice is 3.d4, but it rates your 3.Bb5 almost as good (it lost 1.5 percentage points "
+            "of winning chances on average, 10 analysed games). 3.Bc4 has scored best for you so far") in d.caption
+    # your usual move not analysed: the engine's choice is mentioned, not drawn
+    pos = openings.choice_positions(
+        AnalysisContext("t", games, evals=engine_evals(games, {"Bb5": 1.5, "Bc4": 1.0}, only="Bc4"))
+    )[0]
+    assert pos.usual.engine_games == 0 and pos.best == "Bc4" and pos.best_by == "results"
+    assert "Stockfish's first choice here is 3.d4." in openings.choice_diagram(pos).caption
+    # Stockfish agrees with your usual move: it is drawn green
+    pos = openings.choice_positions(
+        AnalysisContext("t", games, evals=engine_evals(games, {"Bb5": 0.0, "Bc4": 0.5}, best="Bb5"))
+    )[0]
+    d = openings.choice_diagram(pos)
+    assert pos.best == "Bb5" and pos.best_by == "engine"
+    assert [(a.start, a.end, a.kind) for a in d.arrows] == [("f1", "b5", "best"), ("f1", "c4", "neutral")]
+    assert "Your usual 3.Bb5 is Stockfish's first choice too." in d.caption
+
+
+
+@pytest.mark.engine
+def test_real_stockfish_verdicts_feed_the_choice_boards(stockfish_path):
+    from chess_insights import engine
+
+    games = sorted(choice_world(), key=lambda g: g.end_time)
+    sample = [next(g for g in games if g.moves_san[4] == m) for m in ("Bb5", "Bc4")]  # one game per move is enough
+    cfg = engine.EngineConfig(path=stockfish_path, depth=6, hash_mb=16)
+    eng = engine.open_engine(cfg)
+    try:
+        evals = {g.game_id: engine.analyze_game(g, eng, cfg) for g in sample}
+    finally:
+        eng.close()
+    pos = openings.choice_positions(AnalysisContext("t", games, evals=evals))[0]
+    board = chess.Board(pos.fen)
+    assert pos.engine_best and board.parse_san(pos.engine_best) in board.legal_moves
+    assert [m.engine_games for m in pos.moves] == [1, 1] and all(0.0 <= m.engine_drop <= 100.0 for m in pos.moves)
+    usual = pos.usual
+    engine_verdict = pos.engine_best == usual.san or usual.engine_drop >= openings.Thresholds().engine_min_drop
+    assert (pos.best_by == "engine") == engine_verdict
+    d = openings.choice_diagram(pos)
+    check_diagram(d)
+    assert "Stockfish" in d.caption
 
 def test_when_your_usual_move_scores_best_it_is_green_not_red():
     games = choice_world()
@@ -442,6 +516,39 @@ def test_module_tables_and_charts_say_which_formats_they_mix(opening_world, habi
     assert rows["Monday"]["Rapid vs rating"] == pytest.approx(
         sum(g.score - g.expected_score for g in monday) / len(monday))
     assert "Formats:" in next(t for t in mr.tables if t.title == "Session lengths").note
+
+
+
+def test_labels_say_what_the_numbers_are(opening_world, habit_world):
+    mr = analyse(openings, opening_world)
+    per_format = next(c for c in mr.charts if c.title == "Score vs rating by opening, per format")
+    assert per_format.table.columns[1:3] == ["Bullet games", "Bullet fair estimate"]  # fair estimates, as charted
+    quick = find(mr, "openings.weakness.early-losses.white.italian-game")
+    assert quick.chart.table.columns[0] == "Which games" and quick.chart.table.rows[-1][0] == "Other openings"
+    choices = next(t for t in mr.tables if t.title == "Your choices at key moves")
+    assert "below" not in choices.note  # the renderer decides where the boards go
+    caro = find(mr, "openings.weakness.black.caro-kann-defense")
+    assert "Caro-Kann Defense: Bullet 30 · Blitz 133 · Rapid 55 rated games." in caro.chart.note
+
+    mr = analyse(habits, habit_world, tz="Etc/UTC")
+    for c in mr.charts:  # a phone shows each format's column without opening "All columns"
+        cols = c.table.columns
+        assert [cols[i] for i in c.table.key_columns] == [cols[0], "vs rating", "Bullet vs rating", "Blitz vs rating",
+                                                           "Rapid vs rating"]
+        assert "“Bullet vs rating”, “Blitz vs rating”, “Rapid vs rating”: the same, for that format's games only" in c.table.note
+    streak = find(mr, "habits.observation.losing-streak")
+    assert "a format's streak can be longer than the overall one" in streak.chart.note
+
+
+def test_a_one_format_finding_compared_with_several_formats_says_so():
+    games = tilt_games(45, "blitz", 0, 1)
+    # rapid games that never follow a loss within 15 minutes: they are only in the comparison group
+    games += [game_at(T0 + timedelta(days=300, hours=5 * i), outcome="win" if i % 2 else "loss", time_class="rapid",
+                      time_control="600", base_seconds=600) for i in range(40)]
+    ins = find(analyse(habits, games), "habits.weakness.after-a-loss")
+    assert ins.formats == {"blitz": 60} and ins.chart.labels == ["All games"]
+    assert "After a loss: Blitz only (60 rated games)." in ins.chart.note
+    assert "Other games: Blitz 180 · Rapid 40 rated games." in ins.chart.note
 
 
 def test_one_format_needs_no_format_notes():

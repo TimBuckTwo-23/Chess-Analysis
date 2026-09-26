@@ -253,25 +253,30 @@ def _score_table(
     min_games: int = MIN_FORMAT_GAMES,
 ) -> Table:
     """One row per group. With ``games`` (each row's games) spanning two or more formats, one more "vs rating"
-    column per format (blank below ``min_games`` rated games) and the format mix in the note."""
+    column per format (blank below ``min_games`` rated games), the format mix in the note, and the per-format
+    columns among the ones a phone shows first."""
     columns, formats = [first, *SCORE_COLUMNS], ["text", *SCORE_FORMATS]
     cells = [[label, *_score_cells(s)] for label, s in rows]
+    key_columns = None
     if games is not None:
         every = [g for gs in games for g in gs]
         counts = format_counts(every)
         if len(counts) > 1:
+            added = []
             for tc in counts:
-                columns.append(f"{FORMAT_NAMES.get(tc, tc)} vs rating")
+                added.append(f"{FORMAT_NAMES.get(tc, tc)} vs rating")
                 formats.append("signed_pct")
                 for row, gs in zip(cells, games, strict=True):
                     fs = summarize(in_format(gs, tc))
                     row.append(fs.delta if fs.n_rated >= min_games else None)
-            example = FORMAT_NAMES.get(next(iter(counts)), next(iter(counts)))
+            key_columns = [0, columns.index("vs rating")] + list(range(len(columns), len(columns) + len(added)))
+            columns += added
+            names = ", ".join(f"“{c}”" for c in added)
             note += (
-                f" Formats: {formats_note(counts)}. “{example} vs rating” and the like: the same for that format's "
-                f"games only (blank: fewer than {min_games} rated games)."
+                f" Formats: {formats_note(counts)}. {names}: the same, for that format's games only (blank: fewer "
+                f"than {min_games} rated games)."
             )
-    return Table(title=title, columns=columns, rows=cells, formats=formats, note=note)
+    return Table(title=title, columns=columns, rows=cells, formats=formats, note=note, key_columns=key_columns)
 
 
 def _delta_chart(
@@ -806,7 +811,8 @@ def add_streak_visuals(ins: Insight, timeline: Sequence[TimelineGame]) -> None:
     note = " ".join(
         x
         for x in (
-            "Consecutive losses. Per format: counting only that format's games, in the order you played them.",
+            "Consecutive losses. Per format: counting only that format's games, in the order you played them "
+            "(games in other formats in between are skipped, so a format's streak can be longer than the overall one).",
             split_note(games, small),
         )
         if x
