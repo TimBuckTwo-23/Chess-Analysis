@@ -14,7 +14,7 @@ import logging
 import math
 import traceback
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Iterable, Optional, get_args
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional, get_args
 
 from .context import AnalysisContext
 from .fill import fill
@@ -136,15 +136,59 @@ def game_label(g: Game, year: Optional[int] = None) -> str:
     return " · ".join(p for p in (result, _time_control_text(g), opponent, day) if p)
 
 
-def game_labels(games: list[Game], modules: list[ModuleResult], extra: Iterable[str] = ()) -> dict[str, str]:
-    """Labels for every game a finding, a diagram or the study plan links to."""
-    wanted = set(extra)
+def _diagram_links(d: Any) -> Iterator[Any]:
+    """The game a board links to, and any links its strips or their frames carry."""
+    if d is None:
+        return
+    yield getattr(d, "link", None)
+    for strip in getattr(d, "strips", None) or []:
+        yield getattr(strip, "link", None)
+        for frame in getattr(strip, "frames", None) or []:
+            yield getattr(frame, "link", None)
+
+
+def _table_cells(table: Any) -> Iterator[Any]:
+    for row in getattr(table, "rows", None) or []:
+        if isinstance(row, (list, tuple)):
+            yield from row
+
+
+def linked_games(
+    modules: Iterable[ModuleResult], coaching: Optional[Coaching] = None, extra: Iterable[str] = ()
+) -> set[str]:
+    """Every link the report shows that could be a game: findings (their games and board), each section's boards
+    and tables, the coaching's explanations (their game, the games they repeat in, their board), endgame boards and
+    tables, and ``extra`` (the study plan's games). Other links are harmless: only games get a label."""
+    wanted: list[Any] = list(extra)
     for m in modules:
         for ins in m.insights or []:
-            wanted.update(ins.example_games or [])
+            wanted += ins.example_games or []
+            wanted += _diagram_links(getattr(ins, "diagram", None))
+            wanted += _table_cells(getattr(getattr(ins, "chart", None), "table", None))
         for d in getattr(m, "diagrams", None) or []:
-            if d.link:
-                wanted.add(d.link)
+            wanted += _diagram_links(d)
+        for table in [*(m.tables or []), *(getattr(c, "table", None) for c in m.charts or [])]:
+            wanted += _table_cells(table)
+    if coaching is not None:
+        for e in getattr(coaching, "explanations", None) or []:
+            wanted += [getattr(e, "game_url", None), *(getattr(e, "games", None) or [])]
+            wanted += _diagram_links(getattr(e, "diagram", None))
+        for d in getattr(coaching, "endgame_diagrams", None) or []:
+            wanted += _diagram_links(d)
+        for name in ("endgames", "theory_exit", "motif_profile"):
+            wanted += _table_cells(getattr(coaching, name, None))
+    return {u for u in wanted if isinstance(u, str) and u}
+
+
+def game_labels(
+    games: list[Game],
+    modules: list[ModuleResult],
+    extra: Iterable[str] = (),
+    *,
+    coaching: Optional[Coaching] = None,
+) -> dict[str, str]:
+    """Labels for every game the report links to (``linked_games``): "Loss · 5+0 · vs 1512 · 12 Aug"."""
+    wanted = linked_games(modules, coaching, extra)
     year = max((g.end_time.year for g in games), default=None)
     return {g.url: game_label(g, year) for g in games if g.url and g.url in wanted}
 
@@ -196,7 +240,7 @@ def build_report(
         engine_note=engine_note,
         headline=headline(strengths, weaknesses, plan),
         summary_lines=summary_lines(modules, plan, strengths, weaknesses),
-        game_labels=game_labels(games, modules, (u for item in plan for u in item.games)),
+        game_labels=game_labels(games, modules, (u for item in plan for u in item.games), coaching=coaching),
         demo=bool(ctx.opt("demo", False)),
         time_class=time_class,
         formats=format_counts(games),

@@ -1487,6 +1487,8 @@ _MOVES_RE = re.compile(r"^\d+\.(\.\.)?\s*(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8]|O-O
 # While a view renders: position (EPD) -> the id of its explanation in the coaching section, so a table row
 # that opens a position on the Lichess board (the costliest puzzles) can also link to "why".
 WHY_BY_EPD: ContextVar[dict[str, str]] = ContextVar("WHY_BY_EPD", default={})
+# While a view renders: game URL -> its label ("Loss · 5+0 · vs 1512 · 12 Aug"), the link text of a game in a table.
+GAME_LABELS: ContextVar[dict[str, str]] = ContextVar("GAME_LABELS", default={})
 
 
 def _cell_html(value: Any, fmt: Optional[str]) -> tuple[str, str]:
@@ -1496,7 +1498,8 @@ def _cell_html(value: Any, fmt: Optional[str]) -> tuple[str, str]:
         if url:
             why = WHY_BY_EPD.get().get(boards.epd(boards.fen_from_analysis_url(url))) if WHY_BY_EPD.get() else None
             extra = f' <a class="why-link" href="#{_esc(why)}">why</a>' if why else ""
-            return _link(url, url_link_text(url)) + extra, "nowrap" if why else ""
+            text = text_or_empty(GAME_LABELS.get().get(url)) or url_link_text(url)
+            return _link(url, text) + extra, "nowrap" if why else ""
         return _esc(value), ""
     text = format_value(value, fmt)
     if isinstance(value, str) and (_ECO_RE.match(text) or _MOVES_RE.match(text)):
@@ -2168,8 +2171,8 @@ def _position_html(
     board = _diagram_board(d, id_prefix)
     links = []
     game = safe_url(d.link)
-    if game:
-        links.append(_link(game, "Open the game"))
+    if game:  # "Loss · 5+0 · vs 1512 · 12 Aug" when the report knows the game
+        links.append(_link(game, text_or_empty(page.labels.get(game)) or "Open the game"))
     analysis = lichess_analysis_url(d.fen)
     if analysis:
         links.append(_link(analysis, "Analyse on Lichess"))
@@ -2202,6 +2205,82 @@ def _diagram_html(d: Diagram, id_prefix: str = "b-", page: Optional[PageIndex] =
     return _position_html(d, id_prefix, page, "module")
 
 
+# A section's boards that draw the rows of one of its tables get a titled group of their own:
+# (board titles, the group's heading, the table's title, a line under the heading).
+BOARD_GROUPS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
+    (re.compile(r"^Puzzle \d+:"), "Your costliest mistakes as puzzles", "Your costliest mistakes (puzzles)",
+     "The puzzles table's positions, costliest first. Red is your move, green the better one: to solve a puzzle "
+     "yourself, open it from the table before you look here."),
+    (re.compile(r"^Your choice\b"), "Your choices at key moves", "Your choices at key moves",
+     "The table's positions as boards: your usual move red, the better move green, your other moves grey."),
+)
+OTHER_BOARDS = "More positions"  # heading of a section's other boards when findings come before them
+
+
+@dataclass
+class BoardGroup:
+    heading: str  # "" for the section's other boards (no heading of their own)
+    table: str  # title of the table whose rows the boards draw ("" none)
+    note: str
+    diagrams: list[Diagram] = field(default_factory=list)
+
+
+def _arrow_keys(d: Diagram) -> tuple[tuple[str, str, str], ...]:
+    return tuple(sorted((text_or_empty(a.start), text_or_empty(a.end), text_or_empty(a.kind))
+                        for a in d.arrows or [] if isinstance(a, Arrow)))
+
+
+def same_board(a: Diagram, b: Diagram) -> bool:
+    """The same object, or the same position (EPD) with the same arrows: one picture."""
+    if a is b:
+        return True
+    key = boards.epd(a.fen)
+    return bool(key) and key == boards.epd(b.fen) and _arrow_keys(a) == _arrow_keys(b)
+
+
+def module_board_groups(module: ModuleResult) -> list[BoardGroup]:
+    """The section's boards that none of its findings shows already (a finding's card carries its own board),
+    grouped: the section's other boards first, then one group per table they draw (``BOARD_GROUPS``).
+
+    A board in a table's group (the numbered puzzles) stays even when a finding shows the same position: it is
+    that table row's picture, and the numbers must match the table. Only the finding's own board object is left
+    out there."""
+    shown = [i.diagram for i in module.insights or [] if isinstance(getattr(i, "diagram", None), Diagram)]
+    rest = BoardGroup("", "", "")
+    groups = [BoardGroup(heading, table, note) for _, heading, table, note in BOARD_GROUPS]
+    for d in getattr(module, "diagrams", None) or []:
+        if not isinstance(d, Diagram) or any(d is s for s in shown):
+            continue
+        title = text_or_empty(d.title)
+        k = next((k for k, (pattern, *_) in enumerate(BOARD_GROUPS) if pattern.match(title)), None)
+        if k is None and any(same_board(d, s) for s in shown):
+            continue
+        (rest if k is None else groups[k]).diagrams.append(d)
+    return [g for g in [rest, *groups] if g.diagrams]
+
+
+def _board_groups_html(module: ModuleResult, anchor: str, page: PageIndex) -> str:
+    """The section's boards, outside the fold (a picture for every position); the boards of a table under a
+    heading of their own."""
+    out, i = [], 0
+    for group in module_board_groups(module):
+        figs = []
+        for d in group.diagrams:
+            i += 1
+            figs.append(_position_html(d, f"{anchor}-b{i}-", page, "module"))
+        grid = f'<div class="boards">{"".join(figs)}</div>'
+        heading = group.heading or (OTHER_BOARDS if module.insights else "")  # not taken for a finding's board
+        if not heading:
+            out.append(grid)
+            continue
+        out.append(
+            f'<div class="board-group"><h3 class="sub-head">{_esc(heading)} <span class="count">{len(figs)}</span></h3>'
+            + (f'<p class="board-group-note">{_esc(group.note)}</p>' if group.note else "")
+            + grid + "</div>"
+        )
+    return "".join(out)
+
+
 def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = None) -> str:
     """Summary, key numbers and findings stay open; charts and tables fold away under one toggle (a phone
     would otherwise scroll through every number before reaching the next section)."""
@@ -2222,16 +2301,7 @@ def _module_html(module: ModuleResult, anchor: str, page: Optional[PageIndex] = 
             + "".join(_insight_html(i, compact=True, show_study=True, page=page) for i in ranked)
             + "</div></div>"
         )
-    if getattr(module, "diagrams", None):
-        parts.append(
-            '<div class="boards">'
-            + "".join(
-                _position_html(d, f"{anchor}-b{i}-", page, "module")
-                for i, d in enumerate(module.diagrams, 1)
-                if isinstance(d, Diagram)
-            )
-            + "</div>"
-        )
+    parts.append(_board_groups_html(module, anchor, page))
     blocks = []
     if module.charts:
         blocks.append('<div class="charts">' + "".join(_chart_html(c) for c in module.charts) + "</div>")
@@ -2579,17 +2649,43 @@ def _section_open(page: PageIndex, key: str, title: str, summary: str) -> str:
     )
 
 
+_AI_NOTE = re.compile(r"^AI coach\b")  # the AI coach's own line in Coaching.notes (llm.annotate adds it)
+_AI_COUNTS_NOTE = re.compile(r"^AI coach \(")  # the line with its counts: "AI coach (model): 3 of the 5 ..."
+
+
+def llm_counts_text(llm: Any) -> str:
+    """``Coaching.llm``'s counts in words: "AI coach (model): 3 of the 5 explanations it was given reworded; 2
+    failed the fact check and keep the built-in text". Never its rejected texts: they failed the check, so they
+    are not shown anywhere in the report (the JSON keeps them, to check the checker)."""
+    if not isinstance(llm, dict) or not llm:
+        return ""
+    model = text_or_empty(llm.get("model"))
+    accepted, sent, rejected = (to_number(llm.get(k)) for k in ("accepted", "sent", "rejected"))
+    head = f"AI coach{f' ({model})' if model else ''}"
+    bits = []
+    if accepted is not None:
+        if sent is not None:
+            bits.append(f"{int(accepted)} of the {int(sent)} explanation{'s' if int(sent) != 1 else ''} it was given "
+                        "reworded")
+        else:
+            bits.append(f"{int(accepted)} explanation{'s' if int(accepted) != 1 else ''} reworded")
+    if rejected:
+        bits.append(f"{int(rejected)} failed the fact check and keep{'s' if int(rejected) == 1 else ''} the built-in text")
+    return f"{head}: {'; '.join(bits)}." if bits else ""
+
+
+def coach_notes(coaching: Any) -> list[str]:
+    """The coaching's notes, the AI coach's line once: its own note when it left one, else its counts."""
+    notes = [text_or_empty(n) for n in getattr(coaching, "notes", None) or [] if text_or_empty(n)]
+    if not any(_AI_NOTE.match(n) for n in notes):
+        counts = llm_counts_text(getattr(coaching, "llm", None))
+        if counts:
+            notes.append(counts)
+    return notes
+
+
 def _notes_html(notes: Iterable[Any], llm: Any = None) -> str:
-    items = [text_or_empty(n) for n in notes or [] if text_or_empty(n)]
-    if isinstance(llm, dict) and llm:
-        accepted, rejected = to_number(llm.get("accepted")), to_number(llm.get("rejected"))
-        model = text_or_empty(llm.get("model"))
-        bits = [f"AI coach{f' ({model})' if model else ''}"]
-        if accepted is not None:
-            bits.append(f"{int(accepted)} explanations reworded")
-        if rejected is not None:
-            bits.append(f"{int(rejected)} kept as templates (the checker rejected the rewrite)")
-        items.append(": ".join([bits[0], ", ".join(bits[1:])]) if len(bits) > 1 else bits[0])
+    items = coach_notes(Coaching(notes=list(notes or []), llm=llm if isinstance(llm, dict) else {}))
     if not items:
         return ""
     return ('<div class="coach-notes"><p class="mini-label">Notes</p><ul>'
@@ -2908,7 +3004,7 @@ def _view_html(report: Report, prefix: str = "", *, coaching: Any = None, head: 
     anchors = [prefix + a for a in module_anchors(modules)]
     page = page_index(report, anchors, prefix, coaching)
     at = _coaching_at(modules)
-    token = WHY_BY_EPD.set(page.why_by_epd)
+    token, labels_token = WHY_BY_EPD.set(page.why_by_epd), GAME_LABELS.set(page.labels)
     try:
         top = [_glance_html(report, page), _study_html(report.study_plan or [], page, page.username)]
         before = [_module_html(m, a, page) for m, a in zip(modules[:at], anchors[:at])]
@@ -2916,6 +3012,7 @@ def _view_html(report: Report, prefix: str = "", *, coaching: Any = None, head: 
         practice = _practice_section_html(coaching, page)
         after = [_module_html(m, a, page) for m, a in zip(modules[at:], anchors[at:])]
     finally:
+        GAME_LABELS.reset(labels_token)
         WHY_BY_EPD.reset(token)
     extra = []
     if why:
@@ -2978,7 +3075,7 @@ def view_coaching(sub: Report, main: Report, tc: str) -> Optional[Coaching]:
         if not exps:
             return None
         base = Coaching()
-    notes = [n for n in base.notes or [] if text_or_empty(n)]
+    notes = [n for n in base.notes or [] if text_or_empty(n) and not _AI_COUNTS_NOTE.match(text_or_empty(n))]
     if len(exps) > WHY_OPEN:
         rest = len(exps) - WHY_OPEN
         notes.append(f"{rest} more explanation{'s' if rest != 1 else ''} of {format_name(tc).lower()} positions "
@@ -3232,7 +3329,10 @@ details.study summary,.chart-data summary{cursor:pointer;font-size:13px;color:va
 details.study{display:block}
 details.study[open] summary{margin-bottom:8px}
 .study .checklist{font-size:15px}
-.findings{display:flex;flex-direction:column;gap:12px}
+.findings,.board-group{display:flex;flex-direction:column;gap:12px}
+.board-group-note{color:var(--ink-2);font-size:14px;max-width:72ch}
+.board-group .sub-head{display:block}
+.board-group .sub-head .count{margin-left:4px;white-space:nowrap}
 .sub-head{display:flex;align-items:baseline;gap:8px;font:600 18px/1.3 var(--font-cond)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,150px),1fr));gap:10px}
 .kpi{display:flex;flex-direction:column;gap:4px;min-width:0;padding:12px 14px;background:var(--surface);border:1px solid var(--hairline);border-radius:8px}

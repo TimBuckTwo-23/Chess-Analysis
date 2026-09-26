@@ -55,6 +55,9 @@ from .html import (
     METHOD_NOTES,
     MISSING,
     NO_GAME_LINKS,
+    GAME_LABELS,
+    coach_notes,
+    module_board_groups,
     game_link_text,
     headline_lines,
     is_game_url,
@@ -170,7 +173,8 @@ def _games_line(urls: Iterable[Any], label: str, labels: Optional[dict[str, str]
 def _cell(value: Any, fmt: Optional[str]) -> str:
     if not is_missing(value) and (fmt == "url" or (fmt not in VALUE_FORMATS and infer_format(value) == "url")):
         safe = safe_url(value)
-        return md_link(safe, url_link_text(safe) + " ↗") if safe else md_text(value)
+        text = text_or_empty(GAME_LABELS.get().get(safe)) if safe else ""
+        return md_link(safe, (text or url_link_text(safe)) + " ↗") if safe else md_text(value)
     return md_text(format_value(value, fmt)) or MISSING
 
 
@@ -392,18 +396,33 @@ def _module(
         lines += [_kpi_line(k) for k in module.kpis] + [""]
     for chart in module.charts or []:
         lines += _chart(chart)
-    diagrams = [d for d in getattr(module, "diagrams", None) or [] if isinstance(d, Diagram)]
-    for d in diagrams:
-        n = (why_by_epd or {}).get(boards.epd(d.fen))
-        lines += _position_lines(d, labels, why=f"why: explanation {n} below" if n else "")
-    if diagrams:
-        lines.append("")
+
+    def board_lines(diagrams: Sequence[Diagram]) -> list[str]:
+        out: list[str] = []
+        for d in diagrams:
+            n = (why_by_epd or {}).get(boards.epd(d.fen))
+            out += _position_lines(d, labels, why=f"why: explanation {n} below" if n else "")
+        return out + [""] if out else out
+
+    # the boards no finding shows already; a table's boards (the costliest puzzles, your choices) follow it
+    groups = module_board_groups(module)
+    tables = [text_or_empty(t.title) for t in module.tables or []]
+    placed: set[int] = set()
+    for g in groups:
+        if not g.heading:
+            lines += board_lines(g.diagrams)
+        elif g.table not in tables:
+            lines += [f"#### {md_text(g.heading)}", ""] + board_lines(g.diagrams)
     for table in module.tables or []:
         if text_or_empty(table.title):
             lines += [f"#### {md_text(table.title)}", ""]
         lines += md_table(table) + [""]
         if text_or_empty(table.note):
             lines += [f"_{md_text(table.note)}_", ""]
+        for g in groups:
+            if g.heading and g.table == text_or_empty(table.title) and id(g) not in placed:
+                placed.add(id(g))  # once, even when two tables share the title
+                lines += [f"_{md_text(g.heading)}:_", ""] + board_lines(g.diagrams)
     if module.insights:
         lines += ["### Findings", ""]
         ranked = sorted(module.insights, key=lambda i: -(i.priority if i.priority == i.priority else 0.0))
@@ -435,12 +454,19 @@ def _formats_line(label: str, formats: Any) -> str:
 
 def _body(report: Report, coaching: Any) -> list[str]:
     """Headline, glance lists, study plan, sections and coaching of one report (the main one or one format's)."""
+    labels = dict(getattr(report, "game_labels", None) or {})
+    token = GAME_LABELS.set(labels)  # a game in a table is linked by its label too
+    try:
+        return _body_lines(report, coaching, labels)
+    finally:
+        GAME_LABELS.reset(token)
+
+
+def _body_lines(report: Report, coaching: Any, labels: dict[str, str]) -> list[str]:
     lines: list[str] = []
     for line in headline_lines(report):
         lines += [f"> {md_text(line)}", ">"]
     lines[-1] = ""
-
-    labels = dict(getattr(report, "game_labels", None) or {})
     plan = plan_numbers(report)
     sections: dict[str, str] = {}
     for module in report.modules or []:
@@ -678,13 +704,19 @@ def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = ""
             why += _chart(coaching.motif_chart)
         if isinstance(coaching.motif_profile, Table) and coaching.motif_profile is not getattr(coaching.motif_chart, "table", None):
             why += md_table(coaching.motif_profile) + [""]
-    for table, heading in ((coaching.theory_exit, "Where you leave opening theory"),
-                           (coaching.endgames, "Endgames checked with the tablebase")):
+    endgame_boards = [d for d in getattr(coaching, "endgame_diagrams", None) or [] if isinstance(d, Diagram)]
+    for table, heading, extra in ((coaching.theory_exit, "Where you leave opening theory", []),
+                                  (coaching.endgames, "Endgames checked with the tablebase", endgame_boards)):
+        body: list[str] = []
         if isinstance(table, Table):
-            why += [f"### {heading}", ""] + md_table(table) + [""]
+            body += md_table(table) + [""]
             if text_or_empty(table.note):
-                why += [f"_{md_text(table.note)}_", ""]
-    notes = [text_or_empty(n) for n in coaching.notes or [] if text_or_empty(n)]
+                body += [f"_{md_text(table.note)}_", ""]
+        for d in extra:  # the tablebase slips as boards, as in the HTML
+            body += _position_lines(d, labels)
+        if body:
+            why += [f"### {heading}", ""] + body + ([""] if body[-1] else [])
+    notes = coach_notes(coaching)  # the AI coach's line once; never the texts its fact check rejected
     if why or notes:
         lines += ["---", "", "## Why these moves go wrong", ""]
         if exps:

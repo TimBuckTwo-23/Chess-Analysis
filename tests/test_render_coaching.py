@@ -133,7 +133,9 @@ def test_glance_names_the_formats_of_a_partial_finding(page):
 def test_module_boards_have_arrows_strips_and_why_links(page):
     main = _view(page, "all")
     section = re.search(r'<section class="section module" id="mistakes".*?</section>', main, re.S).group(0)
-    assert section.count('<figure class="board-fig">') == 2
+    # the Sicilian board is the finding's own (same position and arrows): drawn once, in the finding's card
+    assert section.count('<figure class="board-fig">') == 1
+    assert section.count('<figure class="board-fig board-fig--card">') == 1
     assert 'class="a a-threat"' in section and 'class="rg rg-target"' in section
     assert '<div class="pos pos--lines">' in section and section.count('class="cb cb--mini"') == 4
     assert ">What 4.e4 allows<" in section and ">4...Qxd4<" in section

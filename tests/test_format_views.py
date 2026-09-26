@@ -256,3 +256,63 @@ def test_view_engine_note_wording():
     assert pipeline.view_engine_note("daily", daily, whole, "SF.") == (
         "None of your daily games were in the engine sample (SF). A balanced sample takes daily games only when "
         "asked to (--engine-time-class).")
+
+
+def test_every_game_link_gets_a_label_in_the_report_and_its_views(monkeypatch):
+    """Findings' games and boards, section boards (and their strips) and tables, and the coaching's explanations
+    (their game, the games they repeat in, their board) and endgame boards: every linked game gets its label, in
+    the main report and in the view of its format."""
+    from chess_insights.models import Diagram, Frame, Strip, Table
+
+    games = multi_format_games(n_bullet=0)
+    blitz = [g for g in games if g.time_class == "blitz"]
+    rapid = [g for g in games if g.time_class == "rapid"]
+    url = {name: g.url for name, g in zip(
+        ["example", "ins_board", "module_board", "table", "exp_game", "exp_board", "endgame"], blitz)}
+    url |= {"exp_repeat": rapid[0].url, "rapid_game": rapid[1].url}
+    unlinked = blitz[-1].url
+
+    def module(ctx):
+        ids = {g.url for g in ctx.games}
+        keep = lambda u: u if u in ids else ""  # noqa: E731 - a view's module only links its own games
+        board = Diagram("Your move", "8/8/8/8/8/8/8/8 w - - 0 1", link=keep(url["ins_board"]),
+                        strips=[Strip("Next", [Frame("8/8/8/8/8/8/8/8 w - - 0 1")])])
+        finding = Insight("fake.observation.x", "observation", "results", "A finding", "", 0.1, 0.5,
+                          example_games=[u for u in [keep(url["example"])] if u], diagram=board)
+        return ModuleResult(
+            key="fake_views", title="Fake", summary="", insights=[finding],
+            diagrams=[Diagram("A board", "8/8/8/8/8/8/8/8 w - - 0 1", link=keep(url["module_board"]))],
+            tables=[Table("Games", ["Game", "n"], [[keep(url["table"]), 1], ["not a link", 2]], ["url", "int"])],
+        )
+
+    def build(ctx, modules, cfg):
+        exp_blitz = explanation("blitz")
+        exp_blitz.game_url = url["exp_game"]
+        exp_blitz.diagram = Diagram("", "8/8/8/8/8/8/8/8 w - - 0 1", link=url["exp_board"])
+        exp_rapid = explanation("rapid")
+        exp_rapid.game_url, exp_rapid.games = url["rapid_game"], [url["exp_repeat"]]
+        return Coaching(explanations=[exp_blitz, exp_rapid],
+                        endgame_diagrams=[Diagram("Rook ending", "8/8/8/8/8/8/8/8 w - - 0 1", link=url["endgame"])])
+
+    monkeypatch.setattr(coach, "build_coaching", build)
+    monkeypatch.setattr(coach, "finish_coaching", lambda report, cfg: report)
+    report = pipeline.run_analysis(games, "t", modules=capture(monkeypatch, [], result=module), coach=CoachConfig())
+    assert set(report.game_labels) == set(url.values())
+    assert unlinked not in report.game_labels
+    assert all(label.split(" · ")[0] in ("Win", "Loss", "Draw") for label in report.game_labels.values())
+    blitz_view, rapid_view = report.format_reports["blitz"], report.format_reports["rapid"]
+    assert set(blitz_view.game_labels) == {url[k] for k in ("example", "ins_board", "module_board", "table",
+                                                             "exp_game", "exp_board")}
+    assert set(rapid_view.game_labels) == {url["exp_repeat"], url["rapid_game"]}  # its explanation's games
+
+
+def test_linked_games_reads_links_on_strips_and_frames_when_they_carry_one():
+    from types import SimpleNamespace
+
+    from chess_insights.models import Diagram
+
+    frame = SimpleNamespace(link="https://www.chess.com/game/live/7")
+    strip = SimpleNamespace(link="https://www.chess.com/game/live/8", frames=[frame])
+    board = Diagram("x", "8/8/8/8/8/8/8/8 w - - 0 1", strips=[strip])  # type: ignore[list-item]
+    found = pipeline.linked_games([ModuleResult("m", "M", "", diagrams=[board])])
+    assert found == {"https://www.chess.com/game/live/7", "https://www.chess.com/game/live/8"}
