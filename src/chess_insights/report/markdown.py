@@ -32,8 +32,16 @@ from ..models import (
 )
 from . import boards
 from .html import (
-    EXPLANATION_KINDS,
+    CLEARED_WORDS,
+    DEEP_CLEARED,
+    ENGINE_KEYS,
+    OBSERVATION_LABEL,
+    explanation_verdict,
     WHY_OPEN,
+    arrow_words,
+    best_line_label,
+    explanation_kicker,
+    explanation_meta,
     clean_formats,
     format_chip_text,
     format_text,
@@ -221,12 +229,14 @@ def chart_text(chart: Chart) -> str:
 
 
 def _position_lines(d: Diagram, labels: Optional[dict[str, str]] = None, *, indent: str = "", title: bool = True,
-                    why: str = "", strips: bool = True) -> list[str]:
+                    why: str = "", strips: bool = True, words: Optional[dict[str, str]] = None) -> list[str]:
     """A board in text: title, caption, the FEN in code with a Lichess link, the arrows in words, the lines.
-    ``title=False`` (an explanation, which names the move and format itself) gives just "Position"."""
+    ``title=False`` (an explanation, which names the move and format itself) gives just "Position". ``words``
+    replaces the words before the move for some kinds of arrow."""
     links = [
         md_link(u, t)
-        for u, t in ((d.link, (labels or {}).get(d.link) or "game"), (lichess_analysis_url(d.fen), "analyse on Lichess"))
+        for u, t in ((d.link, (labels or {}).get(d.link) or "game"),
+                     (lichess_analysis_url(d.fen, d.orientation), "analyse on Lichess"))
         if u
     ]
     tc = text_or_empty(getattr(d, "time_class", ""))
@@ -242,7 +252,7 @@ def _position_lines(d: Diagram, labels: Optional[dict[str, str]] = None, *, inde
         line += f" · {why}"
     out = [line]
     board = boards.parse_board(d.fen)
-    arrows = boards.arrows_text(board, d.arrows or []) if board is not None else ""
+    arrows = boards.arrows_text(board, d.arrows or [], {**arrow_words(d), **(words or {})}) if board is not None else ""
     if arrows:
         out.append(f"{indent}  - Arrows: {md_text(arrows)}")
     for strip in (getattr(d, "strips", None) or []) if strips else []:
@@ -262,6 +272,7 @@ def _insight_line(
     plan_no: Optional[int] = None,
     view_tc: str = "",
     why: str = "",
+    words: Optional[dict[str, str]] = None,
 ) -> list[str]:
     glyph = glyph_for(ins)
     label = f"{md_text(f'{KIND_LABELS[insight_kind(ins)]} · {category_label(ins.category)}')}: " if with_kind else ""
@@ -270,7 +281,9 @@ def _insight_line(
         head += f" — {md_text(ins.detail)}"
     formats = clean_formats(getattr(ins, "formats", None))
     fmt = format_chip_text(formats) if formats and list(formats) != [view_tc] else ""
-    head += f" _({confidence_label(ins.confidence)}{' · ' + md_text(fmt) if fmt else ''})_"
+    # a claim passed the significance test: its confidence; an observation was not tested
+    label = confidence_label(ins.confidence) if insight_kind(ins) != "observation" else OBSERVATION_LABEL
+    head += f" _({label}{' · ' + md_text(fmt) if fmt else ''})_"
     if plan_no:
         head += f" · what to do: study plan item {plan_no}"
     else:
@@ -285,7 +298,7 @@ def _insight_line(
         if text:
             lines.append(f"  - Chart: {md_text(text)}")
     if isinstance(getattr(ins, "diagram", None), Diagram):
-        lines += _position_lines(ins.diagram, labels, indent="  ")
+        lines += _position_lines(ins.diagram, labels, indent="  ", words=words)
     if show_study and not plan_no:
         lines += [f"  - {md_text(s)}" for s in (ins.study or []) if text_or_empty(s)]
     return lines
@@ -387,21 +400,42 @@ def _module(
     view_tc: str = "",
     why_by_id: Optional[dict[str, int]] = None,
     why_by_epd: Optional[dict[str, int]] = None,
+    in_why: frozenset[int] = frozenset(),
+    cleared: frozenset[int] = frozenset(),
 ) -> list[str]:
+    """One section. ``in_why``: id() of the coaching's charts and tables that the "Why these moves go wrong" part
+    shows (the coaching adds the motif profile to the Engine review too): a line points there instead.
+    ``cleared``: the numbers of the explanations whose move the deeper search clears."""
+
+    def why_text(n: Optional[int]) -> str:
+        if not n:
+            return ""
+        return f"what a deeper check says: explanation {n} below" if n in cleared else f"why: explanation {n} below"
+
+    def key_words(n: Optional[int]) -> Optional[dict[str, str]]:
+        return CLEARED_WORDS if n and n in cleared else None
     title = text_or_empty(module.title) or text_or_empty(module.key) or "Section"
     lines = [f"## {md_text(title)}", ""]
     if text_or_empty(module.summary):
         lines += [md_text(module.summary), ""]
     if module.kpis:
         lines += [_kpi_line(k) for k in module.kpis] + [""]
+
+    def shown_in_why(obj: Any) -> bool:
+        return id(obj) in in_why or (isinstance(obj, Chart) and obj.table is not None and id(obj.table) in in_why)
+
+    moved = [x for x in list(module.charts or []) + list(module.tables or []) if shown_in_why(x)]
     for chart in module.charts or []:
-        lines += _chart(chart)
+        if not shown_in_why(chart):
+            lines += _chart(chart)
+    if moved:
+        lines += ["_The tactical patterns in your mistakes are under “Why these moves go wrong”._", ""]
 
     def board_lines(diagrams: Sequence[Diagram]) -> list[str]:
         out: list[str] = []
         for d in diagrams:
             n = (why_by_epd or {}).get(boards.epd(d.fen))
-            out += _position_lines(d, labels, why=f"why: explanation {n} below" if n else "")
+            out += _position_lines(d, labels, why=why_text(n), words=key_words(n))
         return out + [""] if out else out
 
     # the boards no finding shows already; a table's boards (the costliest puzzles, your choices) follow it
@@ -414,6 +448,8 @@ def _module(
         elif g.table not in tables:
             lines += [f"#### {md_text(g.heading)}", ""] + board_lines(g.diagrams)
     for table in module.tables or []:
+        if shown_in_why(table):
+            continue
         if text_or_empty(table.title):
             lines += [f"#### {md_text(table.title)}", ""]
         lines += md_table(table) + [""]
@@ -428,9 +464,10 @@ def _module(
         ranked = sorted(module.insights, key=lambda i: -(i.priority if i.priority == i.priority else 0.0))
         for ins in ranked:
             n = (why_by_id or {}).get(text_or_empty(ins.id))
+            shown = n or (why_by_epd or {}).get(boards.epd(ins.diagram.fen)) if isinstance(ins.diagram, Diagram) else n
             lines += _insight_line(
                 ins, show_study=True, with_kind=True, labels=labels, plan_no=(plan or {}).get(text_or_empty(ins.id)),
-                view_tc=view_tc, why=f"why: explanation {n} below" if n else "",
+                view_tc=view_tc, why=why_text(n), words=key_words(shown),
             )
         lines.append("")
     return lines
@@ -482,16 +519,28 @@ def _body_lines(report: Report, coaching: Any, labels: dict[str, str]) -> list[s
         if text_or_empty(e.insight_id):
             why_by_id.setdefault(text_or_empty(e.insight_id), k)
         why_by_epd.setdefault(boards.epd(e.epd or e.fen), k)
+    cleared = frozenset(k for k, e in enumerate(exps, 1) if explanation_verdict(e) in DEEP_CLEARED)
     modules = list(report.modules or [])
     keys = [text_or_empty(m.key) for m in modules]
-    at = next((keys.index(k) + 1 for k in ("mistakes", "engine_stats") if k in keys), len(modules))
+    at = next((keys.index(k) + 1 for k in ("mistakes", *ENGINE_KEYS) if k in keys), len(modules))
     view_tc = text_or_empty(getattr(report, "time_class", "")).lower()
+    in_why: set[int] = set()
+    theory_in = ""  # the section that charts where you leave opening theory (its table as the chart's numbers)
+    if isinstance(coaching, Coaching):
+        chart = coaching.motif_chart
+        in_why = {id(x) for x in (chart, getattr(chart, "table", None), coaching.motif_profile) if x is not None}
+        theory = coaching.theory_exit
+        if theory is not None:
+            theory_in = next((text_or_empty(m.title) or text_or_empty(m.key) for m in modules
+                              if any(getattr(c, "table", None) is theory for c in m.charts or [])
+                              or any(t is theory for t in m.tables or [])), "")
     for i, module in enumerate(modules):
-        lines += ["---", ""] + _module(module, labels, plan, view_tc=view_tc, why_by_id=why_by_id, why_by_epd=why_by_epd)
+        lines += ["---", ""] + _module(module, labels, plan, view_tc=view_tc, why_by_id=why_by_id, why_by_epd=why_by_epd,
+                                       in_why=frozenset(in_why), cleared=cleared)
         if i + 1 == at:
-            lines += _coaching(coaching, labels, view_tc)
+            lines += _coaching(coaching, labels, view_tc, theory_in=theory_in)
     if at == 0:
-        lines += _coaching(coaching, labels, view_tc)
+        lines += _coaching(coaching, labels, view_tc, theory_in=theory_in)
     return lines
 
 
@@ -608,30 +657,26 @@ def _opening_lines(op: Any, played: str) -> list[str]:
 
 def _explanation(e: Explanation, k: int, labels: Optional[dict[str, str]], view_tc: str) -> list[str]:
     played, best = text_or_empty(e.played), text_or_empty(e.best)
-    title = md_text(played or "Your move") + (f", better {md_text(best)}" if best and best != played else "")
-    kicker = [EXPLANATION_KINDS.get(text_or_empty(e.kind), "Position")]
-    tc = text_or_empty(e.time_class).lower()
-    if tc and tc != view_tc:
-        kicker.append(format_name(tc))
-    drop = to_number(e.drop)
-    if drop:
-        kicker.append(f"{format_value(drop / 100.0, 'pct')} winning chances lost")
-    if int(to_number(e.repeats) or 0) > 1:
-        kicker.append(f"you played it in {int(e.repeats)} games")
+    cleared = explanation_verdict(e) in DEEP_CLEARED
+    other = ""
+    if best and best != played:  # a move the deeper check clears is not worse than the engine's first choice
+        other = f", Stockfish's first choice {md_text(best)}" if cleared else f", better {md_text(best)}"
+    title = md_text(played or "Your move") + other
+    kicker = explanation_kicker(e, view_tc) + explanation_meta(e)
     lines = [f"### {k}. {title}", "", f"_{md_text(' · '.join(kicker))}_", ""]
     d = e.diagram if isinstance(e.diagram, Diagram) else None
     if d is not None:  # the full lines follow, so the strips are not repeated
         lines += _position_lines(d, labels, title=False, strips=False)
     elif boards.parse_board(e.fen) is not None:
-        lines.append(f"- Position: {md_code(e.fen)} · {md_link(lichess_analysis_url(e.fen), 'analyse on Lichess')}")
+        lines.append(f"- Position: {md_code(e.fen)} · {md_link(lichess_analysis_url(e.fen, e.color), 'analyse on Lichess')}")
     if lines[-1]:
         lines.append("")
     if text_or_empty(e.text):
         lines += [md_text(e.text) + (" _(Wording by the AI coach, checked against the engine lines.)_"
                                      if text_or_empty(e.text_source) == "llm" else ""), ""]
     items = []
-    for line, label in ((e.refutation, f"What {played or 'your move'} allows"), (e.best_line, f"Better {best}" if best else "Better")):
-        t = line_text(line)
+    for line, label in ((e.refutation, f"What {played or 'your move'} allows"), (e.best_line, best_line_label(e))):
+        t = line_text(line) if label else ""  # no "better" line when the better move is the one you played
         if t:
             items.append(f"- {md_text(label)}: {md_code(t)}")
     motifs = [m for m in e.motifs or [] if isinstance(m, Motif)]
@@ -687,8 +732,9 @@ def _review_lines(items: Iterable[Any]) -> list[str]:
     return out
 
 
-def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = "") -> list[str]:
-    """The coaching sections: why your moves go wrong (the engine's lines), then practice."""
+def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = "", *, theory_in: str = "") -> list[str]:
+    """The coaching sections: why your moves go wrong (the engine's lines), then practice. ``theory_in``: the
+    section that already charts where you leave opening theory (a line points there instead of a second table)."""
     if not isinstance(coaching, Coaching):
         return []
     lines: list[str] = []
@@ -705,7 +751,11 @@ def _coaching(coaching: Any, labels: Optional[dict[str, str]], view_tc: str = ""
         if isinstance(coaching.motif_profile, Table) and coaching.motif_profile is not getattr(coaching.motif_chart, "table", None):
             why += md_table(coaching.motif_profile) + [""]
     endgame_boards = [d for d in getattr(coaching, "endgame_diagrams", None) or [] if isinstance(d, Diagram)]
-    for table, heading, extra in ((coaching.theory_exit, "Where you leave opening theory", []),
+    theory = coaching.theory_exit
+    if isinstance(theory, Table) and theory_in:
+        why += ["### Where you leave opening theory", "", f"_Charted in {md_text(theory_in)}, with the numbers._", ""]
+        theory = None
+    for table, heading, extra in ((theory, "Where you leave opening theory", []),
                                   (coaching.endgames, "Endgames checked with the tablebase", endgame_boards)):
         body: list[str] = []
         if isinstance(table, Table):

@@ -609,8 +609,8 @@ def test_html_charts(report):
     svgs = re.findall(r"<svg .*?</svg>", html, re.S)
     charted = sum(1 for m in report.modules for c in m.charts if any(v is not None for s in c.series for v in s.values))
     assert len(svgs) == charted
-    for svg in svgs:
-        assert re.search(r'viewBox="0 0 400 [\d.]+"', svg)
+    for svg in svgs:  # a section's charts are drawn 300 units wide: their text stays readable on a phone
+        assert re.search(r'viewBox="0 0 300 [\d.]+"', svg)
         assert "<title>" in svg  # every chart carries hover tooltips
     assert html.count('<ul class="legend"') == 6  # multi-series charts + the single-series chart with a reference
     assert "Reference 50%" in html

@@ -7,7 +7,7 @@ import json
 import re
 
 import pytest
-from render_sample import QGA, SICILIAN, sample_coaching, sample_report
+from render_sample import QGA, ROOK_END, SICILIAN, sample_coaching, sample_report
 from test_report import check_html, empty_report
 
 from chess_insights.models import (
@@ -134,7 +134,7 @@ def test_module_boards_have_arrows_strips_and_why_links(page):
     main = _view(page, "all")
     section = re.search(r'<section class="section module" id="mistakes".*?</section>', main, re.S).group(0)
     # the Sicilian board is the finding's own (same position and arrows): drawn once, in the finding's card
-    assert section.count('<figure class="board-fig">') == 1
+    assert len(re.findall(r'<figure class="board-fig"[ >]', section)) == 1
     assert section.count('<figure class="board-fig board-fig--card">') == 1
     assert 'class="a a-threat"' in section and 'class="rg rg-target"' in section
     assert '<div class="pos pos--lines">' in section and section.count('class="cb cb--mini"') == 4
@@ -149,7 +149,7 @@ def test_coaching_section_cards(page):
     main = _view(page, "all")
     nav = re.search(r'<nav class="chips".*?</nav>', main, re.S).group(0)
     assert re.findall(r'href="#([\w-]+)"', nav)[-3:] == ["mistakes", "why", "practice"]  # after the positions
-    assert '<a href="#why">Why<span class="count">16</span></a>' in nav
+    assert '<a href="#why">Why<span class="count">12</span></a>' in nav  # the cards on the page
     why = re.search(r'<section class="section module coach" id="why".*?</section>', main, re.S).group(0)
     assert ">Why these moves go wrong<" in why
     first = re.search(r'<article class="card why" id="why-1">.*?</article>', why, re.S).group(0)
@@ -167,9 +167,13 @@ def test_coaching_section_cards(page):
     assert ("With perfect play this position is a win for you; the tablebase move is Ra6+; after your move it is "
             "a win for you.") in tb  # "played_category": "loss" is the opponent's
     assert "Lichess players rated about 1400 (about 949 on chess.com) find 60.Ra6+ 31% of the time" in tb
-    # the first ten are open, the rest fold away
-    more = re.search(r'<details class="more why-more"><summary>Show 6 more explanations</summary>.*?</details>', why, re.S)
-    assert more and 'id="why-11"' in more.group(0) and 'id="why-10"' not in more.group(0)
+    # the first five are open (a card is a phone screen or two), the rest fold away; at most WHY_HTML_MAX (12) are
+    # written, the ones a finding links to first, and a line says where the others are
+    more = re.search(r'<details class="more why-more"><summary>Show 7 more explanations</summary>.*?</details>', why, re.S)
+    assert more and 'id="why-6"' in more.group(0) and 'id="why-5"' not in more.group(0)
+    assert why.count('<article class="card why"') == 12
+    assert ("4 more explanations are left out of this page to keep it light on a phone. All 16 are in the Markdown "
+            "version of this report") in why
     assert "Patterns in the mistakes" in why and "Where you leave opening theory" in why
     assert "Endgames checked with the tablebase" in why and "no Lichess token" in why
     assert "12 explanations reworded" in why
@@ -192,32 +196,44 @@ def test_practice_section(page):
 
 
 def test_format_view_shows_that_formats_explanations(report, page):
+    from chess_insights.report.html import WHY_VIEW_MAX
+
     blitz = _view(page, "blitz")
     exps = [e for e in report.coaching.explanations if e.time_class == "blitz"]
-    assert blitz.count('<article class="card why"') == len(exps) > 0
+    assert blitz.count('<article class="card why"') == min(len(exps), WHY_VIEW_MAX) > 0
     assert 'id="v-blitz-why-1"' in blitz and "Practice" not in re.search(r'<nav.*?</nav>', blitz, re.S).group(0)
 
 
-def test_format_view_repeats_at_most_ten_explanations(report):
-    from chess_insights.report.html import view_coaching
+def test_format_view_repeats_at_most_three_explanations(report):
+    from chess_insights.report.html import WHY_VIEW_MAX, view_coaching
 
     rep = copy.deepcopy(report)
-    rep.coaching.explanations = [copy.deepcopy(rep.coaching.explanations[0]) for _ in range(13)]
+    base = rep.coaching.explanations[0]  # a blitz position, and a finding of every view links to it
+    rep.coaching.explanations = [copy.deepcopy(base) for _ in range(13)]
     blitz = view_coaching(rep.format_reports["blitz"], rep, "blitz")
-    assert len(blitz.explanations) == 10 and "3 more explanations of blitz positions" in blitz.notes[0]
-    assert view_coaching(rep.format_reports["rapid"], rep, "rapid") is None  # none of rapid games
+    assert len(blitz.explanations) == WHY_VIEW_MAX == 3
+    assert blitz.notes == ["10 more explanations of blitz positions are left out of this view: see the All formats "
+                           "view, and the Markdown report for every one."]
+    # another format's explanation comes only when one of the view's findings links to it
+    lone = copy.deepcopy(base)
+    lone.insight_id, lone.fen, lone.epd = None, ROOK_END, " ".join(ROOK_END.split()[:4])
+    rep.coaching.explanations = [lone]
+    assert view_coaching(rep.format_reports["rapid"], rep, "rapid") is None  # no rapid game, no rapid finding
+    rep.coaching.explanations = [copy.deepcopy(base)]
+    assert len(view_coaching(rep.format_reports["rapid"], rep, "rapid").explanations) == 1  # a rapid finding's
     # the pipeline's own per-format coaching wins (as pipeline.view_coaching builds it: every explanation of the
     # format, the notes and the AI coach's counts), but is capped the same way, and the counts (for the whole
     # report) stay in the All formats view
-    own = Coaching(explanations=[copy.deepcopy(rep.coaching.explanations[0]) for _ in range(12)], notes=["own"],
+    own = Coaching(explanations=[copy.deepcopy(base) for _ in range(12)], notes=["own"],
                    llm={"model": "m", "accepted": 12, "rejected": 2})
     rep.format_reports["rapid"].coaching = own
     rapid = view_coaching(rep.format_reports["rapid"], rep, "rapid")
-    assert rapid.explanations == own.explanations[:10] and rapid.llm == {}
-    assert rapid.notes == ["own", "2 more explanations of rapid positions are in the All formats view."]
+    assert rapid.explanations == own.explanations[:3] and rapid.llm == {}
+    assert rapid.notes == ["own", "9 more explanations of rapid positions are left out of this view: see the All "
+                                  "formats view, and the Markdown report for every one."]
     assert len(own.explanations) == 12 and own.llm  # the report's own data is left alone
     html = _view(render_html(rep), "rapid")
-    assert html.count('<article class="card why"') == 10 and "explanations reworded" not in html
+    assert html.count('<article class="card why"') == 3 and "explanations reworded" not in html
 
 
 def test_absent_coaching_renders_nothing():
@@ -373,7 +389,7 @@ def test_why_links_name_a_choice_point_as_one():
     main = render_html(rep)
     card = re.search(r'<article class="card insight[^>]*id="f-positions-repeated-sicilian-5e5".*?</article>', main, re.S)
     assert "The engine&#x27;s lines for this position" in card.group(0) and "Why this goes wrong" not in card.group(0)
-    assert "Why it goes wrong" not in main and ">The engine&#x27;s lines</a>" in main
+    assert "Why it goes wrong" not in main and ">The engine&#x27;s lines for this position</a>" in main
 
 
 # --------------------------------------------------------------------------- views and odd coaching data
@@ -439,7 +455,12 @@ def test_endgame_boards_are_drawn_when_the_coaching_carries_them():
     html = render_html(rep)
     check_html(html)
     block = re.search(r'Endgames checked with the tablebase</h3>.*?</div></div>', html, re.S).group(0)
-    assert "Rook ending: Kc4" in block and 'class="a a-best"' in block
+    # explanation 4 draws the same position with the same arrows higher up: one board, and a link to it here
+    assert "Rook ending: Kc4" in block and 'href="#why-4">Board shown above, with 60.Kc4</a>' in block
+    assert 'class="a a-best"' not in block
+    rep.coaching.endgame_diagrams[0].arrows = rep.coaching.endgame_diagrams[0].arrows[:1]  # another picture
+    block = re.search(r'Endgames checked with the tablebase</h3>.*?</div></div>', render_html(rep), re.S).group(0)
+    assert "Rook ending: Kc4" in block and 'class="a a-played"' in block and "Board shown above" not in block
 
 
 def test_concept_note_is_rendered_with_its_credit():
