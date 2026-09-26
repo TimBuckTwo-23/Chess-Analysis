@@ -580,6 +580,44 @@ def test_fill_puzzle_lines_from_deep_and_profile_results(player, monkeypatch):
     assert len(coaching.puzzle_themes) == len(coaching.puzzle_lines)
 
 
+def test_fill_puzzle_lines_keeps_the_exports_errors_and_the_explained_ones(player, monkeypatch):
+    """Only errors the puzzle export can use (build_puzzles: at most PUZZLE_LIMIT, costliest, with a better move)
+    and errors in explained positions get a line; best lines are read with the position before the last move."""
+    ctx, _ = player
+    seen = []
+
+    def detect(line, role, previous_fen=None):
+        seen.append((line.fen, previous_fen))
+        return [Motif("fork", role, 0, ["d5"], "you")]
+
+    monkeypatch.setattr(motifs, "GATED_THEMES", frozenset({"fork"}))
+    monkeypatch.setattr(motifs, "detect_line", detect)
+    events = mistakes.collect_errors(ctx.games, ctx.evals)
+    profile = [ProfileError(e.game.game_id, e.ply, "you", e.game.time_class, e.fen, e.uci, e.drop,
+                            make_line(e.fen, [chess.Move.from_uci(next(m.uci() for m in chess.Board(e.fen).legal_moves
+                                                                       if m.uci() != e.uci))], 0, None, 10))
+               for e in events]
+    real = puzzles.build_puzzles
+    monkeypatch.setattr(puzzles, "build_puzzles", lambda games, evals: real(games, evals, limit=1))
+    coaching = Coaching()
+    puzzles.fill_puzzle_lines(ctx, coaching, {}, profile)
+    rapid = next(e for e in events if e.move_label == "7.Re1")  # the costliest (40 points)
+    assert set(coaching.puzzle_lines) == {puzzles.puzzle_key(rapid.game.game_id, rapid.ply)}
+    assert set(coaching.puzzle_themes) == set(coaching.puzzle_lines)
+    before = chess.Board()
+    for san in rapid.game.moves_san[: rapid.ply - 1]:
+        before.push_san(san)
+    assert seen == [(rapid.fen, before.fen())]  # the position before 6...O-O, your opponent's last move
+    # an explained position adds its errors (the 5...e5 habit, in four games)
+    sic = next(e for e in events if e.move_label == "5...e5")
+    coaching = Coaching(explanations=[Explanation(sic.epd, sic.fen, "5...e5", "5...Nf6", None,
+                                                  make_line(sic.fen, [chess.Move.from_uci(sic.uci)], -150, None, 20),
+                                                  text="After 5...e5 ...")])
+    puzzles.fill_puzzle_lines(ctx, coaching, {}, profile)
+    sic_keys = {puzzles.puzzle_key(e.game.game_id, e.ply) for e in events if e.move_label == "5...e5"}
+    assert set(coaching.puzzle_lines) == sic_keys | {puzzles.puzzle_key(rapid.game.game_id, rapid.ply)}
+
+
 # --------------------------------------------------------------------------- build_coaching
 class _Fake:
     """A scripted engine: the first legal move in UCI order, +60 cp for the side to move (so every move but

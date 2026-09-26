@@ -2,6 +2,7 @@
 claims the coaching layer makes, which must be as honest as every other finding (few false claims on data without
 a real difference, and real differences found)."""
 
+import dataclasses
 import math
 import random
 
@@ -226,6 +227,10 @@ def _planted_world(n_games=120, seed=5, p_you=0.8, p_opp=0.15):
                       game_id=f"pg{k}", url=f"https://www.chess.com/game/live/{9000 + k}")
         plies = [make_ply_eval(ply=i, mover="white" if i % 2 == 0 else "black", is_user=g.is_my_ply(i),
                                san=g.moves_san[i]) for i in range(g.plies)]
+        for i in (4, 5, 6, 7):  # your errors are errors in the game analysis too (the puzzle export's selection)
+            if g.is_my_ply(i):
+                plies[i] = dataclasses.replace(plies[i], win_before=60.0, win_after=40.0,
+                                               best_san="h4" if g.moves_san[i] != "h4" else "a4")
         games.append(g)
         evals[g.game_id] = make_game_eval(g.game_id, plies)
         for side, p_fork in (("you", p_you), ("opponent", p_opp)):
@@ -268,7 +273,7 @@ def test_annotate_adds_the_profile_and_claims_to_the_engine_review(monkeypatch):
     assert counts["fork"]["you_missed"] > 3 * counts["fork"]["opp_missed"] > 0
     assert engine.stats["motif_profile"]["tests"]["fork:missed"]["claim"] == "weakness"
     # the puzzle export gets your errors' best lines and their named patterns
-    assert coaching.puzzle_lines and all(k.count(":") >= 1 for k in coaching.puzzle_lines)
+    assert set(coaching.puzzle_lines) == {f"{e.game_id}:{e.ply}" for e in errors if e.side == "you"}
     assert any(v == ["fork"] for v in coaching.puzzle_themes.values())
 
 
@@ -347,3 +352,84 @@ def test_a_strength_shows_one_of_your_opponents_misses(monkeypatch):
     assert claim.chart is not None and claim.diagram is not None
     assert claim.diagram.title.startswith("A fork your opponent missed")
     assert claim.diagram.link in claim.example_games
+
+
+# --------------------------------------------------------------------------- the previous position and the puzzle lines
+def _one_game_with_errors(errors_at=(4, 6, 8)):
+    """One game of yours (White, the default moves) whose moves at ``errors_at`` lost 20 win-% points."""
+    import chess
+
+    g = make_game(color="white", game_id="prev1", url="https://www.chess.com/game/live/77")
+    plies = []
+    for i, san in enumerate(g.moves_san):
+        worse = i in errors_at
+        plies.append(make_ply_eval(ply=i, mover="white" if i % 2 == 0 else "black", is_user=g.is_my_ply(i), san=san,
+                                   best_san="h4" if worse else san, win_before=60.0 if worse else 51.8,
+                                   win_after=40.0 if worse else 51.8))
+    board, fens = chess.Board(), []
+    for san in g.moves_san:
+        fens.append(board.fen())
+        board.push_san(san)
+    ctx = AnalysisContext(username="tester", games=[g], evals={g.game_id: make_game_eval(g.game_id, plies)})
+    return ctx, g, fens
+
+
+def test_best_lines_are_read_with_the_position_before_the_last_move():
+    ctx, g, fens = _one_game_with_errors()
+    records = profile.join(ctx)
+    best = Line(fen=fens[4], moves_uci=["f1c4"])
+    refutation = Line(fen=fens[4], moves_uci=["b1c3", "d7d5"])
+    calls = []
+
+    def three(line, role, previous_fen=None):
+        calls.append((role, previous_fen))
+        return []
+
+    # computed from the game (one replay) when the error does not carry it ...
+    profile.collect(records, [ProfileError(g.game_id, 4, "you", "blitz", fens[4], "b1c3", 20.0, best, refutation)],
+                    three)
+    assert calls == [("best", fens[3]), ("refutation", None)]  # the position before 2...Nc6, the opponent's move
+    # ... or taken from it (deep.profile_errors sets it)
+    calls.clear()
+    carried = ProfileError(g.game_id, 4, "you", "blitz", fens[4], "b1c3", 20.0, best, refutation, previous_fen="x")
+    profile.collect(records, [carried], three)
+    assert calls[0] == ("best", "x")
+    # an opponent's error: the position before your last move
+    calls.clear()
+    profile.collect(records, [ProfileError(g.game_id, 5, "opponent", "blitz", fens[5], "f8c5", 20.0,
+                                           Line(fen=fens[5], moves_uci=["g8f6"]), None)], three)
+    assert calls == [("best", fens[4])]
+    # a detector that takes only (line, role) still works
+    two_calls = []
+    profile.collect(records, [ProfileError(g.game_id, 4, "you", "blitz", fens[4], "b1c3", 20.0, best, refutation)],
+                    lambda line, role: two_calls.append(role) or [])
+    assert two_calls == ["best", "refutation"]
+
+
+def test_deep_records_the_previous_position_of_every_error():
+    ctx, g, fens = _one_game_with_errors()
+    found = deep.profile_errors(ctx)
+    assert [(e.ply, e.previous_fen) for e in found] == [(4, fens[3]), (6, fens[5]), (8, fens[7])]
+    assert deep.previous_fens(g, [0, 1, 4, 999]) == {1: fens[0], 4: fens[3]}
+
+
+def test_puzzle_lines_are_kept_only_for_the_puzzle_exports_errors(monkeypatch):
+    """Not every profiled error of yours (about 1,500 in a real run): the ones mistakes.build_puzzles exports, plus
+    the explained positions."""
+    from chess_insights.coach import puzzles
+
+    ctx, g, fens = _one_game_with_errors(errors_at=(4, 6, 8))
+    errors = [ProfileError(g.game_id, ply, "you", "blitz", fens[ply], "a2a3", 20.0,
+                           Line(fen=fens[ply], moves_uci=["h2h4"]), Line(fen=fens[ply], moves_uci=["a2a3"]))
+              for ply in (2, 4, 6, 8)]  # ply 2 is no error in the game analysis: no puzzle
+    monkeypatch.setattr(deep, "profile_lines", lambda ctx, cfg, notes: errors)
+    monkeypatch.setattr(motifs, "detect_line", lambda line, role: [])
+    coaching = Coaching()
+    profile.annotate(ctx, coaching, [], CoachConfig())
+    assert set(coaching.puzzle_lines) == {f"{g.game_id}:{p}" for p in (4, 6, 8)}
+    # at most PUZZLE_LIMIT puzzles, costliest first: here one
+    real = puzzles.build_puzzles
+    monkeypatch.setattr(puzzles, "build_puzzles", lambda games, evals: real(games, evals, limit=1))
+    coaching = Coaching()
+    profile.annotate(ctx, coaching, [], CoachConfig())
+    assert len(coaching.puzzle_lines) == 1

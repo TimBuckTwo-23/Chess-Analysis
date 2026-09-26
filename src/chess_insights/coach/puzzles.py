@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Iterable, Optional
 
 import chess
 
-from ..analysis.mistakes import MistakeEvent, collect_errors, puzzles_to_pgn
+from ..analysis.mistakes import MistakeEvent, build_puzzles, collect_errors, puzzles_to_pgn
 from ..models import Coaching, Explanation, Line
 
 if TYPE_CHECKING:
@@ -116,25 +116,46 @@ def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
     return "\n".join(chunks)
 
 
+def puzzle_keys(ctx: "AnalysisContext", coaching: Coaching, errors: Optional[list[MistakeEvent]] = None) -> set[str]:
+    """The errors of yours whose best lines and themes ``Coaching.puzzle_lines`` / ``puzzle_themes`` keep: the ones
+    the puzzle export can use (``mistakes.build_puzzles``: at most ``PUZZLE_LIMIT``, costliest first, with a known
+    better move; standard chess), plus every error in a position an explanation covers (your move there).
+    ``errors``: ``mistakes.collect_errors`` of the games, when the caller has it."""
+    keys = {puzzle_key(e.game.game_id, e.ply) for e in build_puzzles(ctx.games, ctx.evals) if e.game.rules == "chess"}
+    explained = {(x.epd, _played_uci(x)) for x in coaching.explanations}
+    if explained:
+        errors = collect_errors(ctx.games, ctx.evals) if errors is None else errors
+        keys |= {puzzle_key(e.game.game_id, e.ply) for e in errors if (e.epd, e.uci) in explained}
+    return keys
+
+
 def fill_puzzle_lines(
     ctx: "AnalysisContext",
     coaching: Coaching,
     lines: dict[tuple[str, str], "DeepResult"],
     profile: Iterable["ProfileError"] = (),
 ) -> None:
-    """``coaching.puzzle_lines`` / ``puzzle_themes`` for your errors: the best line (up to ``SOLUTION_PLIES``) from
-    the deep pass when the position was re-searched, else from the profile pass; the themes are the motifs you
-    carry out along it, named only when their detector passed the gate (``motifs.GATED_THEMES``). An error whose
-    deeper search prefers the move you played gets no line (the puzzle keeps the game analysis's move)."""
+    """``coaching.puzzle_lines`` / ``puzzle_themes`` for your errors in ``puzzle_keys`` (the puzzle export's and
+    the explained ones: the JSON stays small): the best line (up to ``SOLUTION_PLIES``) from the deep pass when the
+    position was re-searched, else from the profile pass; the themes are the motifs you carry out along it (read
+    with the position before your opponent's last move), named only when their detector passed the gate
+    (``motifs.GATED_THEMES``). An error whose deeper search prefers the move you played gets no line (the puzzle
+    keeps the game analysis's move)."""
     from . import motifs
-    from .deep import rebase
+    from .deep import previous_fens, rebase
     from .explain import detect
 
     gated = frozenset(getattr(motifs, "GATED_THEMES", frozenset()) or ())
     by_ply = {(p.game_id, p.ply): p.best_line for p in profile if p.side == "you" and p.best_line is not None}
-    for e in collect_errors(ctx.games, ctx.evals):
-        if e.game.rules != "chess" or not e.uci:
-            continue
+    errors = collect_errors(ctx.games, ctx.evals)
+    wanted = puzzle_keys(ctx, coaching, errors)
+    events = [e for e in errors if e.game.rules == "chess" and e.uci and puzzle_key(e.game.game_id, e.ply) in wanted]
+    plies: dict[str, list[int]] = {}
+    for e in events:
+        plies.setdefault(e.game.game_id, []).append(e.ply)
+    before: dict[str, dict[int, str]] = {}  # game id -> ply -> the position before your opponent's last move
+    for e in events:
+        key = puzzle_key(e.game.game_id, e.ply)
         result = lines.get((e.epd, e.uci))
         line = result.best_line if result is not None else None
         if line is None or not line.moves_uci:
@@ -144,8 +165,10 @@ def fill_puzzle_lines(
         line = rebase(line, e.fen, SOLUTION_PLIES)
         if not line.moves_uci:
             continue
-        key = puzzle_key(e.game.game_id, e.ply)
         coaching.puzzle_lines[key] = line
-        themes = [m.theme for m in detect(line, "best") if m.side == "you" and m.theme in gated]
+        if e.game.game_id not in before:  # one replay per game
+            before[e.game.game_id] = previous_fens(e.game, plies[e.game.game_id])
+        previous = before[e.game.game_id].get(e.ply)
+        themes = [m.theme for m in detect(line, "best", previous) if m.side == "you" and m.theme in gated]
         if themes:
             coaching.puzzle_themes[key] = list(dict.fromkeys(themes))

@@ -33,14 +33,14 @@ import time
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 
 import chess
 import chess.engine
 
 from .. import engine as sf
 from ..analysis import mistakes
-from ..models import CriticalPosition, Line
+from ..models import CriticalPosition, Game, Line
 from .config import CoachConfig
 
 if TYPE_CHECKING:
@@ -87,6 +87,9 @@ class ProfileError:
     drop: float
     best_line: Optional[Line] = None
     refutation: Optional[Line] = None
+    # the position before the move that led to ``fen`` (None at the first move): tells the motif detectors whether
+    # the best line's first capture takes a free piece or completes a trade
+    previous_fen: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- one position
@@ -493,17 +496,39 @@ def profile_errors(ctx: "AnalysisContext") -> list[ProfileError]:
             continue
         try:
             board = chess.Board(game.initial_fen or chess.STARTING_FEN)
+            previous: Optional[str] = None
             for ply, san in enumerate(game.moves_san[: max(wanted) + 1]):
                 move = board.parse_san(san)
+                fen = board.fen()
                 p = wanted.get(ply)
                 if p is not None:
                     out.append(ProfileError(
                         game_id=gid, ply=ply, side="you" if p.is_user else "opponent", time_class=game.time_class,
-                        fen=board.fen(), played_uci=move.uci(), drop=float(p.win_before - p.win_after),
+                        fen=fen, played_uci=move.uci(), drop=float(p.win_before - p.win_after), previous_fen=previous,
                     ))
+                previous = fen
                 board.push(move)
         except ValueError:  # an illegal move in a corrupt record: keep what we have
             continue
+    return out
+
+
+def previous_fens(game: Game, plies: Iterable[int]) -> dict[int, str]:
+    """ply -> the FEN before the move at ``ply - 1``: the position before the move that led to the position at
+    ``ply`` (``ProfileError.previous_fen``). One replay of ``game`` for all ``plies``; ply 0, plies past the end and
+    a corrupt record's moves after the first illegal one are left out."""
+    wanted = {p for p in plies if 1 <= p <= len(game.moves_san)}
+    out: dict[int, str] = {}
+    if not wanted:
+        return out
+    try:
+        board = chess.Board(game.initial_fen or chess.STARTING_FEN)
+        for ply, san in enumerate(game.moves_san[: max(wanted)]):
+            if ply + 1 in wanted:
+                out[ply + 1] = board.fen()
+            board.push_san(san)
+    except ValueError:
+        pass
     return out
 
 

@@ -151,17 +151,42 @@ class MotifEvent:
         return self.error.side
 
 
+def _detect(detect: Callable[..., list[Motif]], line: Line, role: str, previous_fen: Optional[str]) -> list[Motif]:
+    """``detect(line, role, previous_fen)``; a detector without the optional third argument gets two."""
+    if previous_fen is None:
+        return list(detect(line, role) or [])
+    try:
+        return list(detect(line, role, previous_fen) or [])
+    except TypeError:
+        return list(detect(line, role) or [])
+
+
+def _previous_positions(errors: Sequence["ProfileError"], games: dict[str, Game]) -> dict[tuple[str, int], str]:
+    """(game id, ply) -> the position before the move that led to the error's position, for the errors that don't
+    carry it (``ProfileError.previous_fen``): each game replayed once for all its errors."""
+    from .deep import previous_fens
+
+    wanted: dict[str, set[int]] = {}
+    for e in errors:
+        if getattr(e, "previous_fen", None) is None and e.game_id in games and e.ply > 0:
+            wanted.setdefault(e.game_id, set()).add(e.ply)
+    return {(gid, ply): fen for gid, plies in wanted.items() for ply, fen in previous_fens(games[gid], plies).items()}
+
+
 def collect(
     records: Sequence[Analysed],
     errors: Iterable["ProfileError"],
-    detect: Callable[[Line, str], list[Motif]],
+    detect: Callable[..., list[Motif]],
     notes: Optional[list[str]] = None,
 ) -> tuple[list[GameCounts], list[MotifEvent]]:
     """Per-game counts and the individual events, from the profiled errors of the analysed games.
 
     Errors from games outside ``records`` (not analysed, too short, filtered out) are ignored; each error counts
     once per pattern and kind, however often the detector reports it along the line. A line the detectors fail on
-    counts as having no pattern (and a note says how many).
+    counts as having no pattern (and a note says how many). Best lines are read with the position before the move
+    that led to the error's position (``detect(line, "best", previous_fen)``: a capture that ends a trade is no
+    hanging piece), from ``ProfileError.previous_fen`` or, when an error lacks it, from one replay of its game;
+    a detector that takes only ``(line, role)`` is called with two arguments.
     """
     games: list[GameCounts] = []
     by_id: dict[str, tuple[Game, GameCounts]] = {}
@@ -170,6 +195,8 @@ def collect(
         gc = GameCounts(r.game.game_id, r.game.time_class, (mine, len(r.plies) - mine), url=r.game.url)
         games.append(gc)
         by_id[r.game.game_id] = (r.game, gc)
+    errors = list(errors)
+    previous = _previous_positions(errors, {gid: g for gid, (g, _) in by_id.items()})
     events: list[MotifEvent] = []
     seen: set[tuple[str, int]] = set()
     failed = 0
@@ -181,6 +208,7 @@ def collect(
         game, gc = entry
         s = SIDES.index(e.side)
         gc.errors[s] += 1
+        before = getattr(e, "previous_fen", None) or previous.get((e.game_id, e.ply))
         # best line: the patterns the player who went wrong would have carried out ("you" = the side to move);
         # refutation: the ones the other side carries out after the move
         for kind, line, role, carrier in (("missed", e.best_line, "best", "you"),
@@ -188,7 +216,7 @@ def collect(
             if line is None:
                 continue
             try:
-                detected = list(detect(line, role) or [])
+                detected = _detect(detect, line, role, before if role == "best" else None)
             except Exception:  # noqa: BLE001 — one odd line must not sink the whole profile
                 failed += 1
                 detected = []
@@ -588,8 +616,9 @@ def _trim(line: Line, plies: int = PUZZLE_LINE_PLIES) -> Line:
 
 
 def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: Sequence[MotifEvent],
-                  gated: frozenset[str]) -> None:
-    """Your errors' best lines and named patterns for the puzzle export (the deeper coach lines win)."""
+                  gated: frozenset[str], keys: Optional[set[str]] = None) -> None:
+    """Your errors' best lines and named patterns for the puzzle export (the deeper coach lines win), for the errors
+    in ``keys`` only (``puzzles.puzzle_keys``: the ones the export can use and the explained ones; None = all)."""
     themes: dict[str, set[str]] = {}
     for ev in events:
         if ev.side == "you" and ev.kind == "missed" and ev.motif.theme in gated:
@@ -598,6 +627,8 @@ def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: 
         if e.side != "you" or e.best_line is None or not e.best_line.moves_uci:
             continue
         key = f"{e.game_id}:{e.ply}"
+        if keys is not None and key not in keys:
+            continue
         coaching.puzzle_lines.setdefault(key, _trim(e.best_line))
         if themes.get(key):
             coaching.puzzle_themes.setdefault(key, sorted(themes[key]))
@@ -606,7 +637,7 @@ def _puzzle_lines(coaching: Coaching, errors: Iterable["ProfileError"], events: 
 def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleResult], cfg: CoachConfig) -> None:
     """Fill ``coaching.motif_profile`` / ``motif_chart``, add them to the Engine review section, and add motif
     claims (claim rule at STRICT_ALPHA, BH across motifs) to that section's insights."""
-    from . import deep, motifs
+    from . import deep, motifs, puzzles
 
     records = join(ctx)
     if not records:
@@ -628,7 +659,7 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
         "counts": profile_counts(games, named),
         "unnamed_themes": [t for t in themes_seen(games) if t not in gated],
     }
-    _puzzle_lines(coaching, errors, events, gated)
+    _puzzle_lines(coaching, errors, events, gated, puzzles.puzzle_keys(ctx, coaching))
     coaching.motif_profile = profile_table(games, gated, formats)
     coaching.motif_chart = profile_chart(games, gated, formats)
     if coaching.motif_profile is None:
