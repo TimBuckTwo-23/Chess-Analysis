@@ -47,6 +47,20 @@ The report is built to be read on a phone:
 4. **One section per topic**: a short summary, key numbers and findings; the charts and
    tables fold away under "Show …", and wide tables show their key columns first.
 
+## Run it on GitHub (no install, works from a phone)
+
+1. Open this repository on github.com, go to **Actions → report → Run workflow**.
+2. Enter your chess.com username. Your time zone (e.g. `America/New_York`) is optional
+   but recommended. Tap **Run workflow**.
+3. When the run finishes (a few minutes, longer the first time with Stockfish), open it.
+   Under **Artifacts**, download the report and open the `.html` file. Every report is
+   also saved on the `reports` branch, under `<username>/latest/` and a dated folder, so
+   you can compare reports over time.
+
+GitHub's machines download your games and run Stockfish, and they remember what they
+already downloaded and analysed. A re-run a week later only fetches and analyses the
+new games.
+
 ## Quick start
 
 Requires Python 3.10+.

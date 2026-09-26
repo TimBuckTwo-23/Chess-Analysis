@@ -1,0 +1,110 @@
+# Run the analysis on GitHub's machines: no install needed, works from a phone.
+# github.com/<you>/Chess-Analysis -> Actions -> report -> Run workflow.
+# The report is attached to the run (Artifacts) and saved on the `reports` branch.
+name: report
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: chess.com username
+        required: true
+      timezone:
+        description: "Your time zone, e.g. America/New_York (optional: local time-of-day stats and the late-night check)"
+        required: false
+        default: ""
+      engine:
+        description: Run Stockfish (accuracy, blunders, positions you keep getting wrong, puzzles)
+        type: boolean
+        default: true
+      engine_games:
+        description: How many of your most recent games Stockfish analyses (or "all")
+        default: "300"
+      depth:
+        description: Stockfish depth per position
+        default: "12"
+
+permissions:
+  contents: write # to save the report on the `reports` branch
+
+concurrency:
+  group: report-${{ inputs.username }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # inputs reach the shell only through environment variables (never pasted into commands)
+      USERNAME: ${{ inputs.username }}
+      TZ_NAME: ${{ inputs.timezone }}
+      ENGINE: ${{ inputs.engine }}
+      ENGINE_GAMES: ${{ inputs.engine_games }}
+      DEPTH: ${{ inputs.depth }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Stockfish
+        if: ${{ inputs.engine }}
+        run: sudo apt-get update && sudo apt-get install -y stockfish
+
+      - name: Install chess-insights
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+
+      # Downloaded months and Stockfish results are kept between runs, so a re-run only
+      # fetches the current month and analyses new games.
+      - name: Restore game and engine cache
+        uses: actions/cache@v4
+        with:
+          path: .chess-insights-cache
+          key: chess-insights-${{ inputs.username }}-${{ github.run_id }}
+          restore-keys: chess-insights-${{ inputs.username }}-
+
+      - name: Analyse games
+        run: |
+          name=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+          echo "REPORT_NAME=$name" >> "$GITHUB_ENV"
+          args=(report "$USERNAME" --cache-dir .chess-insights-cache --out "reports/$name"
+                --contact "https://github.com/$GITHUB_REPOSITORY")
+          if [ -n "$TZ_NAME" ]; then args+=(--tz "$TZ_NAME"); fi
+          if [ "$ENGINE" = "true" ]; then
+            args+=(--engine --stockfish /usr/games/stockfish --engine-games "$ENGINE_GAMES" --depth "$DEPTH"
+                   --workers "$(nproc)" --puzzles)
+          fi
+          chess-insights "${args[@]}"
+
+      - name: Attach the report to this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: chess-insights-${{ env.REPORT_NAME }}
+          path: reports/
+          retention-days: 30
+
+      - name: Save the report on the reports branch
+        run: |
+          stamp=$(date -u +%Y-%m-%d)
+          dest="$RUNNER_TEMP/reports-branch"
+          git config --global user.name "chess-insights"
+          git config --global user.email "chess-insights@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin reports >/dev/null; then
+            git clone --quiet --depth 1 --branch reports "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY" "$dest"
+          else
+            mkdir -p "$dest" && git -C "$dest" init --quiet -b reports
+            git -C "$dest" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/$GITHUB_REPOSITORY"
+          fi
+          mkdir -p "$dest/$REPORT_NAME/$stamp" "$dest/$REPORT_NAME/latest"
+          cp reports/* "$dest/$REPORT_NAME/$stamp/"
+          rm -f "$dest/$REPORT_NAME/latest/"* && cp reports/* "$dest/$REPORT_NAME/latest/"
+          git -C "$dest" add -A
+          git -C "$dest" commit --quiet -m "Report for $REPORT_NAME ($stamp)" || exit 0
+          git -C "$dest" push --quiet origin reports
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
