@@ -337,8 +337,9 @@ _PAIRS = {
     "abandoned": ("abandoned", "opponent_abandoned", "int"),
 }
 # (chart title, [(pair row, bar label)], a key the evidence must also have): the first chart whose rows are all in
-# the evidence is drawn. "{phase}" is the evidence's game phase, "{kind}" the kind of error (from the finding's id). The key keeps a chart to the finding it describes
-# ("per100" is blunders in one finding, mistakes and blunders of one phase in another).
+# the evidence is drawn. "{phase}" is the evidence's game phase, "{kind}" the kind of error (from the finding's id).
+# The key keeps a chart to the finding it describes ("per100" is blunders in one finding, mistakes and blunders of
+# one phase in another).
 _PAIR_CHARTS: list[tuple[str, list[tuple[str, str]], Optional[str]]] = [
     ("Blunders per 100 moves, you vs your opponents",
      [("per100_low", "Short of time"), ("per100_ok", "With time left")], None),
