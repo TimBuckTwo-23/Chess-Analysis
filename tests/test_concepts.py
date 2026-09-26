@@ -83,10 +83,18 @@ def test_concept_deltas_are_refutation_minus_best_from_your_side():
     assert concept_deltas({"Space": (0.0, 0.0)}, {"Space": (0.1, 0.1)}, "white", 24, 24) == []
 
 
-def test_material_term_is_piece_placement_when_material_is_level():
-    best, ref = {"Material": (0.5, 0.5)}, {"Material": (0.0, 0.0)}
-    assert concept_deltas(best, ref, "white", 20, 20)[0].label == "material"
-    assert concept_deltas(best, ref, "white", 20, 20, material_level=True)[0].label == "piece placement"
+def test_material_terms_only_when_material_is_level_and_winnable_never():
+    """With the same material at both ends, Stockfish's Material term is piece placement and Imbalance piece balance.
+    With different material they only restate it on the evaluation's own scale (Material +1.86 for a line that
+    loses the queen, read mid-combination): left out, the text names what changes hands. Winnable (scaling towards a
+    draw) reads like the game's outcome ("winning chances +1.46" for a line that lost 79% of them): never shown."""
+    best = {"Material": (0.5, 0.5), "Imbalance": (0.3, 0.3), "Winnable": (0.0, 0.0), "Mobility": (0.4, 0.4)}
+    ref = {"Material": (0.0, 0.0), "Imbalance": (0.0, 0.0), "Winnable": (0.9, 0.9), "Mobility": (0.0, 0.0)}
+    differs = concept_deltas(best, ref, "white", 20, 20)
+    assert [c.term for c in differs] == ["Mobility"]
+    level = {c.term: c.label for c in concept_deltas(best, ref, "white", 20, 20, material_level=True)}
+    assert level == {"Material": "piece placement", "Imbalance": "piece balance", "Mobility": "piece activity"}
+    assert "Winnable" not in level and "Winnable" in concepts.HIDDEN_TERMS
 
 
 # --------------------------------------------------------------------------- where the lines are compared
@@ -97,13 +105,16 @@ def _uci(sans: list[str], fen: str = chess.STARTING_FEN) -> list[str]:
     return out
 
 
-def test_comparison_point_waits_for_a_quiet_position():
-    # after 2 plies (1.e4 d5) White can take on d5: not quiet, so the point moves on to the first quiet position
-    end = comparison_point(chess.STARTING_FEN, _uci(["e4", "d5", "exd5", "Qxd5", "Nc3"]), plies=2)
+def test_comparison_point_waits_for_a_settled_position():
+    # after 3 plies (1.e4 d5 2.exd5) Black takes the pawn back: not settled, so the point moves on to 2...Qxd5
+    end = comparison_point(chess.STARTING_FEN, _uci(["e4", "d5", "exd5", "Qxd5", "Nc3"]), plies=3)
     assert end is not None and end.fen().split()[0] == "rnb1kbnr/ppp1pppp/8/3q4/8/8/PPPP1PPP/RNBQKBNR"
+    # 1.e4 d5 is settled: exd5 Qxd5 is an even trade, no material is waiting to be won
+    end = comparison_point(chess.STARTING_FEN, _uci(["e4", "d5", "exd5", "Qxd5", "Nc3"]), plies=2)
+    assert end is not None and end.fen().split()[0] == "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR"
     # a check is never a comparison point (Stockfish prints no table in check): walk back when nothing follows
     end = comparison_point(chess.STARTING_FEN, _uci(["e4", "d5", "Bb5+"]), plies=3)
-    assert end is not None and end.fen().split()[0] == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR"
+    assert end is not None and end.fen().split()[0] == "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR"
     assert comparison_point(chess.STARTING_FEN, [], plies=6) is None
     assert comparison_point(chess.STARTING_FEN, ["e2e5"], plies=6) is None  # an illegal move ends the line
 

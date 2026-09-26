@@ -7,6 +7,10 @@ those whose detector passed the gate) and the explanation, when one matches the 
 comment after the solution's first move: the comment before it stays the puzzle's question, since the explanation
 names the better move (a Lichess study shows that first comment before you try). Every other puzzle stays exactly
 as ``mistakes.puzzles_to_pgn`` writes it.
+
+The ``Themes`` header describes the moves printed, nothing else: the patterns you carry out along that solution
+(``Coaching.puzzle_themes`` for the line ``fill_puzzle_lines`` set, or the explanation's best-line motifs when the
+solution is the explanation's best line), never what your opponent's refutation of the game move did.
 """
 
 from __future__ import annotations
@@ -73,6 +77,13 @@ def _pgn_comment(text: str) -> str:
     return text.replace("}", ")").replace("{", "(")
 
 
+def solution_themes(explanation: Explanation, plies: int) -> list[str]:
+    """The motifs an explanation found along its best line that you carry out within the first ``plies`` moves
+    (the solution printed). Not ``drill_themes``: those include what your opponent's refutation did."""
+    return list(dict.fromkeys(m.theme for m in explanation.motifs or []
+                              if m.line == "best" and m.side == "you" and m.ply < plies))
+
+
 def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
     """``mistakes.puzzles_to_pgn`` plus, where the coaching layer has them: the best line (up to 8 plies) as the
     solution, a ``Themes`` header with the motif tags and the explanation as the comment after the first move."""
@@ -84,11 +95,14 @@ def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
         if e.game.rules != "chess":  # the coaching layer reads standard chess only
             chunks.append(_one(e, number))
             continue
-        line = coaching.puzzle_lines.get(puzzle_key(e.game.game_id, e.ply))
+        key = puzzle_key(e.game.game_id, e.ply)
+        line = coaching.puzzle_lines.get(key)
         moves = _solution(e.fen, line) if line is not None else []
         explanation = explained.get((e.epd, e.uci))
+        from_explanation = False
         if not moves and explanation is not None and explanation.best_line is not None:
             moves = _solution(e.fen, explanation.best_line)
+            from_explanation = True
         if moves and moves[0].uci() == e.uci:  # a deeper search that prefers your move is no puzzle solution
             moves = []
         if not moves:
@@ -96,9 +110,10 @@ def puzzles_pgn(events: list, coaching: Optional[Coaching] = None) -> str:
             continue
         base = _one(e, number)
         headers = base.split("\n\n", 1)[0].splitlines()
-        themes = [t for t in coaching.puzzle_themes.get(puzzle_key(e.game.game_id, e.ply), []) if t]
-        if not themes and explanation is not None:
-            themes = list(explanation.drill_themes)
+        if from_explanation:
+            themes = solution_themes(explanation, len(moves))
+        else:
+            themes = [t for t in coaching.puzzle_themes.get(key, []) if t]
         if themes:
             at = next((i for i, h in enumerate(headers) if h.startswith("[Annotator ")), len(headers))
             headers.insert(at, f'[Themes "{" ".join(dict.fromkeys(themes))}"]')
@@ -140,7 +155,9 @@ def fill_puzzle_lines(
     position was re-searched, else from the profile pass; the themes are the motifs you carry out along it (read
     with the position before your opponent's last move), named only when their detector passed the gate
     (``motifs.GATED_THEMES``). An error whose deeper search prefers the move you played gets no line (the puzzle
-    keeps the game analysis's move)."""
+    keeps the game analysis's move). Every line set here gets its theme list, empty when nothing was found, so the
+    motif profile (``profile._puzzle_lines``, which only fills keys that have none) never tags it with the patterns
+    of another line."""
     from . import motifs
     from .deep import previous_fens, rebase
     from .explain import detect
@@ -169,6 +186,6 @@ def fill_puzzle_lines(
         if e.game.game_id not in before:  # one replay per game
             before[e.game.game_id] = previous_fens(e.game, plies[e.game.game_id])
         previous = before[e.game.game_id].get(e.ply)
-        themes = [m.theme for m in detect(line, "best", previous) if m.side == "you" and m.theme in gated]
-        if themes:
-            coaching.puzzle_themes[key] = list(dict.fromkeys(themes))
+        themes = [m.theme for m in detect(line, "best", previous)
+                  if m.side == "you" and m.theme in gated and m.ply < len(line.moves_uci)]
+        coaching.puzzle_themes[key] = list(dict.fromkeys(themes))

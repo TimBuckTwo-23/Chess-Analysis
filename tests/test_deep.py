@@ -338,14 +338,27 @@ def test_gate_explanations_teach_the_plans_lessons(habit_lines, stockfish_path):
     out = {x.played: x for x in explain.explain_all(AnalysisContext("t", []), positions, lines,
                                                      CoachConfig(stockfish=stockfish_path), notes)}
     # 4.e4: d4 is attacked twice and defended once, so the pawn goes (the plan's "count attackers and defenders")
-    assert out["4.e4"].text.startswith("After 4.e4, Stockfish's answer is 4...Qxd4")
-    assert "you lose a pawn" in out["4.e4"].text and "count the attackers and defenders" in out["4.e4"].text
-    assert out["5...e5"].text.startswith("After 5...e5, Stockfish's answer is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    e4 = out["4.e4"].text
+    assert e4.startswith("After 4.e4, Stockfish's answer is 4...Qxd4")
+    assert "4...Qxd4 takes the pawn on d4, which two black pieces attack and only one of yours defends" in e4
+    assert "Next time, count the attackers and defenders" in e4
+    # 5...e5: the knight comes to d6, a square no pawn of Black's can cover any more (the plan's "d6 hole")
+    e5 = out["5...e5"].text
+    assert e5.startswith("After 5...e5, Stockfish's answer is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    assert "White's knight gets to d6 (7.Nd6+), a square no pawn of yours can cover" in e5
+    assert "no pawn of yours can cover any more" in e5.split("Next time,")[1]
     assert "you lose the bishop pair" in out["5...e5"].facts
-    assert out["2...Nc6"].text.startswith("After 2...Nc6, Stockfish's answer is 3.d5")
+    # 2...Nc6: 3.d5 gains time on the knight; take on d4 first (the plan's lesson). A knight move on the queen's
+    # wing is no lesson about the pawns around your king, whatever Stockfish's king-safety term says.
+    nc6 = out["2...Nc6"].text
+    assert nc6.startswith("After 2...Nc6, Stockfish's answer is 3.d5")
+    assert "3.d5 hits your knight with a pawn and it has to move again (3...Nb8)" in nc6
+    assert "2...cxd4 first takes the pawn that chases it" in nc6
+    assert "king" not in nc6.split("Next time,")[1] and "king" not in out["2...Nc6"].concept_note.get("label", "").lower()
     for x in out.values():
         assert x.sources[0].name == "Stockfish 16, depth 20" or not x.sources[0].name.startswith("Stockfish 16")
         assert [s.title for s in x.diagram.strips][0] == f"After your {x.played}"
+        assert x.verdict == "error" and "would have won" not in x.text
     if any("Stockfish 16" in n for n in notes):  # a newer Stockfish: no classical terms to check
         return
     assert "king safety" in out["5...e5"].text and out["5...e5"].chart is not None

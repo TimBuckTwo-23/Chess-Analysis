@@ -17,8 +17,8 @@ detector looks at one move of a line and at the few moves around it, the way Lic
   equal trade, and keeps the material over the next two moves. For the first side's first move the move before
   is known only when the caller passes ``previous_fen``; without it, a capture that may follow a capture
   (halfmove clock 0) and only gets back to level material counts as a recapture. That guess misses trades when
-  one side is already ahead: on random Lichess puzzles hangingPiece scores 0.91 precision / 0.80 recall without
-  the previous position and 0.99 / 1.00 with it.
+  one side is already ahead: on tests/fixtures/lichess_puzzles_sample.csv hangingPiece scores 0.96 precision /
+  0.79 recall without the previous position and 1.00 / 1.00 with it (scripts/motif_precision.py [--previous]).
 * trappedPiece: a piece that could not move anywhere safe (every square it can reach is attacked by something
   cheaper or not defended) is captured.
 * backRankMate / smotheredMate / mateIn1..5: the line ends in mate; on the back rank behind the king's own
@@ -28,16 +28,22 @@ detector looks at one move of a line and at the few moves around it, the way Lic
 * attraction: a sacrifice lures a king, queen or rook onto a square that is then attacked (and the piece taken).
 * overloading: a defender recaptures on one square and so drops the other piece it guarded. Lichess has no
   puzzles tagged with this theme any more, so its precision can't be measured and it is never named.
-* advancedPawn: a pawn moves to its seventh or eighth rank.
+* advancedPawn: a pawn moves to its seventh or eighth rank and is not taken straight away (a pawn that lands on
+  the seventh and is captured on the next move is a trade, not a pawn that will promote).
 
 ``GATED_THEMES`` holds the themes whose detector tags at least 20 puzzles of
 tests/fixtures/lichess_puzzles_sample.csv and agrees with Lichess's label on at least 80% of them
 (tests/test_motifs.py measures it; scripts/motif_precision.py prints the table); the coaching names only those
 and says "tactic" for the rest. The definitions follow Lichess's, so near-perfect agreement on Lichess puzzles
 is expected: the gate shows we implement those definitions faithfully. An engine line runs on after the tactic
-is over, and a pattern that turns up there counts too: continuing each puzzle with Stockfish to eight plies
-drops precision on the core themes to 0.88-1.00 (scripts/motif_precision.py --extend 8), a lower bound since
+is over, and a pattern that turns up there counts too: continuing each puzzle with Stockfish 16's principal
+variation (30,000 nodes) drops precision on the core themes to 0.89-1.00 at eight plies, the length the coaching
+reads (scripts/motif_precision.py --extend 8), 0.84-1.00 at ten and 0.81-1.00 at twelve; a lower bound, since
 some of those later patterns are real.
+
+What a move allowed is what is new: along a refutation, a pin whose pinner, pinned piece and king already stood
+that way before your move is not one your move allowed (``detect_line``), and the coaching drops a pattern that
+the better line allows too (``carried_by``).
 """
 
 from __future__ import annotations
@@ -91,6 +97,12 @@ THEME_LABELS: dict[str, str] = {
     "overloading": "overloaded defender",
     "advancedPawn": "advanced pawn",
 }
+
+# The order of themes found at the same ply (the first one leads an explanation): taking an undefended piece is
+# the plainer story than the pin that may come with it.
+# A double check is always a discovered check too: the plainer and rarer name goes first.
+_FIRST = ("fork", "hangingPiece", "pin", "skewer", "discoveredAttack", "backRankMate", "doubleCheck")
+RANK = {theme: i for i, theme in enumerate(_FIRST + tuple(t for t in THEMES if t not in _FIRST))}
 
 LINE_PLIES = 8  # detect_line looks this far along a line for patterns ...
 MATE_PLIES = 10  # ... and this far for a mate (mate in 5 by the second side takes 10 plies)
@@ -469,6 +481,8 @@ def _advanced_pawn(w: _Walk, i: int):
     rank = chess.square_rank(w.moves[i].to_square)
     if (rank if w.boards[i].turn == chess.WHITE else 7 - rank) < 6:
         return None
+    if i + 1 < w.n and w.moves[i + 1].to_square == w.moves[i].to_square and not w.moves[i].promotion:
+        return None  # taken at once (6.dxe7 Nxe7): a trade, not a pawn about to promote
     return _found("advancedPawn", i, [w.moves[i].to_square])
 
 
@@ -549,7 +563,7 @@ def _detect(fen: str, moves_uci: list[str], max_plies: int, mate_plies: int,
             hit = detector(walk, i)
             if hit:
                 add(*hit, side)
-    return sorted(found.values(), key=lambda m: (m.ply, THEMES.index(m.theme)))
+    return sorted(found.values(), key=lambda m: (m.ply, RANK[m.theme]))
 
 
 def _safe_detect(fen: str, moves_uci: list[str], max_plies: int, mate_plies: int,
@@ -595,6 +609,12 @@ def puzzle_motifs(fen: str, moves_uci: list[str]) -> list[Motif]:
     return [m for m in detect_moves(board.fen(), solution, max_plies=len(solution)) if m.side == "first"]
 
 
+def forcing_reach(fen: str, moves_uci: list[str], first: int) -> int:
+    """``_forcing_reach``: the last ply index a pattern (or a capture) of the side moving at index ``first`` can sit
+    at and still be forced."""
+    return _forcing_reach(fen, list(moves_uci), first)
+
+
 def _forcing_reach(fen: str, moves_uci: list[str], first: int) -> int:
     """The last ply index a pattern of the side moving at index ``first`` can sit at and still be forced.
 
@@ -620,6 +640,57 @@ def _forcing_reach(fen: str, moves_uci: list[str], first: int) -> int:
 _MATES = frozenset({"backRankMate", "smotheredMate"})
 
 
+def _board_after(fen: str, moves_uci: list[str], plies: int) -> Optional[chess.Board]:
+    try:
+        board = _board(fen)
+        for uci in moves_uci[:plies]:
+            board.push(board.parse_uci(uci))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return board
+
+
+def _standing_pin(fen: str, moves_uci: list[str], motif: Motif) -> bool:
+    """Whether ``motif`` (a pin) already stood at ``fen``: the same pinner, pinned piece and king on the same squares,
+    and the piece pinned there to that king by that pinner."""
+    if motif.theme != "pin" or len(motif.squares) != 3:
+        return False
+    start, after = _board_after(fen, moves_uci, 0), _board_after(fen, moves_uci, motif.ply + 1)
+    if start is None or after is None:
+        return False
+    try:
+        pinner, pinned, king = (chess.parse_square(s) for s in motif.squares)
+    except ValueError:
+        return False
+    piece = after.piece_at(pinned)
+    if piece is None or any(start.piece_at(sq) != after.piece_at(sq) for sq in (pinner, pinned, king)):
+        return False
+    return start.is_pinned(piece.color, pinned) and _pinner(start, king, pinned) == pinner
+
+
+def carried_by(line: Optional[Line], side: str, previous_fen: Optional[str] = None, *,
+               forcing_only: bool = True) -> list[Motif]:
+    """The motifs along ``line`` carried out by ``side``: "first" (the side to move at ``line.fen``) or "second",
+    within forcing reach (see ``detect_line``); ``Motif.line`` is left empty and ``Motif.side`` as detected.
+
+    The coaching reads the other line with it: a pattern your opponent has along the better line too was not
+    allowed by your move, and one you carry out after your move anyway was not missed."""
+    if side not in ("first", "second"):
+        raise ValueError(f"side must be 'first' or 'second', not {side!r}")
+    if line is None or not line.fen or not line.moves_uci:
+        return []
+    moves = list(line.moves_uci)
+    reach = _forcing_reach(line.fen, moves, 0 if side == "first" else 1) if forcing_only else len(moves)
+    out = []
+    for motif in _safe_detect(line.fen, moves, LINE_PLIES, MATE_PLIES, previous_fen):
+        if motif.side != side:
+            continue
+        if motif.ply > reach and not motif.theme.startswith("mate") and motif.theme not in _MATES:
+            continue  # only there if the other side cooperates
+        out.append(motif)
+    return out
+
+
 def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = None, *,
                 forcing_only: bool = True) -> list[Motif]:
     """Motifs along a coaching line. ``role`` is "best" (what you missed: yours are the patterns you carry out)
@@ -629,7 +700,8 @@ def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = N
     "You" is the side to move at ``line.fen``: the best line's first move is yours, the refutation's first move
     is the one you played. Only the role's patterns come back (yours along the best line, the opponent's along
     the refutation). Patterns are looked for in the first ``LINE_PLIES`` moves, a mate in the first
-    ``MATE_PLIES``.
+    ``MATE_PLIES``. Along a refutation, a pin that already stood before your move (the same pinner, pinned piece
+    and king on the same squares) is left out: your move did not allow it.
 
     ``previous_fen`` (optional) is the position before your opponent's last move, the one that led to
     ``line.fen``. Pass it when the game is at hand: along the best line it tells whether taking a piece on your
@@ -646,14 +718,10 @@ def detect_line(line: Optional[Line], role: str, previous_fen: Optional[str] = N
     if line is None or not line.fen or not line.moves_uci:  # no line from the engine: nothing to name
         return []
     want = "first" if role == "best" else "second"
-    moves = list(line.moves_uci)
-    reach = _forcing_reach(line.fen, moves, 0 if role == "best" else 1) if forcing_only else len(moves)
     out = []
-    for motif in _safe_detect(line.fen, moves, LINE_PLIES, MATE_PLIES, previous_fen):
-        if motif.side != want:
-            continue
-        if motif.ply > reach and not motif.theme.startswith("mate") and motif.theme not in _MATES:
-            continue  # only there if the other side cooperates
+    for motif in carried_by(line, want, previous_fen, forcing_only=forcing_only):
+        if role == "refutation" and _standing_pin(line.fen, list(line.moves_uci), motif):
+            continue  # the pin was there before your move
         motif.line = role
         motif.side = "you" if want == "first" else "opponent"
         out.append(motif)

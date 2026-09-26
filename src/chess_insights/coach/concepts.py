@@ -5,10 +5,15 @@ Stockfish 16 is the last release that prints its classical evaluation term by te
 mobility, king safety ... for middlegame and endgame, from White's side). The terms read right after a move are
 misleading: right after 5...e5 Stockfish counts the pawn's attack on the d4 knight as a plus for Black. So the
 concepts compare the two lines where they have played out: the refutation of your move against the engine's best
-line, each read at ``COMPARE_PLIES`` plies from the position before your move (or the nearest quiet position:
-not in check, nothing left to recapture). The engine's PV runs 15 to 25 plies, but its far end is speculative, and
-the three habit positions of the coaching plan read true at this distance (5...e5: piece activity, king safety and
-pawn structure all worse than after 5...a6).
+line, each read at ``COMPARE_PLIES`` plies from the position before your move, or at the nearest settled position:
+not in check, and no capture left that wins material for the side to move (a static exchange count, ``see``). A
+position in the middle of a combination (a fork with the queen still to be taken) is never a comparison point. The
+engine's PV runs 15 to 25 plies, but its far end is speculative, and the three habit positions of the coaching plan
+read true at this distance (5...e5: piece activity, king safety and pawn structure all worse than after 5...a6).
+
+Material is not a concept: when the two ends differ in material, Stockfish's Material and Imbalance terms are left
+out (the explanation names what changes hands from the settled counts instead), and its Winnable term (how the
+evaluation is scaled towards a draw) is never shown, since "winning chances" reads like the game's outcome.
 
 Board facts (python-chess, any Stockfish or none) describe the same two positions in words: the bishop pair,
 castling, a king left in the centre, isolated, doubled and backward pawns, and holes. A fact is named only when it
@@ -41,8 +46,13 @@ LABELS = {  # plain words: "you stand 0.30 pawns worse on <label>"
     "Space": "space", "Winnable": "winning chances",
 }
 MIN_DELTA = 0.15  # pawns
+# Terms never shown: Winnable scales the evaluation towards a draw; as "winning chances" it reads like the result.
+HIDDEN_TERMS = frozenset({"Winnable"})
+# Terms shown only when both ends have the same material (then Material is piece placement, Imbalance piece balance).
+MATERIAL_TERMS = frozenset({"Material", "Imbalance"})
 COMPARE_PLIES = 6  # where the two lines are compared: this many plies from the position before your move ...
-QUIET_EXTRA = 4  # ... or up to this many plies later, at the first quiet position
+QUIET_EXTRA = 6  # ... or up to this many plies later, at the first settled position
+CASTLE_SOON = 4  # a king that castles within this many plies after the comparison point is not "in the centre"
 PHASE_WEIGHTS = {chess.KNIGHT: 1, chess.BISHOP: 1, chess.ROOK: 2, chess.QUEEN: 4}
 MAX_PHASE = 24  # all the pieces of the start position
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
@@ -122,12 +132,16 @@ def concept_deltas(
 
     Each end is blended with its own material phase (what the term is worth in that position); ``mg`` / ``eg`` are
     the raw differences. ``material_level``: both ends have the same material, so a Material difference is piece
-    placement (Stockfish's Material term includes its piece-square tables). Worst for you first.
+    placement (Stockfish's Material term includes its piece-square tables) and an Imbalance difference is piece
+    balance; otherwise both terms are left out (they would only restate the material, read by the evaluation's own
+    scale). Winnable is never included (``HIDDEN_TERMS``). Worst for you first.
     """
     sign = 1.0 if color == "white" else -1.0
     out = []
     for term in TERMS:
-        if term not in best or term not in refutation:
+        if term not in best or term not in refutation or term in HIDDEN_TERMS:
+            continue
+        if term in MATERIAL_TERMS and not material_level:
             continue
         (bmg, beg), (rmg, reg) = best[term], refutation[term]
         value = sign * (blend(rmg, reg, refutation_phase) - blend(bmg, beg, best_phase))
@@ -140,20 +154,63 @@ def concept_deltas(
 
 
 # --------------------------------------------------------------------------- where to compare the lines
-def _quiet(board: chess.Board, last: Optional[chess.Move]) -> bool:
-    """Not in check, and nothing can take on the square the last move went to (no exchange half done)."""
+def _captured_value(board: chess.Board, move: chess.Move) -> int:
+    """What ``move`` takes (pawns; en passant a pawn), plus what a promotion adds."""
+    if board.is_en_passant(move):
+        taken = PIECE_VALUES[chess.PAWN]
+    else:
+        victim = board.piece_type_at(move.to_square)
+        taken = PIECE_VALUES.get(victim, 0) if victim else 0
+    if move.promotion:
+        taken += PIECE_VALUES.get(move.promotion, 0) - PIECE_VALUES[chess.PAWN]
+    return taken
+
+
+def _exchange(board: chess.Board, square: chess.Square) -> int:
+    """What the side to move gains by taking on ``square`` with its cheapest legal capture and letting the exchange
+    run on (each side may stop): 0 when taking there loses material or is not possible."""
+    captures = [m for m in board.generate_legal_captures(to_mask=chess.BB_SQUARES[square])]
+    if not captures:
+        return 0
+    move = min(captures, key=lambda m: (PIECE_VALUES.get(board.piece_type_at(m.from_square), 100),
+                                         -(PIECE_VALUES.get(m.promotion, 0) if m.promotion else 0)))
+    gain = _captured_value(board, move)
+    board.push(move)
+    try:
+        return max(0, gain - _exchange(board, square))
+    finally:
+        board.pop()
+
+
+def see(board: chess.Board, move: chess.Move) -> int:
+    """Static exchange count of a capture, in pawns (knight and bishop 3, rook 5, queen 9): what ``move`` takes minus
+    what the other side then wins back on that square, both sides taking with their cheapest piece and each free to
+    stop. A capture that loses the piece for less is negative."""
+    gain = _captured_value(board, move)
+    probe = board.copy(stack=False)
+    probe.push(move)
+    return gain - _exchange(probe, move.to_square)
+
+
+def settled(board: chess.Board) -> bool:
+    """Not in check, and no capture wins material for the side to move (``see`` > 0): no exchange half done, no
+    piece left en prise, no fork waiting to be cashed in."""
     if board.is_check():
         return False
-    if last is None:
-        return True
-    return not any(m.to_square == last.to_square for m in board.generate_legal_captures())
+    return not any(see(board, m) > 0 for m in board.generate_legal_captures())
 
 
-def comparison_point(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PLIES) -> Optional[chess.Board]:
-    """The position of a line where concepts are read: after ``plies`` moves, or the first quiet one up to
-    ``QUIET_EXTRA`` plies later, or else the last quiet one before it (never the start). None if there is none."""
+def _quiet(board: chess.Board, last: Optional[chess.Move] = None) -> bool:
+    """``settled`` (``last`` is kept for callers of the older rule, which only looked at the last move's square)."""
+    return settled(board)
+
+
+def comparison_ply(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PLIES) -> Optional[int]:
+    """How many moves of a line are played before its concepts are read: ``plies``, or the first settled position
+    up to ``QUIET_EXTRA`` plies later, or else the last settled one before it (never the start). None if there is
+    none: then the line has no comparison point."""
     board = chess.Board(fen)
-    boards: list[tuple[chess.Board, Optional[chess.Move]]] = []
+    boards: list[chess.Board] = []
     for uci in moves_uci[: plies + QUIET_EXTRA]:
         try:
             move = chess.Move.from_uci(uci)
@@ -162,14 +219,104 @@ def comparison_point(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PL
         if move not in board.legal_moves:
             break
         board.push(move)
-        boards.append((board.copy(stack=False), move))
+        boards.append(board.copy(stack=False))
     if not boards:
         return None
     target = min(plies, len(boards)) - 1
     for i in list(range(target, len(boards))) + list(range(target - 1, -1, -1)):
-        b, last = boards[i]
-        if _quiet(b, last):
-            return b
+        if settled(boards[i]):
+            return i + 1
+    return None
+
+
+def comparison_point(fen: str, moves_uci: Sequence[str], plies: int = COMPARE_PLIES) -> Optional[chess.Board]:
+    """The position of a line where concepts are read (``comparison_ply``); None if there is none."""
+    n = comparison_ply(fen, moves_uci, plies)
+    if n is None:
+        return None
+    board = chess.Board(fen)
+    for uci in moves_uci[:n]:
+        board.push_uci(uci)
+    return board
+
+
+def captures(fen: str, moves_uci: Sequence[str], color: Color) -> tuple[list[int], list[int]]:
+    """(``color``'s pieces taken, the other side's pieces taken) along ``moves_uci`` from ``fen``, as piece types
+    (en passant: a pawn); stops at the first illegal move."""
+    me = chess.WHITE if color == "white" else chess.BLACK
+    board = chess.Board(fen)
+    mine: list[int] = []
+    theirs: list[int] = []
+    for uci in moves_uci:
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            break
+        if move not in board.legal_moves:
+            break
+        if board.is_en_passant(move):
+            victim: Optional[int] = chess.PAWN
+        else:
+            victim = None if board.is_castling(move) else board.piece_type_at(move.to_square)
+        if victim:
+            (mine if board.turn != me else theirs).append(victim)
+        board.push(move)
+    return mine, theirs
+
+
+def castles_within(fen: str, moves_uci: Sequence[str], start: int, color: Color, plies: int = CASTLE_SOON) -> bool:
+    """Whether ``color`` castles in moves ``start`` .. ``start + plies - 1`` of the line."""
+    me = chess.WHITE if color == "white" else chess.BLACK
+    board = chess.Board(fen)
+    for i, uci in enumerate(moves_uci[: start + plies]):
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            return False
+        if move not in board.legal_moves:
+            return False
+        if i >= start and board.turn == me and board.is_castling(move):
+            return True
+        board.push(move)
+    return False
+
+
+PIECE_NAMES = {chess.KNIGHT: "knight", chess.BISHOP: "bishop", chess.ROOK: "rook", chess.QUEEN: "queen"}
+
+
+@dataclass
+class Invasion:
+    """An enemy piece that lands on a hole in your camp along a line."""
+
+    ply: int  # index of the move in the line
+    piece: str  # "knight"
+    square: str  # "d6"
+    san: str  # "7.Nd6+"
+
+
+def hole_invasion(fen: str, moves_uci: Sequence[str], color: Color, plies: int = COMPARE_PLIES) -> Optional[Invasion]:
+    """The first enemy knight, bishop, rook or queen that lands, in the first ``plies`` moves of a line, on a hole in
+    ``color``'s camp (``board_facts``: a square on your third or fourth rank that no pawn of yours can cover any
+    more, read before that move), or None."""
+    from ..analysis.mistakes import format_line
+
+    me = chess.WHITE if color == "white" else chess.BLACK
+    board = chess.Board(fen)
+    for i, uci in enumerate(moves_uci[:plies]):
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            return None
+        if move not in board.legal_moves:
+            return None
+        piece = board.piece_type_at(move.from_square)
+        if board.turn != me and piece in PIECE_NAMES:
+            square = chess.square_name(move.to_square)
+            facts = board_facts(board, color)
+            if square in facts.holes and facts.pawns >= MIN_HOLE_PAWNS:
+                san = format_line([board.san(move)], board.fen())
+                return Invasion(ply=i, piece=PIECE_NAMES[piece], square=square, san=san)
+        board.push(move)
     return None
 
 

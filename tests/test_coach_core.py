@@ -257,9 +257,15 @@ def test_a_motif_is_named_only_when_its_detector_passed_the_gate(motif_hooks, mo
     ex = out[0]
     assert "White has a fork: 6.Ndb5" in ex.text and "attack at once" in ex.text
     assert ex.motifs == [fork] and ex.drill_themes == ["fork"]
-    assert [(m.square, m.kind) for m in ex.diagram.marks] == [("d6", "attacker"), ("e8", "target"), ("b7", "target")]
+    # the forking knight is not on d6 before your move: the fork is marked on the strip frame where it appears, not
+    # on the main board (where the tint would land on an empty square)
+    assert ex.diagram.marks == []
     frames = ex.diagram.strips[0].frames
-    assert frames[2].marks and frames[2].marks[0].square == "d6" and not frames[0].marks  # ply 3 = third frame
+    assert [(m.square, m.kind) for m in frames[2].marks] == [("d6", "attacker"), ("e8", "target"), ("b7", "target")]
+    assert not frames[0].marks  # ply 3 = third frame
+    # the text and the strip reach the move where the fork cashes in (ply 3 + 2: 8.Qxd6)
+    assert "White has a fork: 6.Ndb5 a6 7.Nd6+ Bxd6 8.Qxd6." in ex.text
+    assert [f.move for f in ex.diagram.strips[0].frames][-1] == "8.Qxd6"
 
 
 def test_missed_motif_and_mate_texts(motif_hooks, monkeypatch):
@@ -349,8 +355,8 @@ def test_material_is_blamed_on_your_move_only_against_both_the_start_and_the_bet
     ref = make_line(fen, [chess.Move.from_uci(u) for u in ("a1b2", "h5h1")], -1000, None, 20)
     cmp = tool.compare(fen, best, ref, "white")
     assert (cmp.material_lost, cmp.material_missed) == (5, 9)
-    assert explain._what_it_wins(cmp, gap=19.0, best_label="1.Rxh5+") == (
-        "you lose 5 pawns' worth of material, and 1.Rxh5+ would have won 9 pawns' worth of material")
+    assert explain._what_it_wins(cmp, gap=19.0, best_label="1.Rxh5+") == (  # what changes hands, not a count
+        "you lose a rook, and 1.Rxh5+ would have won the queen")
     # the e4 pawn falls whatever you play: it is not what your move lost
     fen = "4r2k/8/8/8/4P3/8/8/K7 w - - 0 1"
     best = make_line(fen, [chess.Move.from_uci(u) for u in ("a1b2", "e8e4")], -500, None, 20)
@@ -546,7 +552,7 @@ def test_puzzle_pgn_with_lines_themes_and_explanations(player):
     assert games[1].comment.startswith("In the game you played 5...e5") and "Nf6" not in games[1].comment
     first_move = games[1].next()
     assert first_move.move.uci() == "g8f6" and first_move.comment == "After 5...e5, White plays (6.Ndb5)."
-    assert games[1].headers["Themes"] == "pin"
+    assert "Themes" not in games[1].headers  # the explanation has no motif along its best line
     # an explanation is matched by position and move, not by its label: "6...e5" after a transposition still counts
     coaching.explanations[0].played = "6...e5"
     again = _read_all(puzzles.puzzles_pgn(events, coaching))
