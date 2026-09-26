@@ -43,6 +43,7 @@ STRIP_FRAMES = 4  # small boards per line
 # Below this many win-% points the deeper search does not even call your move an inaccuracy (engine.JUDGEMENT_DROPS):
 # the text then says your move is close to Stockfish's choice instead of explaining an error.
 CLOSE_DROP = min(drop for drop, _ in sf.JUDGEMENT_DROPS)
+CLOSE_GAP = 1.0  # ... and less than this many pawns: in a lopsided position -10 against -6 is a few win-% points
 TEXT_PLIES = 4  # moves of a line quoted in the text
 
 # theme -> (the pattern in words, what to check next time when your move allowed it)
@@ -223,6 +224,13 @@ def win_drop(best: Line, refutation: Line) -> float:
     return sf.win_percent(best.cp_end, best.mate_end) - sf.win_percent(refutation.cp_end, refutation.mate_end)
 
 
+def is_close(best: Line, refutation: Line) -> bool:
+    """The deeper search hardly minds your move: under ``CLOSE_DROP`` win-% points and ``CLOSE_GAP`` pawns behind
+    its first choice (a different move)."""
+    return (bool(best.moves_uci) and bool(refutation.moves_uci) and best.moves_uci[0] != refutation.moves_uci[0]
+            and win_drop(best, refutation) < CLOSE_DROP and _gap(best, refutation) < CLOSE_GAP)
+
+
 def shown_line(best: Line, refutation: Line) -> Line:
     """The line after your move that the text and the strip show. When the deeper search's first choice is your
     own move, its MultiPV line (so your move reads with the same number as in the other positions' texts), unless
@@ -308,9 +316,8 @@ def explanation_text(
 ) -> str:
     """At most three sentences: what the refutation does, what it wins, what to check next time.
 
-    When the deeper search finds your move as good as its own (the same move) or close to it (less than
-    ``CLOSE_DROP`` win-% points behind: not even an inaccuracy), the text says so instead of explaining an error
-    that is not one.
+    When the deeper search finds your move as good as its own (the same move) or close to it (``is_close``: not even
+    an inaccuracy), the text says so instead of explaining an error that is not one.
     """
     played = pos.move_label
     best_label = _label(pos.fen, best.moves_uci[0]) if best.moves_uci else ""
@@ -320,7 +327,7 @@ def explanation_text(
     ref_v, best_v = verdict(refutation, pos.color), verdict(best, pos.color, short=True)
     gap = _gap(best, refutation)
     answer = _line_text(refutation, 1, TEXT_PLIES)
-    close = not same and win_drop(best, refutation) < CLOSE_DROP
+    close = not same and is_close(best, refutation)
     at = f" at depth {depth}" if depth else ""
 
     if pos.kind == "choice":
@@ -483,7 +490,7 @@ def explain_position(
     if not refutation.moves_uci or refutation.moves_uci[0] != pos.played_uci:
         return None
     same = best.moves_uci[0] == pos.played_uci
-    close = not same and win_drop(best, refutation) < CLOSE_DROP  # the deeper search hardly minds your move
+    close = not same and is_close(best, refutation)  # the deeper search hardly minds your move
     shown = shown_line(best, refutation)  # the line after your move in the text and the strip
     # No motifs, drill themes or concept comparison for a move the deeper search does not call an error, and no
     # concepts when a forced mate decides a line (material and structure on the way to it say nothing).

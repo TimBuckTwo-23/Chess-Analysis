@@ -264,6 +264,11 @@ def test_a_move_the_deeper_search_finds_close_to_its_choice_is_not_explained_as_
     ex = explain.explain_position(games, _position(kind="choice"), close, _NoConcepts(), frozenset({"fork"}))
     assert ex.text == ("Your 5...e5 (−0.60 for you) is close to Stockfish's first choice, 5...Nf6 (−0.39); its main "
                        "line after 5...e5 is 6.Ndb5 a6 7.Nd6+ Bxd6.")
+    # a lost position where your move costs 4 pawns but few win-% points is still explained as an error
+    lopsided = _result(pos, best_cp=-800, ref_cp=-1200)
+    assert explain.win_drop(lopsided.best_line, lopsided.refutation) < explain.CLOSE_DROP
+    assert not explain.is_close(lopsided.best_line, lopsided.refutation)
+    assert "close to" not in explain.explain_position(games, pos, lopsided, None, frozenset()).text
     # a real error (10.5 points) is explained as one
     ex = explain.explain_position(games, pos, _result(pos), None, frozenset({"fork"}))
     assert "White has a fork" in ex.text and ex.drill_themes == ["fork"]
