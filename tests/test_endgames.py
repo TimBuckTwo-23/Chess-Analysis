@@ -137,8 +137,10 @@ def test_annotate_builds_the_table_boards_and_explanation_facts(tmp_path, sessio
     assert rows["Rook endings"][8] == "2 blitz" and rows["Queen endings"][8] == "1 bullet"
     assert "4 of your 5 engine-analysed games" in table.note and "bullet, blitz and rapid" in table.note
 
-    # boards for the slips, most recent first: your move red, the tablebase's green
-    rook, queen = engine.diagrams
+    # boards for the slips, most recent first: your move red, the tablebase's green (in Coaching.endgame_diagrams,
+    # drawn under the endings table; the Engine review section is left alone)
+    rook, queen = coaching.endgame_diagrams
+    assert engine.diagrams == []
     assert rook.title == "Rook ending: 1.Rd1 turned a draw into a loss" and rook.link == games[3].url
     assert [(a.start, a.end, a.kind) for a in rook.arrows] == [("d5", "d1", "played"), ("f4", "f5", "best")]
     # the tablebase counts DTM in plies: 13 plies is mate in 7 moves
