@@ -2,8 +2,12 @@
 
 * **Motif packs**: your three most-missed patterns (the motif profile's counts; failing that, the patterns in the
   positions this report explains, then the engine's own tags: material left hanging, missed mates) each get
-  ``cfg.drill_size`` Lichess puzzles of that theme in ``cfg.drill_rating``, the most popular first (then the most
+  ``cfg.drill_size`` Lichess puzzles of that theme in the rating window, the most popular first (then the most
   played), chosen deterministically. With ``cfg.out_stem`` each pack is written as ``<stem>-drill-<theme>.pgn``.
+* **Rating window** (:func:`drill_window`): ``cfg.drill_rating`` when given (``--drill-rating``), kept inside the
+  puzzle collection's 800-2200; else (None, the default) your level: the Lichess equivalent
+  (``rating_map.lichess_equivalent``) of your latest chess.com rating in your most-played rated format among blitz
+  and rapid (else bullet), +-200, inside 800-2200. A note says which window was used and why.
 * **Openings pack**: puzzles whose Lichess ``OpeningTags`` (set only for puzzles starting before move 20) match the
   opening families of your three most-played lines with each colour, where you solve for the colour you play
   them with when possible: ``<stem>-drill-openings.pgn``.
@@ -31,7 +35,7 @@ import chess
 import chess.pgn
 
 from ..models import Coaching, Drill, DrillPuzzle, Game, ModuleResult, ReviewItem
-from . import puzzles_db
+from . import puzzles_db, rating_map
 from .config import DEFAULT_DRILL_RATING, REVIEW_STEPS_DAYS, CoachConfig
 from .profile import motif_name, training_url
 
@@ -52,6 +56,9 @@ TAG_WORDS = {  # (one, several)
     "missed_mate": ("missed a forced mate once", "missed {n} forced mates"),
 }
 MAX_DONE = 2000  # review items remembered as done (the most recent reports' worth)
+WINDOW_HALF = 200  # the automatic window: your Lichess-equivalent rating +-200
+MIN_WINDOW = 200  # the narrowest automatic window (a rating near or past an end of the puzzle collection)
+WINDOW_FORMATS = (("blitz", "rapid"), ("bullet",))  # your most-played rated format in the first group that has one
 
 
 def _plural(n: int, word: str, plural: Optional[str] = None) -> str:
@@ -290,26 +297,108 @@ def pack_path(out_stem: Path, theme: str) -> Path:
 
 
 def _write(drill: Drill, out_stem: Optional[Path], notes: list[str]) -> None:
+    """Write the pack next to the report, atomically (a failed write leaves the earlier file whole, never a
+    truncated one), as the report files are."""
+    from ..report import _clean_text, _write_atomic
+
     if not out_stem or not drill.puzzles:
         return
     path = pack_path(out_stem, drill.theme)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(pack_pgn(drill), encoding="utf-8")
+        _write_atomic(path, _clean_text(pack_pgn(drill)))
     except OSError as exc:
         notes.append(f"The {drill.theme} drill pack could not be written ({exc}).")
         return
     drill.file = path.name
 
 
+# --------------------------------------------------------------------------- the rating window
+def player_rating(games: Iterable[Game]) -> Optional[tuple[str, int, int]]:
+    """(format, your latest chess.com rating in it, your rated games in it) for your most-played rated format among
+    blitz and rapid (a tie goes to blitz), else bullet; None without a rated game in those formats."""
+    games = [g for g in games if g.rated and g.my_rating]
+    for group in WINDOW_FORMATS:
+        counts = Counter(g.time_class for g in games if g.time_class in group)
+        if not counts:
+            continue
+        tc = max(group, key=lambda t: (counts[t], -group.index(t)))
+        latest = max((g for g in games if g.time_class == tc), key=lambda g: g.end_time)
+        return tc, int(latest.my_rating), counts[tc]
+    return None
+
+
+def clip_window(lo: int, hi: int) -> Optional[tuple[int, int]]:
+    """``lo``-``hi`` inside the puzzle collection's ratings (``puzzles_db.MIN_RATING``-``MAX_RATING``); None when
+    they do not overlap."""
+    lo, hi = max(int(lo), puzzles_db.MIN_RATING), min(int(hi), puzzles_db.MAX_RATING)
+    return (lo, hi) if lo < hi else None
+
+
+def window_around(rating: int) -> tuple[int, int]:
+    """``rating`` +-``WINDOW_HALF``, inside the puzzle collection and at least ``MIN_WINDOW`` wide."""
+    lo = min(max(rating - WINDOW_HALF, puzzles_db.MIN_RATING), puzzles_db.MAX_RATING - MIN_WINDOW)
+    hi = max(min(rating + WINDOW_HALF, puzzles_db.MAX_RATING), puzzles_db.MIN_RATING + MIN_WINDOW)
+    return lo, hi
+
+
+def drill_window(games: Iterable[Game], cfg: CoachConfig) -> tuple[tuple[int, int], str, dict[str, Any]]:
+    """(the puzzle rating window, why it is that window in words, the same as data for the JSON).
+
+    ``cfg.drill_rating`` (``--drill-rating``) when it overlaps the puzzle collection (cut to it); else your level
+    (:func:`player_rating` on the Lichess scale, +-``WINDOW_HALF``); else ``DEFAULT_DRILL_RATING``. The words follow
+    "Puzzle packs are rated 1190–1590" (:func:`window_note`).
+    """
+    held = f"{puzzles_db.MIN_RATING}–{puzzles_db.MAX_RATING}"
+    chosen = (int(cfg.drill_rating[0]), int(cfg.drill_rating[1])) if cfg.drill_rating else None
+    unusable = ""
+    if chosen is not None:
+        window = clip_window(*chosen)
+        if window == chosen:
+            return window, ", the range you chose (--drill-rating).", {"source": "chosen", "chosen": list(chosen)}
+        if window is not None:
+            return window, (f": the part of the range you chose (--drill-rating {chosen[0]}-{chosen[1]}) that the "
+                            f"puzzle collection holds ({held})."), {"source": "chosen", "chosen": list(chosen)}
+        unusable = (f" The range you chose (--drill-rating {chosen[0]}-{chosen[1]}) has no puzzles: the collection "
+                    f"holds {held}.")
+    found = player_rating(games)
+    if found is None:
+        lo, hi = DEFAULT_DRILL_RATING
+        return (lo, hi), (": none of these games is a rated blitz, rapid or bullet game to read your level from. "
+                          "Choose another range with --drill-rating." + unusable), {"source": "default"}
+    tc, rating, n = found
+    lichess = rating_map.lichess_equivalent(rating, tc, cfg.rating_map)
+    window = window_around(lichess)
+    games_word = "game" if n == 1 else "games"
+    which = (f"your most-played rated format among blitz and rapid, {n} {games_word}" if tc != "bullet" else
+             f"this report has no rated blitz or rapid games; {n} rated bullet {games_word}")
+    why = (f", around your level: your chess.com {tc} rating of {rating} ({which}) is about {lichess} on Lichess, "
+           f"where the puzzles come from ({rating_map.source_of(rating, tc, cfg.rating_map)})")
+    if window != (lichess - WINDOW_HALF, lichess + WINDOW_HALF):
+        why += f"; the puzzle collection holds {held}"
+    why += ". Choose another range with --drill-rating." + unusable
+    return window, why, {"source": "auto", "time_class": tc, "chesscom": rating, "lichess": lichess, "games": n}
+
+
+def window_note(window: Sequence[int], why: str, packs: bool = True) -> str:
+    """"Puzzle packs are rated 1190–1590, around your level: ..." (``why`` from :func:`drill_window`); without
+    packs, "No drill packs: the puzzle database has no puzzles for your patterns and openings rated ..."."""
+    lo, hi = int(window[0]), int(window[1])
+    if packs:
+        return f"Puzzle packs are rated {lo}–{hi}{why}"
+    return f"No drill packs: the puzzle database has no puzzles for your patterns and openings rated {lo}–{hi}{why}"
+
+
 # --------------------------------------------------------------------------- packs
 def build_packs(
-    ctx: "AnalysisContext", coaching: Coaching, cfg: CoachConfig, gated: Iterable[str] = ()
+    ctx: "AnalysisContext", coaching: Coaching, cfg: CoachConfig, gated: Iterable[str] = (),
+    window: Optional[tuple[int, int]] = None,
 ) -> list[Drill]:
-    """The motif packs and the openings pack (not written yet)."""
+    """The motif packs and the openings pack (not written yet), with puzzles rated inside ``window`` (default:
+    :func:`drill_window`)."""
     themes = pick_themes(ctx, coaching, gated)
     families = top_families(ctx.games)
-    lo, hi = cfg.drill_rating or DEFAULT_DRILL_RATING
+    lo, hi = window or drill_window(ctx.games, cfg)[0]
     size = max(0, int(cfg.drill_size))
     by_theme, by_family = collect_candidates(Path(cfg.puzzle_db), [t for t, _ in themes], families, (lo, hi))
     used: set[str] = set()
@@ -475,8 +564,9 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
     if path is None or not path.is_file():
         coaching.notes.append(NO_DB_NOTE + ".")
     else:
+        window, why, basis = drill_window(ctx.games, cfg)
         try:  # a broken subset costs the packs, not the review schedule of your own positions
-            packs = build_packs(ctx, coaching, cfg, getattr(motifs, "GATED_THEMES", ()) or ())
+            packs = build_packs(ctx, coaching, cfg, getattr(motifs, "GATED_THEMES", ()) or (), window)
         except Exception as exc:  # noqa: BLE001
             coaching.notes.append(f"No drill packs: the puzzle database at {path.name} could not be read "
                                   f"({type(exc).__name__}: {exc}). Run chess-insights puzzles-db again.")
@@ -487,12 +577,10 @@ def annotate(ctx: "AnalysisContext", coaching: Coaching, modules: list[ModuleRes
             meta = puzzles_db.read_meta(path)
             coaching.settings["puzzle_db"] = {
                 "downloaded": meta.get("downloaded", ""), "rows": meta.get("rows"),
-                "license": meta.get("license", "CC0"), "rating": list(cfg.drill_rating or DEFAULT_DRILL_RATING), "size": cfg.drill_size,
+                "license": meta.get("license", "CC0"), "rating": list(window), "size": cfg.drill_size,
+                "rating_basis": basis, "rating_note": window_note(window, why),
             }
-            if not packs:
-                coaching.notes.append("No drill packs: the puzzle database has no puzzles for your patterns and "
-                                      f"openings in the {(cfg.drill_rating or DEFAULT_DRILL_RATING)[0]}-"
-                                      f"{(cfg.drill_rating or DEFAULT_DRILL_RATING)[1]} rating range.")
+            coaching.notes.append(window_note(window, why, packs=bool(packs)))
     coaching.drills = packs
     done = done_items(cfg.previous, today)
     new = own_items(ctx, skip=done) + drill_items(packs, skip=done)

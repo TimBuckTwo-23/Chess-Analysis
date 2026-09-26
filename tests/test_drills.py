@@ -437,3 +437,122 @@ def test_tactics_and_blunders_items_get_one_drill_action_in_place_of_generic_puz
     plain = insights.build_study_plan(weaknesses, practice=list(practice))
     assert insights.build_study_plan(weaknesses, practice=insights.practice_actions([mistakes])) == plain
     assert any("hanging piece" in a for a in next(i for i in plain if i.category.startswith("Tactics")).actions)
+
+
+# --------------------------------------------------------------------------- the rating window
+def rated_games(*specs):
+    """(time_class, [ratings, oldest first], rated) -> games in that order (make_game places each later in time)."""
+    return [make_game(time_class=tc, my_rating=r, rated=rated) for tc, ratings, rated in specs for r in ratings]
+
+
+def auto_cfg(subset, tmp_path, **kw):
+    return CoachConfig(puzzle_db=subset, out_stem=tmp_path / "me", **kw)  # drill_rating None: your level
+
+
+def test_the_default_window_is_your_level_bigmuffeater(subset, tmp_path):
+    """Blitz ~950 (most played), rapid ~1130, bullet ~650: the packs sit around blitz 950, about 1390 on Lichess."""
+    games = rated_games(("bullet", [640, 650] * 3, True), ("rapid", [1120, 1130], True),
+                        ("blitz", [940, 945, 950], True))
+    ctx = AnalysisContext(username="tester", games=games, evals={})
+    coaching = coaching_with_counts()
+    drills.annotate(ctx, coaching, [], auto_cfg(subset, tmp_path), TODAY)
+    assert coaching.drills and all(d.rating_range == (1190, 1590) for d in coaching.drills)
+    assert all(1190 <= p.rating <= 1590 for d in coaching.drills for p in d.puzzles)
+    db = coaching.settings["puzzle_db"]
+    assert db["rating"] == [1190, 1590]
+    assert db["rating_basis"] == {"source": "auto", "time_class": "blitz", "chesscom": 950, "lichess": 1390,
+                                  "games": 3}
+    note = next(n for n in coaching.notes if n.startswith("Puzzle packs are rated"))
+    assert note == db["rating_note"] == (
+        "Puzzle packs are rated 1190–1590, around your level: your chess.com blitz rating of 950 (your most-played "
+        "rated format among blitz and rapid, 3 games) is about 1390 on Lichess, where the puzzles come from "
+        "(ChessGoals rating comparison, July 2026). Choose another range with --drill-rating.")
+
+
+def test_the_window_follows_the_most_played_rated_format_and_its_latest_rating(subset, tmp_path):
+    rapid = rated_games(("blitz", [950, 960], True), ("blitz", [2000] * 5, False), ("rapid", [1000, 1100, 1130], True))
+    assert drills.player_rating(rapid) == ("rapid", 1130, 3)  # casual games don't count; the latest rating does
+    window, why, basis = drills.drill_window(rapid, CoachConfig())
+    assert basis["lichess"] == 1600 and window == (1400, 1800)  # rapid 1130: roughly 1600 on Lichess
+    assert "rapid rating of 1130" in why and "rough estimate" in why  # this part of the table is an estimate
+    tie = rated_games(("rapid", [1130, 1130], True), ("blitz", [950, 950], True))
+    assert drills.player_rating(tie)[0] == "blitz"
+    bullet = rated_games(("bullet", [600, 650], True), ("rapid", [1130], False))
+    assert drills.player_rating(bullet) == ("bullet", 650, 2)
+    window, why, _ = drills.drill_window(bullet, CoachConfig())
+    assert window == (920, 1320) and "bullet rating of 650" in why and "no rated blitz or rapid games" in why
+
+
+def test_without_a_rated_game_the_window_is_the_default_and_the_note_says_why(subset, tmp_path):
+    games = rated_games(("blitz", [1500] * 3, False), ("daily", [1800], True))
+    window, why, basis = drills.drill_window(games, CoachConfig())
+    assert window == (1200, 1600) and basis == {"source": "default"}
+    assert drills.window_note(window, why) == (
+        "Puzzle packs are rated 1200–1600: none of these games is a rated blitz, rapid or bullet game to read your "
+        "level from. Choose another range with --drill-rating.")
+
+
+def test_the_window_stays_inside_the_puzzle_collection():
+    from chess_insights.coach import puzzles_db
+
+    assert (puzzles_db.MIN_RATING, puzzles_db.MAX_RATING) == (800, 2200)
+    assert drills.window_around(1390) == (1190, 1590)
+    assert drills.window_around(900) == (800, 1100)  # cut at the bottom
+    assert drills.window_around(500) == (800, 1000)  # far below: the lowest 200 points
+    assert drills.window_around(2110) == (1910, 2200)
+    assert drills.window_around(3000) == (2000, 2200)
+    strong = rated_games(("blitz", [2400], True))
+    window, why, _ = drills.drill_window(strong, CoachConfig())
+    assert window == (2000, 2200) and "about 2410 on Lichess" in why and "holds 800–2200" in why
+
+
+def test_a_chosen_window_is_used_and_cut_to_the_collection(subset, tmp_path):
+    games = rated_games(("blitz", [950], True))
+    window, why, basis = drills.drill_window(games, CoachConfig(drill_rating=(1300, 1700)))
+    assert window == (1300, 1700) and basis == {"source": "chosen", "chosen": [1300, 1700]}
+    assert drills.window_note(window, why) == "Puzzle packs are rated 1300–1700, the range you chose (--drill-rating)."
+    window, why, _ = drills.drill_window(games, CoachConfig(drill_rating=(2000, 2600)))
+    assert window == (2000, 2200) and drills.window_note(window, why) == (
+        "Puzzle packs are rated 2000–2200: the part of the range you chose (--drill-rating 2000-2600) that the "
+        "puzzle collection holds (800–2200).")
+    window, why, basis = drills.drill_window(games, CoachConfig(drill_rating=(2300, 2600)))
+    assert window == (1190, 1590) and basis["source"] == "auto"  # nothing there: back to your level, and says so
+    assert why.endswith("The range you chose (--drill-rating 2300-2600) has no puzzles: the collection holds "
+                        "800–2200.")
+
+
+def test_the_window_uses_your_rating_map(subset, tmp_path):
+    games = rated_games(("blitz", [950], True))
+    window, why, basis = drills.drill_window(games, CoachConfig(rating_map={"blitz": [[900, 1000], [1000, 1100]]}))
+    assert basis["lichess"] == 1050 and window == (850, 1250) and "(your rating map)" in why
+
+
+def test_no_packs_in_the_window_says_which_window_and_why(tmp_path):
+    empty = tmp_path / "subset.csv"
+    empty.write_text("PuzzleId,FEN,Moves,Rating,Themes,OpeningTags\n", encoding="utf-8")
+    ctx = AnalysisContext(username="tester", games=rated_games(("blitz", [950], True)), evals={})
+    coaching = coaching_with_counts()
+    drills.annotate(ctx, coaching, [], CoachConfig(puzzle_db=empty, out_stem=tmp_path / "me"), TODAY)
+    assert coaching.drills == []
+    assert any(n.startswith("No drill packs: the puzzle database has no puzzles for your patterns and openings rated "
+                            "1190–1590, around your level: your chess.com blitz rating of 950") for n in coaching.notes)
+
+
+def test_a_failed_pack_write_leaves_the_earlier_file_whole(subset, tmp_path, monkeypatch):
+    """Packs are written like the report files: a temporary file, then a rename, so an interrupted or failed write
+    never leaves a truncated PGN that the Practice section points to."""
+    import os
+
+    old = tmp_path / "me-drill-fork.pgn"
+    old.write_text("[Event \"last week's pack\"]\n", encoding="utf-8")
+
+    def refuse(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    coaching = coaching_with_counts()
+    drills.annotate(make_ctx(), coaching, [], cfg(subset, tmp_path), TODAY)
+    assert old.read_text(encoding="utf-8") == "[Event \"last week's pack\"]\n"
+    assert all(d.file == "" for d in coaching.drills)  # not written: no file named
+    assert any(n.startswith("The fork drill pack could not be written") for n in coaching.notes)
+    assert [p.name for p in tmp_path.iterdir()] == ["me-drill-fork.pgn"]  # no temporary files left behind
