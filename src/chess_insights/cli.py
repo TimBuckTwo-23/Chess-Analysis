@@ -361,7 +361,7 @@ def add_analysis_args(sp: argparse.ArgumentParser, default_out: Optional[str] = 
                    help=f"minutes of practice a day the plan is sized for (default {DEFAULT_PRACTICE_MINUTES})")
     c.add_argument("--coach-llm", action="store_true",
                    help="let Claude rewrite the explanations and draft a weekly plan, every move and number checked "
-                   "(needs ANTHROPIC_API_KEY)")
+                   "(needs ANTHROPIC_API_KEY and the Anthropic SDK: pip install \"chess-insights[llm]\")")
     c.add_argument("--llm-model", default=DEFAULT_LLM_MODEL, metavar="MODEL", help=f"Claude model for --coach-llm (default {DEFAULT_LLM_MODEL})")
     c.add_argument("--maia", action="store_true",
                    help="how findable the better move was at your level (needs pip install maia2)")
@@ -499,6 +499,28 @@ def resolve_stockfish_arg(value: Optional[str]) -> Optional[str]:
     return find_stockfish(str(path))
 
 
+def llm_sdk_installed() -> bool:
+    """Whether the optional Anthropic SDK (the ``llm`` extra) can be imported, without importing it."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("anthropic") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _check_llm() -> None:
+    """One warning when --coach-llm cannot run: no API key, or no Anthropic SDK (with how to install it)."""
+    from .coach.llm import INSTALL_HINT
+
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        _say("warning: --coach-llm needs ANTHROPIC_API_KEY in the environment; the explanations use the built-in "
+             "wording.")
+    elif not llm_sdk_installed():
+        _say(f"warning: --coach-llm needs the Anthropic SDK, which is not installed; install it with {INSTALL_HINT} "
+             "(or pip install anthropic). The explanations use the built-in wording.")
+
+
 def _prepare_engine(args: argparse.Namespace) -> None:
     """Check engine options before any download or parsing, so mistakes surface in the first second."""
     args.stockfish_path = None
@@ -509,9 +531,7 @@ def _prepare_engine(args: argparse.Namespace) -> None:
     elif getattr(args, "coach_llm", False) and not getattr(args, "coach", False):
         _say("note: --coach-llm works with --coach; no LLM coaching.")
     if getattr(args, "coach", False) and args.engine and getattr(args, "coach_llm", False):
-        if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-            _say("note: --coach-llm needs ANTHROPIC_API_KEY in the environment; the explanations use the built-in "
-                 "wording.")
+        _check_llm()
     if not args.engine:
         return
     args.stockfish_path = resolve_stockfish_arg(args.stockfish)

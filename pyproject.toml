@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-llm = ["anthropic>=0.40"]  # --coach-llm and `chess-insights ask`
+llm = ["anthropic>=1.0"]  # --coach-llm and `chess-insights ask` (messages.stream with output_config)
 maia = ["maia2"]  # --maia: human move probabilities by rating (MIT; pulls in PyTorch)
 
 [project.scripts]

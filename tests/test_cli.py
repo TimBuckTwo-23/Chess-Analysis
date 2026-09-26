@@ -979,3 +979,35 @@ def test_ask_with_an_unreadable_report_says_so_once(run, tmp_path, monkeypatch):
     code, _, stderr = run("ask", "testerbob", "why?")
     assert code == 1 and "could not read the report" in stderr
     assert "previous" not in stderr and "progress" not in stderr  # not the --previous wording
+
+
+def test_coach_llm_warns_once_without_a_key_and_says_how_to_install_the_sdk(
+        chesscom, run, tmp_path, monkeypatch, fake_engine, fake_coaching):
+    args = ("report", "testerbob", "--engine", "--coach", "--coach-llm", "--out", str(tmp_path / "me"),
+            "--formats", "json")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    code, stdout, stderr = run(*args)
+    assert code == 0, stderr
+    assert (stdout + stderr).count("--coach-llm") == 1 and "ANTHROPIC_API_KEY" in stderr  # one warning
+    assert fake_coaching[-1].llm is False
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret-789")
+    monkeypatch.setattr(cli, "llm_sdk_installed", lambda: False)
+    code, stdout, stderr = run(*args)
+    assert code == 0, stderr
+    assert (stdout + stderr).count("--coach-llm") == 1 and 'pip install "chess-insights[llm]"' in stderr
+    assert "sk-ant-secret-789" not in stdout + stderr
+    assert fake_coaching[-1].llm is True  # the report says it too (the coaching adds a note)
+
+    monkeypatch.setattr(cli, "llm_sdk_installed", lambda: True)
+    code, stdout, stderr = run(*args)
+    assert code == 0 and "--coach-llm" not in stdout + stderr and fake_coaching[-1].llm is True
+
+
+def test_llm_sdk_installed_looks_for_the_package_without_importing_it(monkeypatch):
+    import importlib.util
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None if name == "anthropic" else object())
+    assert cli.llm_sdk_installed() is False
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
+    assert cli.llm_sdk_installed() is True
