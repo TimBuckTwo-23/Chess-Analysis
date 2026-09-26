@@ -618,6 +618,12 @@ def _explanation(e: Explanation, k: int, labels: Optional[dict[str, str]], view_
         if links:
             items.append(f"- {md_text(label)}: {links}")
     items += [f"- {md_text(f)}" for f in e.facts or [] if text_or_empty(f)]
+    note = getattr(e, "concept_note", None)
+    if isinstance(note, dict) and text_or_empty(note.get("text")):
+        credit = text_or_empty(note.get("credit"))
+        cite = (md_link(note.get("url"), credit) if note.get("url") else md_text(credit)) if credit else ""
+        items.append(f"- About {md_text(text_or_empty(note.get('label')) or 'this')}: {md_text(note['text'])}"
+                     + (f" ({cite})" if cite else ""))
     if isinstance(e.chart, Chart):
         t = chart_text(e.chart)
         if t:

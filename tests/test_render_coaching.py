@@ -438,3 +438,15 @@ def test_endgame_boards_are_drawn_when_the_coaching_carries_them():
     check_html(html)
     block = re.search(r'Endgames checked with the tablebase</h3>.*?</div></div>', html, re.S).group(0)
     assert "Rook ending: Kc4" in block and 'class="a a-best"' in block
+
+
+def test_concept_note_is_rendered_with_its_credit():
+    from chess_insights.report.html import _concept_note_html
+
+    note = {"label": "king safety", "text": "Keep the king <safe>.", "credit": "Capablanca, Chess Fundamentals",
+            "url": "https://www.gutenberg.org/ebooks/33870"}
+    html = _concept_note_html(note)
+    assert "About king safety:" in html and "&lt;safe&gt;" in html
+    assert 'href="https://www.gutenberg.org/ebooks/33870"' in html
+    assert _concept_note_html({}) == "" and _concept_note_html(None) == ""
+    assert "javascript" not in _concept_note_html(dict(note, url="javascript:alert(1)"))

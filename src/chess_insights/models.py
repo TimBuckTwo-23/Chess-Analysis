@@ -556,6 +556,9 @@ class Explanation:
     diagram: Optional[Diagram] = None  # the board with arrows and the two lines as strips
     chart: Optional[Chart] = None  # concept differences as bars
     drill_themes: list[str] = field(default_factory=list)  # Lichess training themes to practise this
+    # A short note on the concept behind the largest concept difference, from a public-domain classic:
+    # {"label", "text", "credit", "url"} (coach.sources.concept_notes); {} when none applies
+    concept_note: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

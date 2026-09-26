@@ -351,7 +351,7 @@ def test_concepts_chart_and_sources_with_a_stockfish_16_table(motif_hooks, monke
     chart = ex.chart
     assert chart.kind == "hbar" and chart.value_format == "signed_float2" and chart.reference == 0.0
     assert chart.labels[:2] == ["Piece activity", "King safety"] and chart.series[0].values[0] < 0
-    assert "pawns" in chart.note and [s.name for s in ex.sources][-1] == "Stockfish 16 classical evaluation terms"
+    assert "pawns" in chart.note and "Stockfish 16 classical evaluation terms" in [s.name for s in ex.sources]
 
 
 def test_explain_all_skips_positions_without_lines_and_notes_missing_concepts(motif_hooks, tmp_path):
@@ -530,3 +530,25 @@ def test_without_engine_data_coaching_still_runs_the_engine_free_steps(monkeypat
     coaching = coach.build_coaching(AnalysisContext("me", [make_game()]), [], coach.CoachConfig())
     assert ran == ["openings", "drills"]
     assert coaching.explanations == [] and "--engine" in coaching.notes[0]
+
+
+def test_concept_note_for_the_largest_difference_and_previous_position():
+    from chess_insights.coach.explain import concept_note_for, previous_position
+    from chess_insights.models import ConceptDelta
+
+    note, cites = concept_note_for([ConceptDelta("Mobility", -0.3, label="piece activity"),
+                                    ConceptDelta("King safety", -1.17, label="king safety")])
+    assert note["label"] and note["text"] and "gutenberg.org" in note["url"]
+    assert "king" in note["label"].lower()
+    assert cites and all("Project Gutenberg" in s.name for s in cites)
+    assert concept_note_for([ConceptDelta("Material", 1.0)]) == ({}, [])
+    assert concept_note_for([]) == ({}, [])
+    import chess
+
+    board = chess.Board()
+    for san in ["e4", "c5", "d4"]:
+        board.push_san(san)
+    before_d4 = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+    assert previous_position(None, ["e4", "c5", "d4"], board.epd()) == before_d4
+    assert previous_position(None, ["e4", "c5", "d4"], chess.Board().epd()) is None
+    assert previous_position(None, [], board.epd()) is None

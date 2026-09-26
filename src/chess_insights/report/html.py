@@ -2475,6 +2475,23 @@ def _concepts_html(exp: Explanation) -> str:
             f'<ul class="facts">{"".join(items)}</ul></div>')
 
 
+def _concept_note_html(note: Any) -> str:
+    """"About king safety: ..." from a classic, credited with a link (Project Gutenberg, public domain)."""
+    if not isinstance(note, dict) or not text_or_empty(note.get("text")):
+        return ""
+    label = text_or_empty(note.get("label"))
+    credit = text_or_empty(note.get("credit"))
+    url = safe_url(note.get("url"))
+    cite = (_link(url, credit) if url and credit else _esc(credit)) if credit else ""
+    return (
+        '<p class="concept-note">'
+        + (f"<strong>About {_esc(label)}:</strong> " if label else "")
+        + _esc(note["text"])
+        + (f" <cite>{cite}</cite>" if cite else "")
+        + "</p>"
+    )
+
+
 def _explanation_html(exp: Explanation, k: int, page: PageIndex) -> str:
     anchor = page.id(f"why-{k}")
     tc = text_or_empty(exp.time_class).lower()
@@ -2527,6 +2544,7 @@ def _explanation_html(exp: Explanation, k: int, page: PageIndex) -> str:
     facts = [text_or_empty(f) for f in exp.facts or [] if text_or_empty(f)]
     if facts:
         text.append('<ul class="facts">' + "".join(f"<li>{_esc(f)}</li>" for f in facts) + "</ul>")
+    text.append(_concept_note_html(getattr(exp, "concept_note", None)))
     text += [_maia_html(exp.maia, exp), _tablebase_html(exp.tablebase)]
 
     extra = [_concepts_html(exp), _opening_html(exp.opening, exp)]
@@ -3325,6 +3343,8 @@ details.study[open] summary{margin-bottom:8px}
 .ci a.motif{color:var(--ink);text-decoration:none}
 .ci a.motif:hover{border-color:var(--accent);color:var(--accent)}
 .facts{padding-left:1.1em;display:grid;gap:4px;font-size:14px;color:var(--ink-2)}
+.concept-note{font-size:14px;color:var(--ink-2);border-left:3px solid var(--axis);padding-left:10px}
+.concept-note cite{font-style:normal;display:block;margin-top:2px;font-size:13px}
 .lines{list-style:none;display:grid;gap:2px}
 .opening-facts,.concepts,.coach-block{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;min-width:0}
 .of-tables{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:12px 20px;align-items:start}

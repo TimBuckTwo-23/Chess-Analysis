@@ -147,24 +147,62 @@ class _Games:
 
 
 # --------------------------------------------------------------------------- motifs and concepts
-def detect(line: Optional[Line], role: str) -> list[Motif]:
+def detect(line: Optional[Line], role: str, previous_fen: Optional[str] = None) -> list[Motif]:
     """``motifs.detect_line`` made safe: any list is accepted, odd entries dropped, a failure is no motif."""
     if line is None or not line.moves_uci:
         return []
     try:
-        found = motifs.detect_line(line, role) or []
+        try:
+            found = (motifs.detect_line(line, role, previous_fen) if previous_fen
+                     else motifs.detect_line(line, role)) or []
+        except TypeError:  # a detector without the optional previous_fen argument
+            found = motifs.detect_line(line, role) or []
     except Exception as exc:  # noqa: BLE001 — a detector bug must not cost the position its explanation
         log.debug("motif detection failed on %s: %s", line.fen, exc)
         return []
     return [m for m in found if isinstance(m, Motif)]
 
 
-def split_motifs(best: Optional[Line], refutation: Optional[Line]) -> tuple[list[Motif], list[Motif]]:
+def split_motifs(best: Optional[Line], refutation: Optional[Line],
+                 previous_fen: Optional[str] = None) -> tuple[list[Motif], list[Motif]]:
     """(what your move allowed: the opponent's patterns along the refutation, what you missed: yours along the
-    best line)."""
+    best line). ``previous_fen``: the position before your opponent's last move, which tells the best line's
+    first capture of a free piece from the end of a trade."""
     allowed = [m for m in detect(refutation, "refutation") if m.side == "opponent"]
-    missed = [m for m in detect(best, "best") if m.side == "you"]
+    missed = [m for m in detect(best, "best", previous_fen) if m.side == "you"]
     return allowed, missed
+
+
+def previous_position(start: Optional[str], moves_before: Sequence[str], epd: str) -> Optional[str]:
+    """The FEN before the last move of ``moves_before`` (your opponent's move into the position), or None when
+    the moves don't lead to ``epd``."""
+    if not moves_before:
+        return None
+    try:
+        board = chess.Board(start or chess.STARTING_FEN)
+        for san in moves_before[:-1]:
+            board.push_san(san)
+        previous = board.fen()
+        board.push_san(moves_before[-1])
+    except ValueError:
+        return None
+    return previous if board.epd() == epd else None
+
+
+def concept_note_for(deltas: Sequence[ConceptDelta]) -> tuple[dict, list[Source]]:
+    """The note on the concept with the largest difference, and its citations ({}, [] when none covers it)."""
+    if not deltas:
+        return {}, []
+    try:
+        from .sources.concept_notes import concept_note, note_sources
+    except ImportError:  # the notes ship with the package; be safe in a trimmed install
+        return {}, []
+    for delta in sorted(deltas, key=lambda d: -abs(d.value)):
+        note = concept_note(delta.term) or concept_note(delta.label)
+        if note:
+            return ({"label": note.get("label", ""), "text": note.get("text", ""), "credit": note.get("credit", ""),
+                     "url": note.get("url", "")}, note_sources(note))
+    return {}, []
 
 
 @dataclass
@@ -494,7 +532,8 @@ def explain_position(
     shown = shown_line(best, refutation)  # the line after your move in the text and the strip
     # No motifs, drill themes or concept comparison for a move the deeper search does not call an error, and no
     # concepts when a forced mate decides a line (material and structure on the way to it say nothing).
-    allowed, missed = ([], []) if same or close else split_motifs(best, refutation)
+    previous = previous_position(games.start.get(pos.game_id), pos.moves_before, pos.epd)
+    allowed, missed = ([], []) if same or close else split_motifs(best, refutation, previous)
     cmp = Comparison()
     if concept_tool is not None and not (same or close or _mate_line(best, refutation)):
         cmp = concept_tool.compare(pos.fen, best, refutation, pos.color)
@@ -504,6 +543,8 @@ def explain_position(
     sources = [Source(name=f"{engine_name}, depth {depth}" if depth else engine_name)]
     if cmp.deltas:
         sources.append(Source(name="Stockfish 16 classical evaluation terms"))
+    note, note_cites = concept_note_for(cmp.deltas)
+    sources += note_cites
     kept = [m for m in list(allowed) + list(missed) if m.theme in gated]
     best_label = _label(pos.fen, best.moves_uci[0])
     return Explanation(
@@ -529,6 +570,7 @@ def explain_position(
         diagram=build_diagram(games, pos, best, shown, allowed, missed, gated, close),
         chart=concept_chart(pos, best_label, cmp.deltas),
         drill_themes=list(dict.fromkeys(m.theme for m in kept)),
+        concept_note=note,
     )
 
 
